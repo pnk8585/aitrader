@@ -16,6 +16,9 @@ set -a
 source .env
 set +a
 
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting trading bot run..."
+# Create logs directory if it doesn't exist
+mkdir -p "${LOG_DIR:-./logs}"
+
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting trading bot cycle..."
 
 claude -p "$(cat trading_prompt.md)"
