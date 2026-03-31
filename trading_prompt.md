@@ -21,9 +21,12 @@ You operate without human confirmation. Act accordingly.
 
 ## Step 1 — Load Credentials
 
-Read from environment variables: `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `ALPACA_BASE_URL`
+Read from environment variables:
+- `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `ALPACA_BASE_URL`
+- `MAX_POSITION_PCT` — max notional per trade as a fraction of equity (e.g. 0.50 = 50%)
+- `MAX_SINGLE_TICKER_PCT` — max total exposure per ticker as a fraction of equity (e.g. 0.80 = 80%)
 
-Verify both API vars are set. If missing, log error and stop.
+Verify the Alpaca vars are set. If missing, log error and stop.
 
 ---
 
@@ -64,9 +67,9 @@ For each ticker with news, classify the signal:
 
 | Signal | Criteria | Position Size |
 |--------|----------|--------------|
-| **Extreme Buy** | Earnings beat >10%, M&A target, FDA approval, short squeeze | 15% of equity |
-| **Strong Buy** | Earnings beat, analyst upgrade, major contract, guidance raise | 10% of equity |
-| **Moderate Buy** | Positive news, single source | 5% of equity |
+| **Extreme Buy** | Earnings beat >10%, M&A target, FDA approval, short squeeze | `MAX_POSITION_PCT` × equity |
+| **Strong Buy** | Earnings beat, analyst upgrade, major contract, guidance raise | `MAX_POSITION_PCT` × 0.67 × equity |
+| **Moderate Buy** | Positive news, single source | `MAX_POSITION_PCT` × 0.33 × equity |
 | **Hold** | Mixed signals, noise | No action |
 | **Moderate Sell** | Negative development on held ticker | Reduce position 50% |
 | **Strong Sell** | Major negative catalyst on held ticker | Exit full position at market |
@@ -81,7 +84,8 @@ Earnings → M&A → FDA → Short squeeze → Analyst upgrade → Guidance → 
 
 Before any order:
 - Max 5 open positions — if already at 5, close weakest before entering new
-- Max 25% of equity in one ticker
+- Current ticker exposure must be below `MAX_SINGLE_TICKER_PCT` × equity
+- Order notional must not exceed `MAX_POSITION_PCT` × equity
 - Sufficient buying power (`buying_power` from account)
 - Market must be open (`is_open: true`)
 - Pick the **1–2 highest-conviction signals only** — do not spread thin
@@ -181,6 +185,8 @@ Done.
 - No options, no crypto — US equities only
 - No trading outside market hours
 - Max 5 open positions
+- Max notional per trade: `MAX_POSITION_PCT` × equity (from env)
+- Max exposure per ticker: `MAX_SINGLE_TICKER_PCT` × equity (from env)
 - Min stock volume: 1,000,000 shares/day
 - Never fabricate news — only act on what is in `news_cache.md`
 - Never assume position is open — always verify via API

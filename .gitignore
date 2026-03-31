@@ -4,3 +4,4 @@ news_cache.md
 __pycache__/
 *.pyc
 .orchestration/
+.env.paper
