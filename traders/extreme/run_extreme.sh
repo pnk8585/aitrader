@@ -66,9 +66,9 @@ run_cycle() {
   # NO NEWS FETCHING — extreme trader is pure momentum-based
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] Mode: EXTREME MOMENTUM (no news)"
 
-  # Run extreme trader (default: opencode with zai-coding-plan/glm-5.1)
+  # Run extreme trader (default: opencode with opencode-go/kimi-k2.5)
   local trader_runner="${EXTREME_TRADER_RUNNER:-opencode}"
-  local trader_model="${EXTREME_TRADER_MODEL:-zai-coding-plan/glm-5.1}"
+  local trader_model="${EXTREME_TRADER_MODEL:-opencode-go/kimi-k2.5}"
 
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] Running extreme momentum trader  [runner=$trader_runner model=$trader_model]"
   run_stage "$trader_runner" "$trader_model" \
