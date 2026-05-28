@@ -239,12 +239,47 @@ def run_cycle():
         print(json.dumps(report))
         return
 
-    # --- PRE-MARKET CATALYST RESEARCH ---
+    # --- PRE-MARKET CATALYST RESEARCH & LIQUIDATION ---
     if premarket_window:
         report["action_taken"] = "PRE_MARKET_SCAN"
+        
+        # Automatic Pre-Market Liquidation of any overnight crypto/stock positions
+        liquidated_symbols = []
+        if positions:
+            for pos in positions:
+                symbol = pos["symbol"]
+                qty = float(pos["qty"])
+                entry_price = float(pos["avg_entry_price"])
+                current_price = float(pos["current_price"])
+                unrealized_plpc = float(pos["unrealized_plpc"])
+                
+                close_url = f"{ALPACA_BASE_URL}/v2/positions/{symbol}"
+                close_res = requests.delete(close_url, headers=headers)
+                if close_res.status_code in [200, 201, 204]:
+                    liquidated_symbols.append(symbol)
+                    log_trade(
+                        action="SELL",
+                        ticker=symbol,
+                        asset_type="STOCK" if symbol not in CRYPTO_PAIRS else "CRYPTO",
+                        signal_strength="PREMARKET_LIQUIDATION",
+                        momentum_pct=0.0,
+                        entry_price=entry_price,
+                        current_price=current_price,
+                        unrealized_plpc=unrealized_plpc,
+                        order_id=close_res.json().get("id") if close_res.text else None,
+                        client_order_id=None,
+                        quantity=qty,
+                        estimated_value_usd=qty * current_price,
+                        position_size_pct=0.0,
+                        portfolio_equity=equity,
+                        reason="Pre-market Liquidation - Closing overnight positions to start stock day clean!"
+                    )
+            # Clear peaks state
+            save_state({})
+            
         news = fetch_premarket_news()
         report["premarket_news"] = news
-        report["details"] = f"Pre-market window active. Fetched {len(news)} latest news articles."
+        report["details"] = f"Pre-market window active. Liquidated overnight positions: {', '.join(liquidated_symbols) if liquidated_symbols else 'None'}. Fetched {len(news)} latest news articles."
         print(json.dumps(report))
         return
 
