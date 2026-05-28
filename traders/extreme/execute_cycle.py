@@ -21,9 +21,9 @@ headers = {
     "Content-Type": "application/json"
 }
 
-# Universe configurations
+# Universe configurations (Added Leveraged ETFs: TQQQ, SOXL)
 MOMENTUM_STOCKS = [
-    "TSLA", "NVDA", "AMD", "MSTR", "COIN", "SMCI", 
+    "TQQQ", "SOXL", "TSLA", "NVDA", "AMD", "MSTR", "COIN", "SMCI", 
     "PLTR", "ROKU", "SNAP", "SHOP", "AAPL", "MSFT",
     "GOOGL", "AMZN", "META", "NFLX", "CRM", "UBER",
     "ABNB", "PYPL", "SQ", "HOOD", "SOFI", "LCID",
@@ -122,7 +122,7 @@ def fetch_premarket_news():
             print(f"Error fetching news: {e}")
             
     news_items = sorted(news_items, key=lambda x: x["created_at"], reverse=True)
-    return news_items[:15] # Keep top 15 news items
+    return news_items[:15]
 
 def run_cycle():
     report = {
@@ -175,10 +175,16 @@ def run_cycle():
             next_close = datetime.fromisoformat(clock_data["next_close"])
             now_utc = datetime.now(timezone.utc)
             time_to_close_seconds = (next_close - now_utc).total_seconds()
-            if 0 < time_to_close_seconds <= 600: # 10 minutes = 600s
+            if 0 < time_to_close_seconds <= 600: 
                 liquidation_window = True
         except Exception as e:
             print(f"Error calculating liquidation window: {e}")
+            
+    # Check for Sunday Night Liquidation (10 minutes before Monday open - Athens EEST)
+    now_local = datetime.now()
+    is_sunday_night = (now_local.weekday() == 6 and now_local.hour == 22 and now_local.minute >= 50)
+    if is_sunday_night:
+        liquidation_window = True
             
     # Check for Pre-market scanning window (30 minutes before open)
     premarket_window = False
@@ -187,7 +193,7 @@ def run_cycle():
             next_open = datetime.fromisoformat(clock_data["next_open"])
             now_utc = datetime.now(timezone.utc)
             time_to_open_seconds = (next_open - now_utc).total_seconds()
-            if 0 < time_to_open_seconds <= 1800: # 30 minutes = 1800s
+            if 0 < time_to_open_seconds <= 1800: 
                 premarket_window = True
         except Exception as e:
             print(f"Error calculating pre-market window: {e}")
@@ -195,7 +201,7 @@ def run_cycle():
     report["liquidation_active"] = liquidation_window
     report["premarket_active"] = premarket_window
 
-    # --- END OF DAY LIQUIDATION ---
+    # --- END OF DAY / WEEKEND LIQUIDATION ---
     if liquidation_window:
         report["action_taken"] = "LIQUIDATION"
         liquidated_symbols = []
@@ -213,7 +219,7 @@ def run_cycle():
                 log_trade(
                     action="SELL",
                     ticker=symbol,
-                    asset_type="STOCK",
+                    asset_type="STOCK" if symbol not in CRYPTO_PAIRS else "CRYPTO",
                     signal_strength="EOD_LIQUIDATION",
                     momentum_pct=0.0,
                     entry_price=entry_price,
@@ -225,11 +231,11 @@ def run_cycle():
                     estimated_value_usd=qty * current_price,
                     position_size_pct=0.0,
                     portfolio_equity=equity,
-                    reason="End of Day Liquidation - Starting clean tomorrow!"
+                    reason="End of Day Liquidation - Starting clean tomorrow!" if not is_sunday_night else "Weekend Crypto Liquidation - Starting clean for stock market Monday!"
                 )
         # Clear peaks state
         save_state({})
-        report["details"] = f"End of Day liquidation active. Closed all positions: {', '.join(liquidated_symbols) if liquidated_symbols else 'None'}."
+        report["details"] = f"Liquidation active. Closed all positions: {', '.join(liquidated_symbols) if liquidated_symbols else 'None'}."
         print(json.dumps(report))
         return
 
@@ -249,7 +255,7 @@ def run_cycle():
     for sym in active_symbols:
         new_state[sym] = state.get(sym, {"peak_plpc": 0.0})
     
-    # 4. Manage Open Positions First (during regular market hours)
+    # 4. Manage Open Positions First
     managed_any = False
     for pos in positions:
         symbol = pos["symbol"]
@@ -349,7 +355,7 @@ def run_cycle():
         if pos_res.status_code == 200:
             positions = pos_res.json()
             
-    # 5. Check if we have open positions limit
+    # 5. Check open positions limit
     if len(positions) >= 5:
         report["action_taken"] = "SKIP"
         report["details"] = "Max positions limit reached (5 open positions)."
@@ -396,7 +402,6 @@ def run_cycle():
             reason = target_data.get("reason", "Pre-market catalyst")
             
             if symbol and not any(p["symbol"] == symbol for p in positions):
-                # Order size
                 order_size_usd = buying_power
                 if equity >= 200.0:
                     max_position_pct = float(os.getenv("MAX_POSITION_PCT", "0.50"))
@@ -419,7 +424,6 @@ def run_cycle():
                     order_url = f"{ALPACA_BASE_URL}/v2/orders"
                     order_res = requests.post(order_url, headers=headers, json=order_data)
                     
-                    # Delete target file so we only buy once
                     try:
                         os.remove(PREMARKET_TARGET_FILE)
                     except:
