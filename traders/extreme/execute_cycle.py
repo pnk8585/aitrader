@@ -406,6 +406,16 @@ def run_cycle():
     
     # 4. Manage Open Positions First
     managed_any = False
+    
+    # Keep track of stale crypto positions for rotation
+    can_rotate_crypto = False
+    stale_crypto_symbol = None
+    stale_crypto_unrealized_plpc = 0.0
+    stale_crypto_qty = 0.0
+    stale_crypto_entry_price = 0.0
+    stale_crypto_current_price = 0.0
+    stale_crypto_age_hours = 0.0
+    
     for pos in positions:
         symbol = pos["symbol"]
         unrealized_plpc = float(pos["unrealized_plpc"]) * 100.0 
@@ -455,6 +465,18 @@ def run_cycle():
             "reason": f"Within limits (peak: +{round(peak_plpc, 2)}%)"
         }
         
+        # Check for Stale Crypto Position Rotation rule:
+        # "If a crypto position is held >30 minutes (0.5 hours) and is flat/not rising (<1.0%), we flag it for rotation!"
+        if asset_type == "CRYPTO" and age_hours >= 0.5 and unrealized_plpc < 1.0 and not sell_triggered:
+            can_rotate_crypto = True
+            stale_crypto_symbol = symbol
+            stale_crypto_unrealized_plpc = unrealized_plpc
+            stale_crypto_qty = qty
+            stale_crypto_entry_price = entry_price
+            stale_crypto_current_price = current_price
+            stale_crypto_age_hours = age_hours
+            pos_report["reason"] += " [FLAGGED FOR POTENTIAL ROTATION]"
+        
         if sell_triggered:
             if asset_type == "CRYPTO" or market_open:
                 close_url = f"{ALPACA_BASE_URL}/v2/positions/{symbol}"
@@ -484,6 +506,9 @@ def run_cycle():
                     )
                     if symbol in new_state:
                         del new_state[symbol]
+                    # Since it was sold, it can't be rotated anymore
+                    if symbol == stale_crypto_symbol:
+                        can_rotate_crypto = False
                 else:
                     pos_report["action"] = "SELL_FAILED"
                     pos_report["reason"] = f"Failed to close position: {close_res.text}"
@@ -579,8 +604,9 @@ def run_cycle():
             except:
                 pass
 
-    # 7. Regular Hour Momentum Scan (if we have buying power and no buy executed yet)
-    elif buying_power > 0:
+    # 7. Regular Hour Momentum Scan & Stale Crypto Rotation Check
+    # (Triggered if buying_power > 0 OR if we have a stale crypto position flagged for rotation)
+    elif buying_power > 0 or can_rotate_crypto:
         candidates = []
         asset_type = "STOCK"
         
@@ -630,9 +656,9 @@ def run_cycle():
                             "volume": prev_daily.get("v", 0)
                         })
         
-        # Fallback to crypto
+        # Fallback to crypto (this will be scanned if stock market closed, or if we are rotating crypto)
         stock_signals = [c for c in candidates if c["change_pct"] >= 2.0]
-        if not market_open or not stock_signals:
+        if not market_open or not stock_signals or can_rotate_crypto:
             asset_type = "CRYPTO"
             crypto_symbols_str = ",".join(CRYPTO_PAIRS)
             crypto_url = f"https://data.alpaca.markets/v1beta3/crypto/us/snapshots?symbols={crypto_symbols_str}"
@@ -669,11 +695,25 @@ def run_cycle():
         
         signals = [c for c in candidates if c["change_pct"] >= 2.0]
         
+        # Decide if we execute rotation or normal purchase
         if signals:
             best_candidate = signals[0]
             symbol = best_candidate["symbol"]
             change_pct = best_candidate["change_pct"]
             current_price = best_candidate["current_price"]
+            
+            # Rotation Logic: Only rotate if the new signal is stronger!
+            # The new signal must have change_pct >= 2.5% to trigger rotation.
+            is_rotation_execution = False
+            if buying_power <= 0 and can_rotate_crypto:
+                if change_pct >= 2.5:
+                    is_rotation_execution = True
+                else:
+                    # New signal not strong enough to rotate
+                    report["action_taken"] = "SKIP"
+                    report["details"] = f"Stale crypto {stale_crypto_symbol} flagged, but best new signal {symbol} (+{round(change_pct, 2)}%) is not strong enough to trigger rotation (needs >= 2.5%)."
+                    print(json.dumps(report))
+                    return
             
             # Position Sizing
             max_position_pct = float(os.getenv("MAX_POSITION_PCT", "0.50"))
@@ -689,6 +729,52 @@ def run_cycle():
                 
             order_size_usd = equity * max_position_pct * sizing_mult
             
+            # If executing rotation, we sell the stale position FIRST!
+            if is_rotation_execution:
+                # Close the stale crypto position
+                close_url = f"{ALPACA_BASE_URL}/v2/positions/{stale_crypto_symbol}"
+                close_res = requests.delete(close_url, headers=headers)
+                if close_res.status_code in [200, 201, 204]:
+                    should_notify = True
+                    msg_lines.append(f"🔄 **Περιστροφή Crypto**: Πωλήθηκε το στάσιμο **{stale_crypto_symbol}** (+{round(stale_crypto_unrealized_plpc, 2)}% μετά από {round(stale_crypto_age_hours, 2)} ώρες).")
+                    
+                    log_trade(
+                        action="SELL",
+                        ticker=stale_crypto_symbol,
+                        asset_type="CRYPTO",
+                        signal_strength="NO_MOMENTUM",
+                        momentum_pct=0.0,
+                        entry_price=stale_crypto_entry_price,
+                        current_price=stale_crypto_current_price,
+                        unrealized_plpc=stale_crypto_unrealized_plpc / 100.0,
+                        order_id=close_res.json().get("id") if close_res.text else None,
+                        client_order_id=None,
+                        quantity=stale_crypto_qty,
+                        estimated_value_usd=stale_crypto_qty * stale_crypto_current_price,
+                        position_size_pct=0.0,
+                        portfolio_equity=equity,
+                        reason=f"Stale Crypto Rotation - Sold to rotate capital into hot {symbol} (+{round(change_pct, 2)}%)."
+                    )
+                    # Clean up from state
+                    if stale_crypto_symbol in new_state:
+                        del new_state[stale_crypto_symbol]
+                        save_state(new_state)
+                        
+                    # Wait 1.5 seconds for Alpaca to update buying power
+                    time.sleep(1.5)
+                    
+                    # Refresh account info for updated buying power
+                    acc_res = requests.get(acc_url, headers=headers)
+                    if acc_res.status_code == 200:
+                        account = acc_res.json()
+                        buying_power = float(account.get("buying_power", 0.0))
+                else:
+                    report["action_taken"] = "ROTATE_FAILED"
+                    report["details"] = f"Failed to close stale position {stale_crypto_symbol} to initiate rotation."
+                    print(json.dumps(report))
+                    return
+            
+            # Small Account Rule
             if equity < 200.0:
                 order_size_usd = buying_power
                 reason_rule = "small account rule (< $200 equity)"
@@ -721,7 +807,11 @@ def run_cycle():
                     report["details"] = f"Successfully placed buy order for {symbol} of amount ${round(order_size_usd, 2)}."
                     report["order_id"] = order.get("id")
                     should_notify = True
-                    msg_lines.append(f"🛒 **Αγοράστηκε {symbol}** (${round(order_size_usd, 2)} - {signal_strength})")
+                    
+                    if is_rotation_execution:
+                        msg_lines.append(f"🛒 **Περιστροφή Crypto**: Αγοράστηκε το νέο hot **{symbol}** (${round(order_size_usd, 2)} - {signal_strength} +{round(change_pct, 2)}%!)")
+                    else:
+                        msg_lines.append(f"🛒 **Αγοράστηκε {symbol}** (${round(order_size_usd, 2)} - {signal_strength})")
                     
                     log_trade(
                         action="BUY",
@@ -776,10 +866,7 @@ def run_cycle():
         else:
             msg_lines.append("🔍 Καμία ανοιχτή θέση (100% Cash).")
             
-        # Print to stdout so Hermes delivers it verbatim
         print("\n".join(msg_lines))
-        
-        # Save notify state with updated time
         notify_state["last_notify_time"] = now_utc.isoformat().replace("+00:00", "Z")
         
     notify_state["last_market_open"] = market_open
