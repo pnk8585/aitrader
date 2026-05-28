@@ -6,3 +6,5 @@ __pycache__/
 .orchestration/
 .env.paper
 .eval_last_run
+traders/extreme/state.json
+traders/extreme/premarket_target.json
