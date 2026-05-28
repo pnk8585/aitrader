@@ -8,3 +8,5 @@ __pycache__/
 .eval_last_run
 traders/extreme/state.json
 traders/extreme/premarket_target.json
+traders/extreme/last_notify.json
+
