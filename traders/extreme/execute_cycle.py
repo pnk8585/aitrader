@@ -129,7 +129,7 @@ def run_cycle():
     if acc_res.status_code != 200:
         report["status"] = "error"
         report["details"] = f"Failed to fetch account info: {acc_res.text}"
-        print(json.dumps(report))
+        pass # print(json.dumps(report))
         return
         
     account = acc_res.json()
@@ -297,14 +297,14 @@ def run_cycle():
     if len(positions) >= 5:
         report["action_taken"] = "SKIP"
         report["details"] = "Max positions limit reached (5 open positions)."
-        print(json.dumps(report))
+        pass # print(json.dumps(report))
         return
         
     # If we still hold a legacy stock position (e.g., market is closed), we CANNOT buy crypto yet
     if any(p.get("asset_class") == "us_equity" for p in positions):
         report["action_taken"] = "SKIP"
         report["details"] = "Holding legacy stock position. Waiting for market open to liquidate."
-        print(json.dumps(report))
+        pass # print(json.dumps(report))
         return
         
     if buying_power <= 0 and not can_rotate:
@@ -334,7 +334,7 @@ def run_cycle():
                 portfolio_equity=equity,
                 reason="No buying power — position fully deployed"
             )
-        print(json.dumps(report))
+        pass # print(json.dumps(report))
         return
 
     # --- CRYPTO MOMENTUM SCAN & STALE POSITION ROTATION ---
@@ -390,7 +390,7 @@ def run_cycle():
             else:
                 report["action_taken"] = "SKIP"
                 report["details"] = f"Stale position {stale_symbol} flagged, but best new signal {symbol} (+{round(change_pct, 2)}%) is not strong enough to trigger rotation (needs >= 2.5%)."
-                print(json.dumps(report))
+                pass # print(json.dumps(report))
                 return
         
         # Position Sizing
@@ -447,7 +447,7 @@ def run_cycle():
             else:
                 report["action_taken"] = "ROTATE_FAILED"
                 report["details"] = f"Failed to close stale position {stale_symbol} to initiate rotation."
-                print(json.dumps(report))
+                pass # print(json.dumps(report))
                 return
         
         # Small Account Rule
