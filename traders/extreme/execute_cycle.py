@@ -24,6 +24,15 @@ headers = {
 # Crypto-Only Universe (PDT Exempt, 24/7 trading)
 CRYPTO_PAIRS = ["BTC/USD", "ETH/USD", "SOL/USD", "AVAX/USD", "LINK/USD"]
 
+# Alpaca crypto fee ~0.15-0.25% per side => ~0.5% round-trip. Buffer to ~0.5% to cover slippage.
+ROUND_TRIP_FEE_PCT = 0.5
+
+# Crypto-optimized ride-the-wave trailing stops (crypto is more volatile than stocks)
+TTP_PEAK_PCT = 3.0          # Trailing-Take-Profit: activate after +3.0% peak
+TTP_GIVEBACK_PCT = 1.0      # Sell if we give back 1.0% from peak
+PLOCK_PEAK_PCT = 5.0        # Profit-Lock: activate after +5.0% peak
+PLOCK_FLOOR_PCT = 3.0       # Sell if we drop below +3.0% after hitting +5.0%
+
 LOG_DIR = "PROJECT_ROOT/logs"
 os.makedirs(LOG_DIR, exist_ok=True)
 
@@ -122,7 +131,33 @@ def run_cycle():
     notify_state = load_notify_state()
     should_notify = False
     msg_lines = []
-    
+
+    # Heartbeat + notify emitter. Called at every exit path so hourly updates are
+    # never skipped by an early return (rotation-skip, rotate-failed, etc.).
+    def finalize():
+        nonlocal should_notify
+        last_notify_str = notify_state.get("last_notify_time", "1970-01-01T00:00:00Z")
+        last_notify_time = datetime.fromisoformat(last_notify_str.replace("Z", "+00:00"))
+        now_utc = datetime.now(timezone.utc)
+        seconds_since_last_notify = (now_utc - last_notify_time).total_seconds()
+        if seconds_since_last_notify >= 3600.0:
+            should_notify = True
+            msg_lines.insert(0, "⏱️ **Alpaca Hourly Update:**")
+        if should_notify:
+            pos_lines = []
+            for p in positions:
+                sym = p["symbol"]
+                pl = float(p["unrealized_plpc"]) * 100.0
+                peak = new_state.get(sym, {}).get("peak_plpc", 0.0)
+                pos_lines.append(f"📈 **{sym}**: {round(pl, 2)}% (Peak: +{round(peak, 2)}%)")
+            if pos_lines:
+                msg_lines.extend(pos_lines)
+            else:
+                msg_lines.append("🔍 Καμία ανοιχτή θέση (100% Cash).")
+            print("\n".join(msg_lines))
+            notify_state["last_notify_time"] = now_utc.isoformat().replace("+00:00", "Z")
+        save_notify_state(notify_state)
+
     # 1. Fetch Account Info
     acc_url = f"{ALPACA_BASE_URL}/v2/account"
     acc_res = requests.get(acc_url, headers=headers, timeout=10)
@@ -200,21 +235,21 @@ def run_cycle():
             sell_reason = "Overnight Stock Clean-up (Transitioning to Crypto-Only!)"
             
         # Trailing Take Profit (TTP) - Crypto only
-        elif peak_plpc >= 2.0 and unrealized_plpc <= (peak_plpc - 0.75):
+        elif peak_plpc >= TTP_PEAK_PCT and unrealized_plpc <= (peak_plpc - TTP_GIVEBACK_PCT):
             sell_triggered = True
             sell_reason = f"Trailing Take Profit hit (Peak: +{round(peak_plpc, 2)}% | Sold at: +{round(unrealized_plpc, 2)}%)"
         # Profit Lock - Crypto only
-        elif peak_plpc >= 2.5 and unrealized_plpc < 2.0:
+        elif peak_plpc >= PLOCK_PEAK_PCT and unrealized_plpc < PLOCK_FLOOR_PCT:
             sell_triggered = True
             sell_reason = f"Profit lock protection (Peak: +{round(peak_plpc, 2)}% | Sold at: +{round(unrealized_plpc, 2)}%)"
         # Stop-loss (-3.5%) - Crypto only
         elif unrealized_plpc <= -3.5:
             sell_triggered = True
             sell_reason = f"Stop-loss hit ({round(unrealized_plpc, 2)}% <= -3.5%)"
-        # Breakeven Protection - Crypto only
-        elif peak_plpc >= 1.0 and unrealized_plpc <= 0.2:
+        # Breakeven Protection - Crypto only (exit above fee floor so we lock NET-positive)
+        elif peak_plpc >= 1.0 and unrealized_plpc <= ROUND_TRIP_FEE_PCT:
             sell_triggered = True
-            sell_reason = f"Breakeven protection (Peak was +{round(peak_plpc, 2)}% | Current: +{round(unrealized_plpc, 2)}%)"
+            sell_reason = f"Breakeven protection (Peak was +{round(peak_plpc, 2)}% | Current: +{round(unrealized_plpc, 2)}% | fee floor +{ROUND_TRIP_FEE_PCT}%)"
         # Time-stop (1 hour) - Crypto only
         elif age_hours > 1.0:
             sell_triggered = True
@@ -228,8 +263,10 @@ def run_cycle():
             "reason": f"Within limits (peak: +{round(peak_plpc, 2)}%)" if not sell_triggered else sell_reason
         }
         
-        # Check for Stale Crypto Position Rotation rule (held >30 mins, flat <1.0%)
-        if asset_type == "CRYPTO" and age_hours >= 0.5 and unrealized_plpc < 1.0 and not sell_triggered:
+        # Check for Stale Crypto Position Rotation rule (held >30 mins, flat <1.0%).
+        # Keep the FIRST stale candidate found (not can_rotate) so multiple stale
+        # positions don't overwrite each other to just the last one.
+        if asset_type == "CRYPTO" and age_hours >= 0.5 and unrealized_plpc < 1.0 and not sell_triggered and not can_rotate:
             can_rotate = True
             stale_symbol = symbol
             stale_unrealized_plpc = unrealized_plpc
@@ -296,7 +333,6 @@ def run_cycle():
     # 5. Check open positions limit
     skip_buying = False
     skip_reason = ""
-    # 5. Check open positions limit
     if len(positions) >= 5:
         report["action_taken"] = "SKIP"
         report["details"] = "Max positions limit reached (5 open positions)."
@@ -394,7 +430,7 @@ def run_cycle():
                 else:
                     report["action_taken"] = "SKIP"
                     report["details"] = f"Stale position {stale_symbol} flagged, but best new signal {symbol} (+{round(change_pct, 2)}%) is not strong enough to trigger rotation (needs >= 2.5%)."
-                    pass # print(json.dumps(report))
+                    finalize()
                     return
         
             # Position Sizing
@@ -451,7 +487,7 @@ def run_cycle():
                 else:
                     report["action_taken"] = "ROTATE_FAILED"
                     report["details"] = f"Failed to close stale position {stale_symbol} to initiate rotation."
-                    pass # print(json.dumps(report))
+                    finalize()
                     return
         
             # Small Account Rule
@@ -520,35 +556,8 @@ def run_cycle():
             report["action_taken"] = "SKIP"
             report["details"] = "No momentum signals found."
 
-    # --- DECIDE HOURLY NOTIFICATION HEARTBEAT ---
-    last_notify_str = notify_state.get("last_notify_time", "1970-01-01T00:00:00Z")
-    last_notify_time = datetime.fromisoformat(last_notify_str.replace("Z", "+00:00"))
-    now_utc = datetime.now(timezone.utc)
-    seconds_since_last_notify = (now_utc - last_notify_time).total_seconds()
-    
-    # Heartbeat trigger (60 minutes = 3600 seconds)
-    if seconds_since_last_notify >= 3600.0:
-        should_notify = True
-        msg_lines.insert(0, "⏱️ **Hourly Update:**")
-
-    # If should_notify is True, construct and print the beautiful concise Greek message!
-    if should_notify:
-        pos_lines = []
-        for p in positions:
-            sym = p["symbol"]
-            pl = float(p["unrealized_plpc"]) * 100.0
-            peak = new_state.get(sym, {}).get("peak_plpc", 0.0)
-            pos_lines.append(f"📈 **{sym}**: {round(pl, 2)}% (Peak: +{round(peak, 2)}%)")
-        
-        if pos_lines:
-            msg_lines.extend(pos_lines)
-        else:
-            msg_lines.append("🔍 Καμία ανοιχτή θέση (100% Cash).")
-            
-        print("\n".join(msg_lines))
-        notify_state["last_notify_time"] = now_utc.isoformat().replace("+00:00", "Z")
-        
-    save_notify_state(notify_state)
+    # --- HOURLY NOTIFICATION HEARTBEAT + NOTIFY ---
+    finalize()
 
 if __name__ == "__main__":
     run_cycle()
