@@ -92,7 +92,7 @@ def log_trade(action, ticker, asset_type, signal_strength, momentum_pct, entry_p
 def get_position_age_hours(symbol):
     try:
         url = f"{ALPACA_BASE_URL}/v2/orders?status=filled&symbols={symbol}&limit=10"
-        response = requests.get(url, headers=headers)
+        response = requests.get(url, headers=headers, timeout=10)
         if response.status_code == 200:
             orders = response.json()
             buy_orders = [o for o in orders if o['side'] == 'buy']
@@ -125,7 +125,7 @@ def run_cycle():
     
     # 1. Fetch Account Info
     acc_url = f"{ALPACA_BASE_URL}/v2/account"
-    acc_res = requests.get(acc_url, headers=headers)
+    acc_res = requests.get(acc_url, headers=headers, timeout=10)
     if acc_res.status_code != 200:
         report["status"] = "error"
         report["details"] = f"Failed to fetch account info: {acc_res.text}"
@@ -138,14 +138,14 @@ def run_cycle():
     
     # 2. Fetch Clock Info (Needed for Stock market hours for SMCI/PLTR liquidation)
     clock_url = f"{ALPACA_BASE_URL}/v2/clock"
-    clock_res = requests.get(clock_url, headers=headers)
+    clock_res = requests.get(clock_url, headers=headers, timeout=10)
     market_open = False
     if clock_res.status_code == 200:
         market_open = clock_res.json().get("is_open", False)
     
     # 3. Fetch Positions
     pos_url = f"{ALPACA_BASE_URL}/v2/positions"
-    pos_res = requests.get(pos_url, headers=headers)
+    pos_res = requests.get(pos_url, headers=headers, timeout=10)
     positions = []
     if pos_res.status_code == 200:
         positions = pos_res.json()
@@ -243,7 +243,7 @@ def run_cycle():
             # Stocks can only close if stock market is open. Crypto can close 24/7.
             if asset_type == "CRYPTO" or market_open:
                 close_url = f"{ALPACA_BASE_URL}/v2/positions/{symbol}"
-                close_res = requests.delete(close_url, headers=headers)
+                close_res = requests.delete(close_url, headers=headers, timeout=10)
                 if close_res.status_code in [200, 201, 204]:
                     pos_report["action"] = "SELL"
                     pos_report["reason"] = sell_reason
@@ -284,32 +284,37 @@ def run_cycle():
 
     # Refresh account and positions if we sold anything
     if managed_any:
-        acc_res = requests.get(acc_url, headers=headers)
+        acc_res = requests.get(acc_url, headers=headers, timeout=10)
         if acc_res.status_code == 200:
             account = acc_res.json()
             buying_power = float(account.get("buying_power", 0.0))
             equity = float(account.get("equity", 0.0))
-        pos_res = requests.get(pos_url, headers=headers)
+        pos_res = requests.get(pos_url, headers=headers, timeout=10)
         if pos_res.status_code == 200:
             positions = pos_res.json()
             
     # 5. Check open positions limit
+    skip_buying = False
+    skip_reason = ""
+    # 5. Check open positions limit
     if len(positions) >= 5:
         report["action_taken"] = "SKIP"
         report["details"] = "Max positions limit reached (5 open positions)."
-        pass # print(json.dumps(report))
-        return
+        skip_buying = True
+        skip_reason = "Max positions limit reached (5 open positions)."
         
     # If we still hold a legacy stock position (e.g., market is closed), we CANNOT buy crypto yet
-    if any(p.get("asset_class") == "us_equity" for p in positions):
+    elif any(p.get("asset_class") == "us_equity" for p in positions):
         report["action_taken"] = "SKIP"
         report["details"] = "Holding legacy stock position. Waiting for market open to liquidate."
-        pass # print(json.dumps(report))
-        return
+        skip_buying = True
+        skip_reason = "Holding legacy stock position. Waiting for market open to liquidate."
         
-    if buying_power <= 0 and not can_rotate:
+    elif buying_power <= 0 and not can_rotate:
         report["action_taken"] = "SKIP"
         report["details"] = "No buying power available."
+        skip_buying = True
+        skip_reason = "No buying power available."
         # Log SKIP
         for pos in positions:
             symbol = pos["symbol"]
@@ -334,187 +339,186 @@ def run_cycle():
                 portfolio_equity=equity,
                 reason="No buying power — position fully deployed"
             )
-        pass # print(json.dumps(report))
-        return
 
-    # --- CRYPTO MOMENTUM SCAN & STALE POSITION ROTATION ---
-    candidates = []
+    if not skip_buying:
+        # --- CRYPTO MOMENTUM SCAN & STALE POSITION ROTATION ---
+        candidates = []
     
-    crypto_symbols_str = ",".join(CRYPTO_PAIRS)
-    crypto_url = f"https://data.alpaca.markets/v1beta3/crypto/us/snapshots?symbols={crypto_symbols_str}"
-    crypto_res = requests.get(crypto_url, headers=headers)
-    if crypto_res.status_code == 200:
-        data = crypto_res.json().get("snapshots", {})
-        for symbol, snap in data.items():
-            if not snap:
-                continue
-            if any(p["symbol"] == symbol for p in positions):
-                continue
+        crypto_symbols_str = ",".join(CRYPTO_PAIRS)
+        crypto_url = f"https://data.alpaca.markets/v1beta3/crypto/us/snapshots?symbols={crypto_symbols_str}"
+        crypto_res = requests.get(crypto_url, headers=headers, timeout=10)
+        if crypto_res.status_code == 200:
+            data = crypto_res.json().get("snapshots", {})
+            for symbol, snap in data.items():
+                if not snap:
+                    continue
+                if any(p["symbol"] == symbol for p in positions):
+                    continue
             
-            daily = snap.get("dailyBar")
-            if not daily:
-                continue
-            open_price = float(daily.get("o", 0.0))
-            if open_price <= 0:
-                continue
+                daily = snap.get("dailyBar")
+                if not daily:
+                    continue
+                open_price = float(daily.get("o", 0.0))
+                if open_price <= 0:
+                    continue
             
-            current_price = float(daily.get("c", 0.0))
-            if current_price <= 0:
-                continue
+                current_price = float(daily.get("c", 0.0))
+                if current_price <= 0:
+                    continue
                 
-            change_pct = (current_price - open_price) / open_price * 100.0
-            candidates.append({
-                "symbol": symbol,
-                "change_pct": change_pct,
-                "current_price": current_price,
-                "volume": float(daily.get("v", 0.0))
-            })
+                change_pct = (current_price - open_price) / open_price * 100.0
+                candidates.append({
+                    "symbol": symbol,
+                    "change_pct": change_pct,
+                    "current_price": current_price,
+                    "volume": float(daily.get("v", 0.0))
+                })
             
-    candidates = sorted(candidates, key=lambda x: x["change_pct"], reverse=True)
-    report["scanned_assets"] = candidates[:10]
+        candidates = sorted(candidates, key=lambda x: x["change_pct"], reverse=True)
+        report["scanned_assets"] = candidates[:10]
     
-    signals = [c for c in candidates if c["change_pct"] >= 2.0]
+        signals = [c for c in candidates if c["change_pct"] >= 2.0]
     
-    # Decide if we execute rotation or normal purchase
-    if signals:
-        best_candidate = signals[0]
-        symbol = best_candidate["symbol"]
-        change_pct = best_candidate["change_pct"]
-        current_price = best_candidate["current_price"]
+        # Decide if we execute rotation or normal purchase
+        if signals:
+            best_candidate = signals[0]
+            symbol = best_candidate["symbol"]
+            change_pct = best_candidate["change_pct"]
+            current_price = best_candidate["current_price"]
         
-        # Rotation Logic: Only rotate if the new signal is stronger!
-        is_rotation_execution = False
-        if buying_power <= 0 and can_rotate:
-            if change_pct >= 2.5:
-                is_rotation_execution = True
+            # Rotation Logic: Only rotate if the new signal is stronger!
+            is_rotation_execution = False
+            if buying_power <= 0 and can_rotate:
+                if change_pct >= 2.5:
+                    is_rotation_execution = True
+                else:
+                    report["action_taken"] = "SKIP"
+                    report["details"] = f"Stale position {stale_symbol} flagged, but best new signal {symbol} (+{round(change_pct, 2)}%) is not strong enough to trigger rotation (needs >= 2.5%)."
+                    pass # print(json.dumps(report))
+                    return
+        
+            # Position Sizing
+            max_position_pct = float(os.getenv("MAX_POSITION_PCT", "0.50"))
+            if change_pct >= 5.0:
+                signal_strength = "EXTREME_MOMENTUM"
+                sizing_mult = 1.0
+            elif change_pct >= 3.0:
+                signal_strength = "STRONG_MOMENTUM"
+                sizing_mult = 0.67
+            else:
+                signal_strength = "MODERATE_MOMENTUM"
+                sizing_mult = 0.33
+            
+            order_size_usd = equity * max_position_pct * sizing_mult
+        
+            # If executing rotation, we sell the stale position FIRST!
+            if is_rotation_execution:
+                close_url = f"{ALPACA_BASE_URL}/v2/positions/{stale_symbol}"
+                close_res = requests.delete(close_url, headers=headers, timeout=10)
+                if close_res.status_code in [200, 201, 204]:
+                    should_notify = True
+                    msg_lines.append(f"🔄 **Περιστροφή Crypto**: Πωλήθηκε το στάσιμο **{stale_symbol}** (+{round(stale_unrealized_plpc, 2)}% μετά από {round(stale_age_hours, 2)} ώρες).")
+                
+                    log_trade(
+                        action="SELL",
+                        ticker=stale_symbol,
+                        asset_type="CRYPTO",
+                        signal_strength="NO_MOMENTUM",
+                        momentum_pct=0.0,
+                        entry_price=stale_entry_price,
+                        current_price=stale_current_price,
+                        unrealized_plpc=stale_unrealized_plpc / 100.0,
+                        order_id=close_res.json().get("id") if close_res.text else None,
+                        client_order_id=None,
+                        quantity=stale_qty,
+                        estimated_value_usd=stale_qty * stale_current_price,
+                        position_size_pct=0.0,
+                        portfolio_equity=equity,
+                        reason=f"Stale Crypto Rotation - Sold to rotate capital into hot {symbol} (+{round(change_pct, 2)}%)."
+                    )
+                    if stale_symbol in new_state:
+                        del new_state[stale_symbol]
+                        save_state(new_state)
+                    
+                    # Wait 1.5 seconds for Alpaca to update buying power
+                    time.sleep(1.5)
+                
+                    # Refresh account info for updated buying power
+                    acc_res = requests.get(acc_url, headers=headers, timeout=10)
+                    if acc_res.status_code == 200:
+                        account = acc_res.json()
+                        buying_power = float(account.get("buying_power", 0.0))
+                else:
+                    report["action_taken"] = "ROTATE_FAILED"
+                    report["details"] = f"Failed to close stale position {stale_symbol} to initiate rotation."
+                    pass # print(json.dumps(report))
+                    return
+        
+            # Small Account Rule
+            if equity < 200.0:
+                order_size_usd = buying_power
+                reason_rule = "small account rule (< $200 equity)"
+            else:
+                reason_rule = f"{signal_strength} level sizing"
+            
+            if order_size_usd > buying_power:
+                order_size_usd = buying_power
+            
+            if order_size_usd >= 1.0:
+                # Place BUY order
+                timestamp_suffix = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+                client_order_id = f"extreme-{symbol.replace('/', '')}-{timestamp_suffix}"
+            
+                order_data = {
+                    "symbol": symbol,
+                    "notional": str(round(order_size_usd, 2)),
+                    "side": "buy",
+                    "type": "market",
+                    "time_in_force": "day",
+                    "client_order_id": client_order_id
+                }
+            
+                order_url = f"{ALPACA_BASE_URL}/v2/orders"
+                order_res = requests.post(order_url, headers=headers, json=order_data, timeout=10)
+            
+                if order_res.status_code in [200, 201]:
+                    order = order_res.json()
+                    report["action_taken"] = "BUY"
+                    report["details"] = f"Successfully placed buy order for {symbol} of amount ${round(order_size_usd, 2)}."
+                    report["order_id"] = order.get("id")
+                    should_notify = True
+                
+                    if is_rotation_execution:
+                        msg_lines.append(f"🛒 **Περιστροφή Crypto**: Αγοράστηκε το νέο hot **{symbol}** (${round(order_size_usd, 2)} - {signal_strength} +{round(change_pct, 2)}%!)")
+                    else:
+                        msg_lines.append(f"🛒 **Αγοράστηκε {symbol}** (${round(order_size_usd, 2)} - {signal_strength} +{round(change_pct, 2)}%)")
+                
+                    log_trade(
+                        action="BUY",
+                        ticker=symbol,
+                        asset_type="CRYPTO",
+                        signal_strength=signal_strength,
+                        momentum_pct=change_pct,
+                        entry_price=current_price,
+                        current_price=current_price,
+                        unrealized_plpc=0.0,
+                        order_id=order.get("id"),
+                        client_order_id=client_order_id,
+                        quantity=order_size_usd / current_price,
+                        estimated_value_usd=order_size_usd,
+                        position_size_pct=order_size_usd / equity * 100.0,
+                        portfolio_equity=equity,
+                        reason=f"{signal_strength} (+{round(change_pct, 2)}% intraday) on {symbol}. Deployed ${round(order_size_usd, 2)} per {reason_rule}."
+                    )
+                else:
+                    report["action_taken"] = "BUY_FAILED"
+                    report["details"] = f"Failed to place buy order for {symbol}: {order_res.text}"
             else:
                 report["action_taken"] = "SKIP"
-                report["details"] = f"Stale position {stale_symbol} flagged, but best new signal {symbol} (+{round(change_pct, 2)}%) is not strong enough to trigger rotation (needs >= 2.5%)."
-                pass # print(json.dumps(report))
-                return
-        
-        # Position Sizing
-        max_position_pct = float(os.getenv("MAX_POSITION_PCT", "0.50"))
-        if change_pct >= 5.0:
-            signal_strength = "EXTREME_MOMENTUM"
-            sizing_mult = 1.0
-        elif change_pct >= 3.0:
-            signal_strength = "STRONG_MOMENTUM"
-            sizing_mult = 0.67
-        else:
-            signal_strength = "MODERATE_MOMENTUM"
-            sizing_mult = 0.33
-            
-        order_size_usd = equity * max_position_pct * sizing_mult
-        
-        # If executing rotation, we sell the stale position FIRST!
-        if is_rotation_execution:
-            close_url = f"{ALPACA_BASE_URL}/v2/positions/{stale_symbol}"
-            close_res = requests.delete(close_url, headers=headers)
-            if close_res.status_code in [200, 201, 204]:
-                should_notify = True
-                msg_lines.append(f"🔄 **Περιστροφή Crypto**: Πωλήθηκε το στάσιμο **{stale_symbol}** (+{round(stale_unrealized_plpc, 2)}% μετά από {round(stale_age_hours, 2)} ώρες).")
-                
-                log_trade(
-                    action="SELL",
-                    ticker=stale_symbol,
-                    asset_type="CRYPTO",
-                    signal_strength="NO_MOMENTUM",
-                    momentum_pct=0.0,
-                    entry_price=stale_entry_price,
-                    current_price=stale_current_price,
-                    unrealized_plpc=stale_unrealized_plpc / 100.0,
-                    order_id=close_res.json().get("id") if close_res.text else None,
-                    client_order_id=None,
-                    quantity=stale_qty,
-                    estimated_value_usd=stale_qty * stale_current_price,
-                    position_size_pct=0.0,
-                    portfolio_equity=equity,
-                    reason=f"Stale Crypto Rotation - Sold to rotate capital into hot {symbol} (+{round(change_pct, 2)}%)."
-                )
-                if stale_symbol in new_state:
-                    del new_state[stale_symbol]
-                    save_state(new_state)
-                    
-                # Wait 1.5 seconds for Alpaca to update buying power
-                time.sleep(1.5)
-                
-                # Refresh account info for updated buying power
-                acc_res = requests.get(acc_url, headers=headers)
-                if acc_res.status_code == 200:
-                    account = acc_res.json()
-                    buying_power = float(account.get("buying_power", 0.0))
-            else:
-                report["action_taken"] = "ROTATE_FAILED"
-                report["details"] = f"Failed to close stale position {stale_symbol} to initiate rotation."
-                pass # print(json.dumps(report))
-                return
-        
-        # Small Account Rule
-        if equity < 200.0:
-            order_size_usd = buying_power
-            reason_rule = "small account rule (< $200 equity)"
-        else:
-            reason_rule = f"{signal_strength} level sizing"
-            
-        if order_size_usd > buying_power:
-            order_size_usd = buying_power
-            
-        if order_size_usd >= 1.0:
-            # Place BUY order
-            timestamp_suffix = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-            client_order_id = f"extreme-{symbol.replace('/', '')}-{timestamp_suffix}"
-            
-            order_data = {
-                "symbol": symbol,
-                "notional": str(round(order_size_usd, 2)),
-                "side": "buy",
-                "type": "market",
-                "time_in_force": "day",
-                "client_order_id": client_order_id
-            }
-            
-            order_url = f"{ALPACA_BASE_URL}/v2/orders"
-            order_res = requests.post(order_url, headers=headers, json=order_data)
-            
-            if order_res.status_code in [200, 201]:
-                order = order_res.json()
-                report["action_taken"] = "BUY"
-                report["details"] = f"Successfully placed buy order for {symbol} of amount ${round(order_size_usd, 2)}."
-                report["order_id"] = order.get("id")
-                should_notify = True
-                
-                if is_rotation_execution:
-                    msg_lines.append(f"🛒 **Περιστροφή Crypto**: Αγοράστηκε το νέο hot **{symbol}** (${round(order_size_usd, 2)} - {signal_strength} +{round(change_pct, 2)}%!)")
-                else:
-                    msg_lines.append(f"🛒 **Αγοράστηκε {symbol}** (${round(order_size_usd, 2)} - {signal_strength} +{round(change_pct, 2)}%)")
-                
-                log_trade(
-                    action="BUY",
-                    ticker=symbol,
-                    asset_type="CRYPTO",
-                    signal_strength=signal_strength,
-                    momentum_pct=change_pct,
-                    entry_price=current_price,
-                    current_price=current_price,
-                    unrealized_plpc=0.0,
-                    order_id=order.get("id"),
-                    client_order_id=client_order_id,
-                    quantity=order_size_usd / current_price,
-                    estimated_value_usd=order_size_usd,
-                    position_size_pct=order_size_usd / equity * 100.0,
-                    portfolio_equity=equity,
-                    reason=f"{signal_strength} (+{round(change_pct, 2)}% intraday) on {symbol}. Deployed ${round(order_size_usd, 2)} per {reason_rule}."
-                )
-            else:
-                report["action_taken"] = "BUY_FAILED"
-                report["details"] = f"Failed to place buy order for {symbol}: {order_res.text}"
+                report["details"] = "Order size too small."
         else:
             report["action_taken"] = "SKIP"
-            report["details"] = "Order size too small."
-    else:
-        report["action_taken"] = "SKIP"
-        report["details"] = "No momentum signals found."
+            report["details"] = "No momentum signals found."
 
     # --- DECIDE HOURLY NOTIFICATION HEARTBEAT ---
     last_notify_str = notify_state.get("last_notify_time", "1970-01-01T00:00:00Z")

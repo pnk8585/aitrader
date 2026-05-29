@@ -292,14 +292,20 @@ def run_cycle():
             pass
             
     # Check open positions limit
+    skip_buying = False
+    skip_reason = ""
+    # Check open positions limit
     if len(positions) >= 5:
         report["action_taken"] = "SKIP"
         report["details"] = "Max positions limit reached (5 open positions)."
-        return
+        skip_buying = True
+        skip_reason = "Max positions limit reached (5 open positions)."
         
-    if cash_eur <= 0.45 and not can_rotate: # Minimum Kraken trade is 0.45 EUR
+    elif cash_eur <= 0.45 and not can_rotate: # Minimum Kraken trade is 0.45 EUR
         report["action_taken"] = "SKIP"
         report["details"] = "No buying power available."
+        skip_buying = True
+        skip_reason = "No buying power available."
         # Log SKIP
         for pos in positions:
             symbol = pos["symbol"]
@@ -311,7 +317,7 @@ def run_cycle():
                 momentum_pct=0.0,
                 entry_price=sym_state.get("entry_price", pos["current_price"]),
                 current_price=pos["current_price"],
-                unrealized_plpc=pos["value_eur"] / portfolio_value, # proxy
+                unrealized_plpc=pos["value_eur"] / portfolio_value,
                 order_id=None,
                 quantity=0.0,
                 estimated_value_eur=pos["value_eur"],
@@ -319,153 +325,160 @@ def run_cycle():
                 portfolio_equity=portfolio_value,
                 reason="No buying power — position fully deployed"
             )
-        return
 
-    # 3. Momentum Scan & Rotation
-    candidates = []
-    for sym in CRYPTO_PAIRS:
-        if any(p["symbol"] == sym for p in positions):
-            continue
-        ticker = tickers.get(sym)
-        if not ticker:
-            continue
-        change_pct = ticker['percentage']
-        candidates.append({
-            "symbol": sym,
-            "change_pct": change_pct,
-            "current_price": ticker['last']
-        })
+    if not skip_buying:
+        # 3. Momentum Scan & Rotation
+        candidates = []
+        for sym in CRYPTO_PAIRS:
+            if any(p["symbol"] == sym for p in positions):
+                continue
+            ticker = tickers.get(sym)
+            if not ticker:
+                continue
+            change_pct = ticker.get('percentage')
+        if change_pct is None:
+            open_p = ticker.get('open')
+            last_p = ticker.get('last')
+            if open_p and open_p > 0 and last_p:
+                change_pct = (last_p - open_p) / open_p * 100.0
+            else:
+                change_pct = 0.0
+            candidates.append({
+                "symbol": sym,
+                "change_pct": change_pct,
+                "current_price": ticker['last']
+            })
         
-    candidates = sorted(candidates, key=lambda x: x["change_pct"], reverse=True)
-    report["scanned_assets"] = candidates[:10]
+        candidates = sorted(candidates, key=lambda x: x["change_pct"], reverse=True)
+        report["scanned_assets"] = candidates[:10]
     
-    signals = [c for c in candidates if c["change_pct"] >= 2.0]
+        signals = [c for c in candidates if c["change_pct"] >= 2.0]
     
-    if signals:
-        best_candidate = signals[0]
-        symbol = best_candidate["symbol"]
-        change_pct = best_candidate["change_pct"]
-        current_price = best_candidate["current_price"]
+        if signals:
+            best_candidate = signals[0]
+            symbol = best_candidate["symbol"]
+            change_pct = best_candidate["change_pct"]
+            current_price = best_candidate["current_price"]
         
-        is_rotation_execution = False
-        if cash_eur <= 0.45 and can_rotate:
-            if change_pct >= 2.5:
-                is_rotation_execution = True
+            is_rotation_execution = False
+            if cash_eur <= 0.45 and can_rotate:
+                if change_pct >= 2.5:
+                    is_rotation_execution = True
+                else:
+                    report["action_taken"] = "SKIP"
+                    report["details"] = f"Stale position {stale_symbol} flagged, but new signal {symbol} is not strong enough to trigger rotation (needs >= 2.5%)."
+                    return
+                
+            # Sizing and Signal Strength
+            max_position_pct = 0.50
+            if change_pct >= 5.0:
+                signal_strength = "EXTREME_MOMENTUM"
+                sizing_mult = 1.0
+            elif change_pct >= 3.0:
+                signal_strength = "STRONG_MOMENTUM"
+                sizing_mult = 0.67
+            else:
+                signal_strength = "MODERATE_MOMENTUM"
+                sizing_mult = 0.33
+            
+            order_size_eur = portfolio_value * max_position_pct * sizing_mult
+        
+            # If executing rotation, we sell the stale position FIRST!
+            if is_rotation_execution:
+                try:
+                    exchange.load_markets()
+                    formatted_qty = float(exchange.amount_to_precision(stale_symbol, stale_qty))
+                    close_res = exchange.create_market_sell_order(stale_symbol, formatted_qty)
+                
+                    should_notify = True
+                    msg_lines.append(f"🔄 **Περιστροφή Crypto (Kraken)**: Πωλήθηκε το στάσιμο **{stale_symbol}** (+{round(stale_unrealized_plpc, 2)}% μετά από {round(stale_age_hours, 2)} ώρες).")
+                
+                    log_trade(
+                        action="SELL",
+                        ticker=stale_symbol,
+                        signal_strength="NO_MOMENTUM",
+                        momentum_pct=0.0,
+                        entry_price=stale_entry_price,
+                        current_price=stale_current_price,
+                        unrealized_plpc=stale_unrealized_plpc / 100.0,
+                        order_id=close_res.get("id"),
+                        quantity=stale_qty,
+                        estimated_value_eur=stale_qty * stale_current_price,
+                        position_size_pct=0.0,
+                        portfolio_equity=portfolio_value,
+                        reason=f"Stale Crypto Rotation - Sold to rotate capital into hot {symbol} (+{round(change_pct, 2)}%)."
+                    )
+                    if stale_symbol in new_state:
+                        del new_state[stale_symbol]
+                        save_state(new_state)
+                    
+                    time.sleep(1.5) # Wait for Kraken updates
+                    balance = exchange.fetch_balance()
+                    cash_eur = balance['total'].get('EUR', 0.0)
+                except Exception as e:
+                    report["action_taken"] = "ROTATE_FAILED"
+                    report["details"] = f"Failed to close stale position {stale_symbol} for rotation: {e}"
+                    print(f"Rotation sell failed on Kraken: {e}", file=sys.stderr)
+                    return
+                
+            # Small Account Rule (< 200 EUR equity)
+            if portfolio_value < 200.0:
+                order_size_eur = cash_eur
+                reason_rule = "small account rule (< 200 EUR equity)"
+            else:
+                reason_rule = f"{signal_strength} level sizing"
+            
+            if order_size_eur > cash_eur:
+                order_size_eur = cash_eur
+            
+            if order_size_eur >= 0.45: # Minimum trade limit
+                qty = order_size_eur / current_price
+                try:
+                    exchange.load_markets()
+                    formatted_qty = float(exchange.amount_to_precision(symbol, qty))
+                    order_res = exchange.create_market_buy_order(symbol, formatted_qty)
+                
+                    report["action_taken"] = "BUY"
+                    report["details"] = f"Successfully placed buy order for {symbol} of amount EUR {round(order_size_eur, 2)}."
+                    should_notify = True
+                
+                    if is_rotation_execution:
+                        msg_lines.append(f"🛒 **Περιστροφή Crypto (Kraken)**: Αγοράστηκε το νέο hot **{symbol}** (EUR {round(order_size_eur, 2)} - {signal_strength} +{round(change_pct, 2)}%!)")
+                    else:
+                        msg_lines.append(f"🛒 **Αγοράστηκε {symbol} (Kraken)** (EUR {round(order_size_eur, 2)} - {signal_strength} +{round(change_pct, 2)}%)")
+                
+                    new_state[symbol] = {
+                        "entry_price": current_price,
+                        "entry_time": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                        "peak_plpc": 0.0
+                    }
+                    save_state(new_state)
+                
+                    log_trade(
+                        action="BUY",
+                        ticker=symbol,
+                        signal_strength=signal_strength,
+                        momentum_pct=change_pct,
+                        entry_price=current_price,
+                        current_price=current_price,
+                        unrealized_plpc=0.0,
+                        order_id=order_res.get("id"),
+                        quantity=formatted_qty,
+                        estimated_value_eur=order_size_eur,
+                        position_size_pct=order_size_eur / portfolio_value * 100.0,
+                        portfolio_equity=portfolio_value,
+                        reason=f"{signal_strength} (+{round(change_pct, 2)}% intraday) on {symbol}. Deployed EUR {round(order_size_eur, 2)} per {reason_rule}."
+                    )
+                except Exception as e:
+                    report["action_taken"] = "BUY_FAILED"
+                    report["details"] = f"Failed to place buy order for {symbol}: {e}"
+                    print(f"Buy failed on Kraken: {e}", file=sys.stderr)
             else:
                 report["action_taken"] = "SKIP"
-                report["details"] = f"Stale position {stale_symbol} flagged, but new signal {symbol} is not strong enough to trigger rotation (needs >= 2.5%)."
-                return
-                
-        # Sizing and Signal Strength
-        max_position_pct = 0.50
-        if change_pct >= 5.0:
-            signal_strength = "EXTREME_MOMENTUM"
-            sizing_mult = 1.0
-        elif change_pct >= 3.0:
-            signal_strength = "STRONG_MOMENTUM"
-            sizing_mult = 0.67
-        else:
-            signal_strength = "MODERATE_MOMENTUM"
-            sizing_mult = 0.33
-            
-        order_size_eur = portfolio_value * max_position_pct * sizing_mult
-        
-        # If executing rotation, we sell the stale position FIRST!
-        if is_rotation_execution:
-            try:
-                exchange.load_markets()
-                formatted_qty = float(exchange.amount_to_precision(stale_symbol, stale_qty))
-                close_res = exchange.create_market_sell_order(stale_symbol, formatted_qty)
-                
-                should_notify = True
-                msg_lines.append(f"🔄 **Περιστροφή Crypto (Kraken)**: Πωλήθηκε το στάσιμο **{stale_symbol}** (+{round(stale_unrealized_plpc, 2)}% μετά από {round(stale_age_hours, 2)} ώρες).")
-                
-                log_trade(
-                    action="SELL",
-                    ticker=stale_symbol,
-                    signal_strength="NO_MOMENTUM",
-                    momentum_pct=0.0,
-                    entry_price=stale_entry_price,
-                    current_price=stale_current_price,
-                    unrealized_plpc=stale_unrealized_plpc / 100.0,
-                    order_id=close_res.get("id"),
-                    quantity=stale_qty,
-                    estimated_value_eur=stale_qty * stale_current_price,
-                    position_size_pct=0.0,
-                    portfolio_equity=portfolio_value,
-                    reason=f"Stale Crypto Rotation - Sold to rotate capital into hot {symbol} (+{round(change_pct, 2)}%)."
-                )
-                if stale_symbol in new_state:
-                    del new_state[stale_symbol]
-                    save_state(new_state)
-                    
-                time.sleep(1.5) # Wait for Kraken updates
-                balance = exchange.fetch_balance()
-                cash_eur = balance['total'].get('EUR', 0.0)
-            except Exception as e:
-                report["action_taken"] = "ROTATE_FAILED"
-                report["details"] = f"Failed to close stale position {stale_symbol} for rotation: {e}"
-                print(f"Rotation sell failed on Kraken: {e}", file=sys.stderr)
-                return
-                
-        # Small Account Rule (< 200 EUR equity)
-        if portfolio_value < 200.0:
-            order_size_eur = cash_eur
-            reason_rule = "small account rule (< 200 EUR equity)"
-        else:
-            reason_rule = f"{signal_strength} level sizing"
-            
-        if order_size_eur > cash_eur:
-            order_size_eur = cash_eur
-            
-        if order_size_eur >= 0.45: # Minimum trade limit
-            qty = order_size_eur / current_price
-            try:
-                exchange.load_markets()
-                formatted_qty = float(exchange.amount_to_precision(symbol, qty))
-                order_res = exchange.create_market_buy_order(symbol, formatted_qty)
-                
-                report["action_taken"] = "BUY"
-                report["details"] = f"Successfully placed buy order for {symbol} of amount EUR {round(order_size_eur, 2)}."
-                should_notify = True
-                
-                if is_rotation_execution:
-                    msg_lines.append(f"🛒 **Περιστροφή Crypto (Kraken)**: Αγοράστηκε το νέο hot **{symbol}** (EUR {round(order_size_eur, 2)} - {signal_strength} +{round(change_pct, 2)}%!)")
-                else:
-                    msg_lines.append(f"🛒 **Αγοράστηκε {symbol} (Kraken)** (EUR {round(order_size_eur, 2)} - {signal_strength} +{round(change_pct, 2)}%)")
-                
-                new_state[symbol] = {
-                    "entry_price": current_price,
-                    "entry_time": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-                    "peak_plpc": 0.0
-                }
-                save_state(new_state)
-                
-                log_trade(
-                    action="BUY",
-                    ticker=symbol,
-                    signal_strength=signal_strength,
-                    momentum_pct=change_pct,
-                    entry_price=current_price,
-                    current_price=current_price,
-                    unrealized_plpc=0.0,
-                    order_id=order_res.get("id"),
-                    quantity=formatted_qty,
-                    estimated_value_eur=order_size_eur,
-                    position_size_pct=order_size_eur / portfolio_value * 100.0,
-                    portfolio_equity=portfolio_value,
-                    reason=f"{signal_strength} (+{round(change_pct, 2)}% intraday) on {symbol}. Deployed EUR {round(order_size_eur, 2)} per {reason_rule}."
-                )
-            except Exception as e:
-                report["action_taken"] = "BUY_FAILED"
-                report["details"] = f"Failed to place buy order for {symbol}: {e}"
-                print(f"Buy failed on Kraken: {e}", file=sys.stderr)
+                report["details"] = "Order size too small."
         else:
             report["action_taken"] = "SKIP"
-            report["details"] = "Order size too small."
-    else:
-        report["action_taken"] = "SKIP"
-        report["details"] = "No momentum signals found."
+            report["details"] = "No momentum signals found."
         
     # 4. Decide Hourly Notification Heartbeat
     last_notify_str = notify_state.get("last_notify_time", "1970-01-01T00:00:00Z")
