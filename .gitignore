@@ -9,4 +9,6 @@ __pycache__/
 traders/extreme/state.json
 traders/extreme/premarket_target.json
 traders/extreme/last_notify.json
+traders/extreme/kraken_state.json
+traders/extreme/kraken_last_notify.json
 
