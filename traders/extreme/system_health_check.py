@@ -76,7 +76,7 @@ def main():
             balance = exchange.fetch_balance()
             
             # Fetch prices for active assets to calculate total portfolio value
-            symbols = ['BTC/EUR', 'ETH/EUR', 'SOL/EUR', 'AVAX/EUR', 'LINK/EUR']
+            symbols = ['BTC/EUR', 'ETH/EUR', 'SOL/EUR', 'AVAX/EUR', 'LINK/EUR', 'XRP/EUR', 'DOGE/EUR', 'SUI/EUR', 'NEAR/EUR', 'RENDER/EUR', 'ADA/EUR', 'DOT/EUR']
             tickers = exchange.fetch_tickers(symbols)
             
             cash_eur = balance['total'].get('EUR', 0.0)

@@ -25,7 +25,7 @@ exchange = ccxt.kraken({
 })
 
 # Universe details
-CRYPTO_PAIRS = ["BTC/EUR", "ETH/EUR", "SOL/EUR", "AVAX/EUR", "LINK/EUR"]
+CRYPTO_PAIRS = ["BTC/EUR", "ETH/EUR", "SOL/EUR", "AVAX/EUR", "LINK/EUR", "XRP/EUR", "DOGE/EUR", "SUI/EUR", "NEAR/EUR", "RENDER/EUR", "ADA/EUR", "DOT/EUR"]
 
 LOG_DIR = "PROJECT_ROOT/logs"
 os.makedirs(LOG_DIR, exist_ok=True)
