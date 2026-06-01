@@ -369,16 +369,31 @@ def run_cycle():
     should_notify = False
     msg_lines = []
 
-    # Heartbeat emitter, called on every exit path so hourly updates never skip.
+    # Print only meaningful output — silent when nothing happens.
     def finalize():
         nonlocal should_notify
+        action = report.get("action_taken", "")
+        is_error = report.get("status") == "error"
+        has_trade = action in ("BUY", "SELL")
+        has_fail = action in ("BUY_FAILED", "SELL_FAILED")
+
+        # Hourly heartbeat timer
         last_str = notify_state.get("last_notify_time", "1970-01-01T00:00:00Z")
         last_time = datetime.fromisoformat(last_str.replace("Z", "+00:00"))
         now_utc = datetime.now(timezone.utc)
-        if (now_utc - last_time).total_seconds() >= 3600.0:
-            should_notify = True
-            msg_lines.insert(0, "⏱️ **Kraken v2 Hourly Update:**")
-        if should_notify:
+        hourly = (now_utc - last_time).total_seconds() >= 3600.0
+
+        if is_error:
+            print(f"❌ Kraken v2: {report.get('details', 'unknown error')}")
+        elif has_trade:
+            # Just the one trade line
+            for line in msg_lines:
+                if line.startswith(("🛒", "🔄")):
+                    print(line)
+                    break
+        elif has_fail:
+            print(f"⚠️ Kraken v2 {action}: {report.get('details', '')}")
+        elif hourly:
             pos_lines = []
             for p in positions:
                 sym = p["symbol"]
@@ -386,11 +401,13 @@ def run_cycle():
                 ent = ss.get("entry_price", p["current_price"])
                 cur_p = p["current_price"]
                 pl = (cur_p - ent) / ent * 100.0 if ent else 0.0
-                peak = ss.get("peak_plpc", 0.0)
-                pos_lines.append(f"📈 **{sym} (Kraken v2)**: {round(pl, 2)}% (Peak: +{round(peak, 2)}%)")
-            msg_lines.extend(pos_lines or ["🔍 Καμία ανοιχτή θέση στο Kraken (100% Cash)."])
-            print("\n".join(msg_lines))
+                pos_lines.append(f"{base_symbol(sym)} {round(pl,1)}%")
+            pos_str = " | ".join(pos_lines) if pos_lines else "c"
+            print(f"💰 Kraken v2: {round(portfolio_value,2)}€ · {len(positions)} pos · {pos_str}")
+            should_notify = True
             notify_state["last_notify_time"] = now_utc.isoformat().replace("+00:00", "Z")
+        # else: silent — no action, no error, no hourly tick
+
         db_save_notify_state(db_conn, EXCHANGE_NAME, notify_state)
         close_connection(db_conn)
 

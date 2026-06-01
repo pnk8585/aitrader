@@ -569,15 +569,27 @@ def main():
 
 
 def _write_log(lines):
-    """Append to today's log file."""
+    """Append to today's log file (all lines written to file). Print only key findings."""
     logfile = os.path.join(LOG_DIR, f"ai_overseer_{datetime.now().strftime('%Y-%m-%d')}.log")
     with open(logfile, "a") as f:
         for line in lines:
             ts = datetime.now().strftime("%H:%M:%S")
             f.write(f"[{ts}] {line}\n")
-    # Also print for cron capture
+    # Print only the meaningful lines for Telegram
     for line in lines:
-        print(line)
+        if line.startswith("OK trade") or line.startswith("FAIL trade"):
+            emoji = "✅" if line.startswith("OK") else "❌"
+            # Extract action and symbol: "OK trade: Bought ETH for EUR 12 @ 3842 — reason"
+            print(f"🤖 {emoji} {line}")
+        elif line.startswith("GATES:"):
+            print(f"🤖 🚪 {line}")
+        elif line.startswith("AI analysis:"):
+            txt = line.replace("AI analysis: ", "")
+            if len(txt) > 200:
+                txt = txt[:200] + "…"
+            print(f"🤖 {txt}")
+        elif line.startswith("SCRIPT IDEA:"):
+            print(f"🤖 💡 {line}")
 
 
 if __name__ == "__main__":

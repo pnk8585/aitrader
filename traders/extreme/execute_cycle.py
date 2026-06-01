@@ -103,26 +103,37 @@ def run_cycle():
     # never skipped by an early return (rotation-skip, rotate-failed, etc.).
     def finalize():
         nonlocal should_notify
+        action = report.get("action_taken", "")
+        is_error = report.get("status") == "error"
+        has_trade = action in ("BUY", "SELL")
+        has_fail = action in ("BUY_FAILED", "SELL_FAILED")
+
         last_notify_str = notify_state.get("last_notify_time", "1970-01-01T00:00:00Z")
         last_notify_time = datetime.fromisoformat(last_notify_str.replace("Z", "+00:00"))
         now_utc = datetime.now(timezone.utc)
-        seconds_since_last_notify = (now_utc - last_notify_time).total_seconds()
-        if seconds_since_last_notify >= 3600.0:
-            should_notify = True
-            msg_lines.insert(0, "⏱️ **Alpaca Hourly Update:**")
-        if should_notify:
+        hourly = (now_utc - last_notify_time).total_seconds() >= 3600.0
+
+        if is_error:
+            print(f"❌ Alpaca: {report.get('details', 'unknown error')}")
+        elif has_trade:
+            for line in msg_lines:
+                if line.startswith(("🛒", "🔄")):
+                    print(line)
+                    break
+        elif has_fail:
+            print(f"⚠️ Alpaca {action}: {report.get('details', '')}")
+        elif hourly:
             pos_lines = []
             for p in positions:
                 sym = p["symbol"]
                 pl = float(p["unrealized_plpc"]) * 100.0
-                peak = new_state.get(sym, {}).get("peak_plpc", 0.0)
-                pos_lines.append(f"📈 **{sym}**: {round(pl, 2)}% (Peak: +{round(peak, 2)}%)")
-            if pos_lines:
-                msg_lines.extend(pos_lines)
-            else:
-                msg_lines.append("🔍 Καμία ανοιχτή θέση (100% Cash).")
-            print("\n".join(msg_lines))
+                pos_lines.append(f"{sym.split('/')[0]} {round(pl,1)}%")
+            pos_str = " | ".join(pos_lines) if pos_lines else "c"
+            print(f"💰 Alpaca: {round(equity,2)}$ · {len(positions)} pos · {pos_str}")
+            should_notify = True
             notify_state["last_notify_time"] = now_utc.isoformat().replace("+00:00", "Z")
+        # else silent
+
         db_save_notify_state(db_conn, EXCHANGE_NAME, notify_state)
         close_connection(db_conn)
 
