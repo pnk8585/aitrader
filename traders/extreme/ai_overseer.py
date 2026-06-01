@@ -18,7 +18,7 @@ from openai import OpenAI
 
 # --- Paths -----------------------------------------------------------------
 PROJECT_DIR = "PROJECT_ROOT"
-V2_SCRIPT = os.path.join(PROJECT_DIR, "traders/extreme/execute_kraken_cycle_v2.py")
+V2_SCRIPT = os.path.join(PROJECT_DIR, "traders/crypto_trades/kraken_pullback.py")
 ENV_PATH = os.path.join(PROJECT_DIR, ".env")
 HERMES_ENV = "HOME/.hermes/.env"
 LOG_DIR = os.path.join(PROJECT_DIR, "logs/ai_overseer")
