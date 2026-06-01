@@ -517,7 +517,7 @@ def run_cycle():
                     "notional": str(round(order_size_usd, 2)),
                     "side": "buy",
                     "type": "market",
-                    "time_in_force": "day",
+                    "time_in_force": "gtc",
                     "client_order_id": client_order_id
                 }
             
