@@ -79,9 +79,9 @@ PULLBACK_MIN_PCT = 0.5     # current price must be >=0.5% below the last-1h high
 BLOWOFF_GUARD_1H_PCT = 4.0 # skip if 1h momentum > +4% (that's the top, it reverts)
 
 # --- Exits ----------------------------------------------------------------
-MIN_HARD_STOP_PCT = 2.0     # stop floor (dynamic: max(2%, 0.5 × range6h) per position)
-TRAIL_ARM_PCT = 1.2        # arm trailing TP earlier (gives more net after giveback)
-TRAIL_GIVEBACK_PCT = 0.5   # once armed, exit on 0.5% giveback from peak
+MIN_HARD_STOP_PCT = 2.5
+TRAIL_ARM_PCT = 1.5
+TRAIL_GIVEBACK_PCT = 0.7
 HARD_TP_CAP_PCT = 6.0      # absolute take-profit ceiling
 MAX_HOLD_HOURS = 12.0      # only force-exit a *dead* (net-neg, trend-broken) bag
 
@@ -91,6 +91,23 @@ MIN_TRADE_EUR = 0.45       # Kraken minimum
 MAX_OPEN_SMALL = 1         # one position at a time for a small account
 MAX_OPEN_LARGE = 2         # allow 2 only above EQUITY_TWO_POS
 EQUITY_TWO_POS = 400.0
+
+# --- AI Gates ---------------------------------------------------------------
+AI_GATE_FILE = "PROJECT_ROOT/ai_overseer/ai_gate.json"
+
+
+def load_ai_gates():
+    """Read AI gate conditions set by ai_overseer. Returns dict with defaults."""
+    default = {"script_paused": False, "consult_on_entry": False, "reason": None}
+    if not os.path.exists(AI_GATE_FILE):
+        return default
+    try:
+        with open(AI_GATE_FILE) as f:
+            gates = json.load(f)
+        return {**default, **gates}
+    except (json.JSONDecodeError, IOError):
+        return default
+
 
 COOLDOWN_MIN = 90          # per-coin cooldown after any exit (kills churn)
 MAX_TRADES_PER_DAY = 4     # hard overtrading cap
@@ -486,6 +503,18 @@ def run_cycle():
         report["details"] = skip_reason
         finalize()
         return
+
+    # ---- AI Gate: check if AI overseer paused or wants consultation ----
+    gates = load_ai_gates()
+    if gates.get("script_paused"):
+        reason = gates.get("reason") or "no reason given"
+        print(f"AI GATE: script paused — {reason}")
+        report["action_taken"] = "SKIP"
+        report["details"] = f"AI gate paused: {reason}"
+        finalize()
+        return
+    if gates.get("consult_on_entry"):
+        print(f"AI GATE: consult on entry active — {gates.get('reason', '')}")
 
     # ---------------------------------------------------------------
     # 4. Entry scan: pullback inside a confirmed higher-TF uptrend

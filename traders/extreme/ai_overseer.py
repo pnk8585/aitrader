@@ -51,6 +51,7 @@ exchange = ccxt.kraken({
 EXCHANGE_NAME = "kraken"
 
 # --- Safety limits ---------------------------------------------------------
+GATES_FILE = os.path.join(PROJECT_DIR, "ai_overseer/ai_gate.json")
 MAX_TRADE_SIZE_EUR = 30.0         # max EUR per AI-triggered trade
 MAX_POSITIONS_AI = 1               # max positions opened by AI
 ADJUSTMENT_BOUNDS = {
@@ -322,6 +323,20 @@ def execute_trade(action, symbol, size_eur, reason):
         return False, f"{action} {symbol} failed: {e}"
 
 
+def write_gates(gates, log):
+    """Save AI gate conditions to file for the 5-min script to read."""
+    os.makedirs(os.path.dirname(GATES_FILE), exist_ok=True)
+    payload = {
+        "script_paused": gates.get("script_paused", False),
+        "consult_on_entry": gates.get("consult_on_entry", False),
+        "reason": gates.get("reason"),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with open(GATES_FILE, "w") as f:
+        json.dump(payload, f, indent=2)
+    log.append(f"GATES: paused={payload['script_paused']} consult={payload['consult_on_entry']} — {payload.get('reason', 'no reason')}")
+
+
 # ---------------------------------------------------------------------------
 # AI call
 # ---------------------------------------------------------------------------
@@ -375,13 +390,18 @@ YOUR JOB (respond with VALID JSON only — no markdown, no explanation):
 2. PARAMETER_ADJUSTMENTS: If the script is tuned wrong, suggest new values. Bounds:
    {json.dumps(ADJUSTMENT_BOUNDS, indent=2)}
 3. TRADE_SIGNALS: If you see a clear opportunity the script is missing (e.g., a regime shift, a pair not in the pool, a breakout the script's pullback logic would reject), suggest a direct trade. Max {MAX_TRADE_SIZE_EUR} EUR per trade.
-4. SCRIPT_IMPROVEMENTS: Any logic changes the script needs (1 sentence max).
+4. GATES: Set conditions for the 5-min script. Use these sparingly — only when market regime demands it:
+   - script_paused: true/false — stop the script from trading entirely
+   - consult_on_entry: true/false — script must get AI approval before entering
+   - reason: short explanation
+5. SCRIPT_IMPROVEMENTS: Any logic changes the script needs (1 sentence max).
 
 Return JSON:
 {{
   "analysis": "...",
   "parameter_adjustments": [{{"param": "PARAM_NAME", "value": number, "reason": "..."}}],
   "trade_signals": [{{"action": "BUY|SELL", "symbol": "BTC/EUR", "size_eur": number, "reason": "..."}}],
+  "gates": {{ "script_paused": false, "consult_on_entry": false, "reason": null }},
   "script_improvements": ["..."]
 }}
 """
@@ -479,6 +499,11 @@ def main():
             continue
         ok, msg = execute_trade(action, symbol, size_eur, reason)
         log.append(f"{'OK' if ok else 'FAIL'} trade: {msg} — {reason}")
+
+    # 5.5. Process gates
+    gates = decision.get("gates", {})
+    if gates:
+        write_gates(gates, log)
 
     # 6. Log script improvements
     for imp in decision.get("script_improvements", []):
