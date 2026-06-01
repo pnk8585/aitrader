@@ -560,7 +560,7 @@ def run_cycle():
     gates = load_ai_gates()
     if gates.get("script_paused"):
         reason = gates.get("reason") or "no reason given"
-        print(f"AI GATE: script paused — {reason}")
+        print(f"AI GATE: script paused — {reason}", file=sys.stderr)
         report["action_taken"] = "SKIP"
         report["details"] = f"AI gate paused: {reason}"
         finalize()
@@ -568,7 +568,7 @@ def run_cycle():
     consulting = bool(gates.get("consult_on_entry"))
     if consulting:
         print(f"AI GATE: consult on entry active — throttling size & conviction "
-              f"({gates.get('reason', '')})")
+              f"({gates.get('reason', '')})", file=sys.stderr)
 
     # ---------------------------------------------------------------
     # 4. Risk gates before any buy
