@@ -33,7 +33,7 @@ if not DEEPSEEK_KEY:
     print("FATAL: DEEPSEEK_API_KEY not found", file=sys.stderr)
     sys.exit(1)
 
-AI_MODEL = "deepseek-chat"  # aliases to deepseek-v4-flash on api.deepseek.com
+AI_MODEL = "deepseek-v4-flash"  # explicit V4 Flash via api.deepseek.com
 DEEPSEEK_BASE = "https://api.deepseek.com/v1"
 
 # --- Kraken exchange -------------------------------------------------------
