@@ -24,6 +24,7 @@ import os
 import sys
 import json
 import time
+import fcntl
 import ccxt
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
@@ -80,17 +81,31 @@ BLOWOFF_GUARD_1H_PCT = 4.0 # skip if 1h momentum > +4% (that's the top, it rever
 
 # --- Exits ----------------------------------------------------------------
 MIN_HARD_STOP_PCT = 2.5
+MAX_HARD_STOP_PCT = 8.0    # cap the vol-widened stop so a crazy range can't risk the account
 TRAIL_ARM_PCT = 1.5
 TRAIL_GIVEBACK_PCT = 0.7
 HARD_TP_CAP_PCT = 6.0      # absolute take-profit ceiling
 MAX_HOLD_HOURS = 12.0      # only force-exit a *dead* (net-neg, trend-broken) bag
+STALE_HOLD_HOURS = 18.0    # free capital from a stalled, trend-broken, barely-green bag
 
 # --- Position sizing / risk -----------------------------------------------
 DEPLOY_FRACTION = 0.97     # deploy ~97% of cash into the single best setup
+# Volatility-adjusted cap: never risk more than RISK_PER_TRADE_PCT of equity if
+# the stop is hit. size = riskEUR / (stop% / 100). Generous on purpose — it only
+# trims size on high-volatility coins whose stop sits far away; tight setups
+# still deploy the full DEPLOY_FRACTION.
+RISK_PER_TRADE_PCT = 4.0
+CONSULT_DEPLOY_FRACTION = 0.5  # when AI consult_on_entry is set, halve exposure
+CONSULT_MIN_SCORE = 3.0        # ...and only take higher-conviction setups
 MIN_TRADE_EUR = 0.45       # Kraken minimum
 MAX_OPEN_SMALL = 1         # one position at a time for a small account
 MAX_OPEN_LARGE = 2         # allow 2 only above EQUITY_TWO_POS
 EQUITY_TWO_POS = 400.0
+
+# --- Concurrency guard ------------------------------------------------------
+# Two */5 cron jobs (or an overrun) running this script at once would double the
+# orders and race on trading_state. A single flock makes overlapping runs exit.
+LOCK_FILE = "PROJECT_ROOT/logs/kraken_v2.lock"
 
 # --- AI Gates ---------------------------------------------------------------
 AI_GATE_FILE = "PROJECT_ROOT/ai_overseer/ai_gate.json"
@@ -311,6 +326,29 @@ def get_entry_price_and_time(symbol, current_price):
     return current_price, datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def extract_fill(res, fallback_price):
+    """Recover the actual average fill price and filled qty from a CCXT order.
+
+    Kraken market orders slip, so the ticker price used to size the order is NOT
+    the real entry. Prefer the order's reported average; fall back through
+    price, cost/filled, and finally the pre-trade ticker price.
+    """
+    price, qty = None, None
+    if isinstance(res, dict):
+        for k in ("average", "price"):
+            v = res.get(k)
+            if v:
+                price = float(v)
+                break
+        filled = res.get("filled")
+        cost = res.get("cost")
+        if filled:
+            qty = float(filled)
+        if price is None and cost and filled:
+            price = float(cost) / float(filled)
+    return (price or fallback_price), qty
+
+
 # ---------------------------------------------------------------------------
 # Main cycle
 # ---------------------------------------------------------------------------
@@ -403,6 +441,8 @@ def run_cycle():
             new_state[sym]["entry_price"] = ep
             new_state[sym]["entry_time"] = et
         new_state[sym].setdefault("peak_plpc", 0.0)
+        # Track the real on-exchange quantity so SELLs and PnL never guess.
+        new_state[sym]["quantity"] = pos['qty']
 
     # ---------------------------------------------------------------
     # 2. Manage open positions  (exit logic — NO flat/stale selling)
@@ -426,9 +466,11 @@ def run_cycle():
         sell = False
         reason = ""
 
-        # dynamic stop: at least MIN_HARD_STOP_PCT, but wider for volatile coins
+        # dynamic stop: at least MIN_HARD_STOP_PCT, wider for volatile coins, but
+        # capped at MAX_HARD_STOP_PCT so an extreme 6h range can't risk the account.
         rng_6h = get_range_pct(db_conn, symbol, 360)
-        effective_stop = -max(MIN_HARD_STOP_PCT, 0.5 * (rng_6h or MIN_HARD_STOP_PCT * 2))
+        effective_stop = -min(MAX_HARD_STOP_PCT,
+                              max(MIN_HARD_STOP_PCT, 0.5 * (rng_6h or MIN_HARD_STOP_PCT * 2)))
 
         if unrealized_plpc <= effective_stop:
             sell, reason = True, f"Hard stop ({round(unrealized_plpc,2)}% <= {round(effective_stop,2)}%, rng6h={round(rng_6h or 0,2)}%)"
@@ -443,6 +485,17 @@ def run_cycle():
             if trend_3h is not None and trend_3h < 0:
                 sell, reason = True, (f"Max-hold dead-bag exit ({round(age_hours,1)}h, "
                                       f"{round(unrealized_plpc,2)}%, 3h trend {round(trend_3h,2)}%)")
+        elif (age_hours >= STALE_HOLD_HOURS
+              and ROUND_TRIP_FEE_PCT < unrealized_plpc < TRAIL_ARM_PCT):
+            # Opportunity-cost exit: a stalled, trend-broken bag that is barely
+            # green (net-positive after fees but never armed the trailing TP).
+            # Free the capital for a fresh setup — but only bank a *net win*, so
+            # this never becomes the flat/fee-loss churn that killed v1.
+            trend_3h = get_momentum_over(db_conn, symbol, TREND_3H_MIN)
+            if trend_3h is not None and trend_3h < 0:
+                sell, reason = True, (f"Stale-winner exit ({round(age_hours,1)}h, "
+                                      f"net +{round(unrealized_plpc-ROUND_TRIP_FEE_PCT,2)}%, "
+                                      f"3h trend {round(trend_3h,2)}%)")
 
         pos_report = {"symbol": symbol, "unrealized_plpc": round(unrealized_plpc, 2),
                       "age_hours": round(age_hours, 2),
@@ -483,7 +536,25 @@ def run_cycle():
             pass
 
     # ---------------------------------------------------------------
-    # 3. Risk gates before any buy
+    # 3. AI Gate FIRST — if the overseer paused entries, skip before we spend
+    #    any further DB queries on risk gates / the entry scan. (Exits in step 2
+    #    always run regardless, so a paused script can still cut losers.)
+    # ---------------------------------------------------------------
+    gates = load_ai_gates()
+    if gates.get("script_paused"):
+        reason = gates.get("reason") or "no reason given"
+        print(f"AI GATE: script paused — {reason}")
+        report["action_taken"] = "SKIP"
+        report["details"] = f"AI gate paused: {reason}"
+        finalize()
+        return
+    consulting = bool(gates.get("consult_on_entry"))
+    if consulting:
+        print(f"AI GATE: consult on entry active — throttling size & conviction "
+              f"({gates.get('reason', '')})")
+
+    # ---------------------------------------------------------------
+    # 4. Risk gates before any buy
     # ---------------------------------------------------------------
     max_open = MAX_OPEN_LARGE if portfolio_value >= EQUITY_TWO_POS else MAX_OPEN_SMALL
     skip, skip_reason = False, ""
@@ -497,6 +568,9 @@ def run_cycle():
         rpnl = realized_pnl_today_pct(db_conn)
         if rpnl <= DAILY_LOSS_BREAKER_PCT:
             skip, skip_reason = True, f"Daily loss breaker tripped ({round(rpnl,2)}% <= {DAILY_LOSS_BREAKER_PCT}%)."
+            should_notify = True
+            msg_lines.append(f"🚨 **Kraken v2 daily loss breaker**: {round(rpnl,2)}% "
+                             f"today — entries halted until 00:00 UTC.")
 
     if skip:
         report["action_taken"] = "SKIP"
@@ -504,20 +578,8 @@ def run_cycle():
         finalize()
         return
 
-    # ---- AI Gate: check if AI overseer paused or wants consultation ----
-    gates = load_ai_gates()
-    if gates.get("script_paused"):
-        reason = gates.get("reason") or "no reason given"
-        print(f"AI GATE: script paused — {reason}")
-        report["action_taken"] = "SKIP"
-        report["details"] = f"AI gate paused: {reason}"
-        finalize()
-        return
-    if gates.get("consult_on_entry"):
-        print(f"AI GATE: consult on entry active — {gates.get('reason', '')}")
-
     # ---------------------------------------------------------------
-    # 4. Entry scan: pullback inside a confirmed higher-TF uptrend
+    # 5. Entry scan: pullback inside a confirmed higher-TF uptrend
     # ---------------------------------------------------------------
     held = {p["symbol"] for p in positions}
     now = datetime.now(timezone.utc)
@@ -588,8 +650,29 @@ def run_cycle():
     symbol = best["symbol"]
     current_price = best["price"]
 
-    # Sizing: one concentrated, well-chosen trade. Deploy ~97% of cash.
-    order_size_eur = min(cash_eur * DEPLOY_FRACTION, cash_eur)
+    # AI consult_on_entry enforcement: only take higher-conviction setups.
+    if consulting and best["score"] < CONSULT_MIN_SCORE:
+        report["action_taken"] = "SKIP"
+        report["details"] = (f"AI consult active: best score {round(best['score'],2)} "
+                             f"< {CONSULT_MIN_SCORE} conviction floor.")
+        finalize()
+        return
+
+    # Sizing: one concentrated, well-chosen trade. Start from ~97% of cash
+    # (halved when the AI asked us to consult), then apply a volatility-adjusted
+    # cap so a wide-stop (volatile) coin can't risk more than RISK_PER_TRADE_PCT
+    # of equity. Tight-stop setups still deploy the full fraction.
+    deploy_fraction = CONSULT_DEPLOY_FRACTION if consulting else DEPLOY_FRACTION
+    order_size_eur = cash_eur * deploy_fraction
+
+    rng_6h_best = get_range_pct(db_conn, symbol, 360)
+    stop_pct = min(MAX_HARD_STOP_PCT,
+                   max(MIN_HARD_STOP_PCT, 0.5 * (rng_6h_best or MIN_HARD_STOP_PCT * 2)))
+    risk_cap_eur = (RISK_PER_TRADE_PCT / 100.0 * portfolio_value) / (stop_pct / 100.0)
+    if risk_cap_eur < order_size_eur:
+        order_size_eur = risk_cap_eur
+    order_size_eur = min(order_size_eur, cash_eur)
+
     if order_size_eur < MIN_TRADE_EUR:
         report["action_taken"] = "SKIP"
         report["details"] = "Order size below Kraken minimum."
@@ -603,27 +686,36 @@ def run_cycle():
         exchange.load_markets()
         fqty = float(exchange.amount_to_precision(symbol, qty))
         res = exchange.create_market_buy_order(symbol, fqty)
+        # Use the ACTUAL average fill price/qty — market orders slip, and the
+        # ticker price would otherwise corrupt every downstream PnL/stop calc.
+        fill_price, fill_qty = extract_fill(res, current_price)
+        if fill_qty is None:
+            fill_qty = fqty
+        actual_value = fill_qty * fill_price
         report["action_taken"] = "BUY"
-        report["details"] = f"Bought {symbol} for EUR {round(order_size_eur,2)}."
+        report["details"] = f"Bought {symbol} for EUR {round(actual_value,2)} @ {fill_price}."
         should_notify = True
         msg_lines.append(f"🛒 **Αγοράστηκε {symbol} (Kraken v2)** "
-                         f"(EUR {round(order_size_eur,2)} — {momentum_desc})")
+                         f"(EUR {round(actual_value,2)} @ {fill_price} — {momentum_desc})")
         new_state[symbol] = {
-            "entry_price": current_price,
+            "entry_price": fill_price,
             "entry_time": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "peak_plpc": 0.0,
+            "quantity": fill_qty,
         }
         save_trading_state(db_conn, EXCHANGE_NAME, new_state)
-        positions.append({"symbol": symbol, "current_price": current_price})
+        positions.append({"symbol": symbol, "coin": symbol.split('/')[0],
+                          "qty": fill_qty, "current_price": fill_price,
+                          "value_eur": actual_value})
         log_trade(db_conn, action="BUY", ticker=symbol,
                   signal_strength="PULLBACK_IN_UPTREND",
-                  momentum_pct=best["t3"], entry_price=current_price,
-                  current_price=current_price, unrealized_plpc=0.0,
-                  order_id=res.get("id"), quantity=fqty,
-                  estimated_value_eur=order_size_eur,
-                  position_size_pct=order_size_eur / portfolio_value * 100.0,
+                  momentum_pct=best["t3"], entry_price=fill_price,
+                  current_price=fill_price, unrealized_plpc=0.0,
+                  order_id=res.get("id"), quantity=fill_qty,
+                  estimated_value_eur=actual_value,
+                  position_size_pct=actual_value / portfolio_value * 100.0,
                   portfolio_equity=portfolio_value,
-                  reason=f"{momentum_desc} on {symbol}. Deployed EUR {round(order_size_eur,2)}.")
+                  reason=f"{momentum_desc} on {symbol}. Deployed EUR {round(actual_value,2)}.")
     except Exception as e:
         report["action_taken"] = "BUY_FAILED"
         report["details"] = f"Failed to buy {symbol}: {e}"
@@ -632,5 +724,32 @@ def run_cycle():
     finalize()
 
 
+def main():
+    # Single-instance lock: a second */5 job (or a slow overrun) that overlaps
+    # this run would double orders and race trading_state. Bail out if held.
+    lock_fp = open(LOCK_FILE, "w")
+    try:
+        fcntl.flock(lock_fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print("Another kraken_v2 cycle is already running — skipping this tick.",
+              file=sys.stderr)
+        return
+    try:
+        run_cycle()
+    except Exception as e:
+        import traceback
+        # Loud, single-line alert so the cron/notifier wrapper surfaces a crash
+        # instead of failing silently with real money on the exchange.
+        print(f"🚨 **Kraken v2 CRASHED**: {e}")
+        print(f"ALERT: kraken_v2 crashed: {e}\n{traceback.format_exc()}",
+              file=sys.stderr)
+    finally:
+        try:
+            fcntl.flock(lock_fp, fcntl.LOCK_UN)
+            lock_fp.close()
+        except Exception:
+            pass
+
+
 if __name__ == "__main__":
-    run_cycle()
+    main()

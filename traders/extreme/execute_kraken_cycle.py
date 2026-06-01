@@ -5,6 +5,11 @@ import time
 import ccxt
 from datetime import datetime, timezone
 from dotenv import load_dotenv
+from db_prices import (get_connection, insert_prices, get_one_hour_momentum,
+                       close_connection, base_symbol,
+                       load_trading_state, save_trading_state,
+                       load_notify_state, save_notify_state as db_save_notify_state,
+                       log_trade as db_log_trade)
 
 # Load environment variables
 env_path = "PROJECT_ROOT/.env"
@@ -39,65 +44,23 @@ PLOCK_FLOOR_PCT = 3.0       # Sell if we drop below +3.0% after hitting +5.0%
 LOG_DIR = "PROJECT_ROOT/logs"
 os.makedirs(LOG_DIR, exist_ok=True)
 
-STATE_FILE = "PROJECT_ROOT/traders/extreme/kraken_state.json"
-NOTIFY_STATE_FILE = "PROJECT_ROOT/traders/extreme/kraken_last_notify.json"
+EXCHANGE_NAME = "kraken"
 
-def load_state():
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, "r") as f:
-                return json.load(f)
-        except:
-            pass
-    return {}
-
-def save_state(state):
-    try:
-        with open(STATE_FILE, "w") as f:
-            json.dump(state, f)
-    except Exception as e:
-        print(f"Error saving state: {e}", file=sys.stderr)
-
-def load_notify_state():
-    if os.path.exists(NOTIFY_STATE_FILE):
-        try:
-            with open(NOTIFY_STATE_FILE, "r") as f:
-                return json.load(f)
-        except:
-            pass
-    return {"last_notify_time": "1970-01-01T00:00:00Z"}
-
-def save_notify_state(state):
-    try:
-        with open(NOTIFY_STATE_FILE, "w") as f:
-            json.dump(state, f)
-    except Exception as e:
-        print(f"Error saving notify state: {e}", file=sys.stderr)
-
-def log_trade(action, ticker, signal_strength, momentum_pct, entry_price, current_price, unrealized_plpc, order_id, quantity, estimated_value_eur, position_size_pct, portfolio_equity, reason):
-    log_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    log_file_path = os.path.join(LOG_DIR, f"kraken_trades-{log_date}.jsonl")
-    
-    log_entry = {
-        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        "cycle": 1,
-        "action": action,
-        "ticker": ticker,
-        "signal_strength": signal_strength,
-        "momentum_pct": round(momentum_pct, 4) if momentum_pct else 0.0,
-        "entry_price": round(entry_price, 4) if entry_price else 0.0,
-        "current_price": round(current_price, 4) if current_price else 0.0,
-        "unrealized_plpc": round(unrealized_plpc, 5) if unrealized_plpc else 0.0,
-        "order_id": order_id,
-        "quantity": round(quantity, 6) if quantity else 0.0,
-        "estimated_value_eur": round(estimated_value_eur, 2) if estimated_value_eur else 0.0,
-        "position_size_pct": round(position_size_pct, 4) if position_size_pct else 0.0,
-        "portfolio_equity_at_decision": round(portfolio_equity, 2) if portfolio_equity else 0.0,
-        "reason": reason
-    }
-    
-    with open(log_file_path, "a") as f:
-        f.write(json.dumps(log_entry) + "\n")
+def log_trade(db_conn, action, ticker, signal_strength, momentum_pct, entry_price, current_price, unrealized_plpc, order_id, quantity, estimated_value_eur, position_size_pct, portfolio_equity, reason):
+    db_log_trade(
+        db_conn, EXCHANGE_NAME,
+        action=action, ticker=ticker, signal_strength=signal_strength,
+        momentum_pct=round(momentum_pct, 4) if momentum_pct else 0.0,
+        entry_price=round(entry_price, 4) if entry_price else 0.0,
+        current_price=round(current_price, 4) if current_price else 0.0,
+        unrealized_plpc=round(unrealized_plpc, 5) if unrealized_plpc else 0.0,
+        order_id=order_id,
+        quantity=round(quantity, 6) if quantity else 0.0,
+        estimated_value=round(estimated_value_eur, 2) if estimated_value_eur else 0.0,
+        position_size_pct=round(position_size_pct, 4) if position_size_pct else 0.0,
+        portfolio_equity=round(portfolio_equity, 2) if portfolio_equity else 0.0,
+        reason=reason,
+    )
 
 def get_entry_price_and_time(symbol, current_price):
     try:
@@ -121,8 +84,12 @@ def run_cycle():
         "details": ""
     }
     
-    state = load_state()
-    notify_state = load_notify_state()
+    # Kraken is the sole writer of the shared price DB. Open once per cycle and
+    # close on every exit path inside finalize().
+    db_conn = get_connection()
+    
+    state = load_trading_state(db_conn, EXCHANGE_NAME)
+    notify_state = load_notify_state(db_conn, EXCHANGE_NAME)
     should_notify = False
     msg_lines = []
 
@@ -153,16 +120,26 @@ def run_cycle():
                 msg_lines.append("🔍 Καμία ανοιχτή θέση στο Kraken (100% Cash).")
             print("\n".join(msg_lines))
             notify_state["last_notify_time"] = now_utc.isoformat().replace("+00:00", "Z")
-        save_notify_state(notify_state)
+        db_save_notify_state(db_conn, EXCHANGE_NAME, notify_state)
+        close_connection(db_conn)
 
     # 1. Fetch Tickers and Balances
     try:
         tickers = exchange.fetch_tickers(CRYPTO_PAIRS)
+        # Kraken is the sole writer: persist current prices BEFORE any skip/branch
+        # logic so the shared 1h-momentum history is always fed.
+        price_map = {
+            base_symbol(sym): tickers[sym]['last']
+            for sym in CRYPTO_PAIRS
+            if tickers.get(sym) and tickers[sym].get('last') is not None
+        }
+        insert_prices(db_conn, price_map)
         balance = exchange.fetch_balance()
     except Exception as e:
         report["status"] = "error"
         report["details"] = f"Failed to fetch market/account data: {e}"
         print(json.dumps(report), file=sys.stderr)
+        close_connection(db_conn)
         return
         
     cash_eur = balance['total'].get('EUR', 0.0)
@@ -256,10 +233,6 @@ def run_cycle():
         elif peak_plpc >= 1.0 and unrealized_plpc <= ROUND_TRIP_FEE_PCT:
             sell_triggered = True
             sell_reason = f"Breakeven protection (Peak was +{round(peak_plpc, 2)}% | Current: +{round(unrealized_plpc, 2)}% | fee floor +{ROUND_TRIP_FEE_PCT}%)"
-        # Time-stop (1 hour)
-        elif age_hours > 1.0:
-            sell_triggered = True
-            sell_reason = f"Held > 1 hour stale position (age: {round(age_hours, 2)} hours)"
             
         pos_report = {
             "symbol": symbol,
@@ -269,10 +242,10 @@ def run_cycle():
             "reason": f"Within limits (peak: +{round(peak_plpc, 2)}%)" if not sell_triggered else sell_reason
         }
         
-        # Stale Crypto Position Rotation rule (held >30 mins, flat <1.0%).
-        # Keep the FIRST stale candidate found (not can_rotate) so multiple stale
-        # positions don't overwrite each other to just the last one.
-        if age_hours >= 0.5 and unrealized_plpc < 1.0 and not sell_triggered and not can_rotate:
+        # Stale Crypto Position Rotation rule (held >30 mins flat <1.0%, or held >1 hour).
+        # We only sell stale/time-stopped positions if we have found a new momentum target to buy.
+        is_stale = (age_hours >= 0.5 and unrealized_plpc < 1.0) or (age_hours >= 1.0)
+        if is_stale and not sell_triggered and not can_rotate:
             can_rotate = True
             stale_symbol = symbol
             stale_unrealized_plpc = unrealized_plpc
@@ -295,7 +268,7 @@ def run_cycle():
                 should_notify = True
                 msg_lines.append(f"🔄 **Πωλήθηκε {symbol} (Kraken)**: {sell_reason}")
                 
-                log_trade(
+                log_trade(db_conn,
                     action="SELL",
                     ticker=symbol,
                     signal_strength="NO_MOMENTUM",
@@ -312,6 +285,7 @@ def run_cycle():
                 )
                 if symbol in new_state:
                     del new_state[symbol]
+                positions = [p for p in positions if p["symbol"] != symbol]
                 if symbol == stale_symbol:
                     can_rotate = False
             except Exception as e:
@@ -321,7 +295,7 @@ def run_cycle():
                 
         report["positions_managed"].append(pos_report)
         
-    save_state(new_state)
+    save_trading_state(db_conn, EXCHANGE_NAME, new_state)
     
     # Refresh balances if any action taken
     if managed_any:
@@ -345,27 +319,6 @@ def run_cycle():
         report["details"] = "No buying power available."
         skip_buying = True
         skip_reason = "No buying power available."
-        # Log SKIP
-        for pos in positions:
-            symbol = pos["symbol"]
-            sym_state = new_state.get(symbol, {})
-            ent_p = sym_state.get("entry_price", pos["current_price"])
-            real_plpc = (pos["current_price"] - ent_p) / ent_p if ent_p else 0.0
-            log_trade(
-                action="SKIP",
-                ticker=symbol,
-                signal_strength="NO_MOMENTUM",
-                momentum_pct=0.0,
-                entry_price=ent_p,
-                current_price=pos["current_price"],
-                unrealized_plpc=real_plpc,
-                order_id=None,
-                quantity=0.0,
-                estimated_value_eur=pos["value_eur"],
-                position_size_pct=100.0,
-                portfolio_equity=portfolio_value,
-                reason="No buying power — position fully deployed"
-            )
 
     if not skip_buying:
         # 3. Momentum Scan & Rotation
@@ -384,47 +337,96 @@ def run_cycle():
                     change_pct = (last_p - open_p) / open_p * 100.0
                 else:
                     change_pct = 0.0
+            hourly_change_pct = get_one_hour_momentum(db_conn, sym)
             candidates.append({
                 "symbol": sym,
                 "change_pct": change_pct,
+                "hourly_change_pct": hourly_change_pct,
                 "current_price": ticker['last']
             })
-        
-        candidates = sorted(candidates, key=lambda x: x["change_pct"], reverse=True)
+
+        # Sort by the strongest of daily vs hourly momentum.
+        candidates = sorted(
+            candidates,
+            key=lambda x: max(x["change_pct"], x["hourly_change_pct"] if x["hourly_change_pct"] is not None else -999.0),
+            reverse=True,
+        )
         report["scanned_assets"] = candidates[:10]
-    
-        signals = [c for c in candidates if c["change_pct"] >= 2.0]
+
+        signals = [
+            c for c in candidates
+            if c["change_pct"] >= 2.0
+            or (c["hourly_change_pct"] is not None and c["hourly_change_pct"] >= 1.5)
+        ]
     
         if signals:
             best_candidate = signals[0]
             symbol = best_candidate["symbol"]
             change_pct = best_candidate["change_pct"]
+            hourly_change_pct = best_candidate["hourly_change_pct"]
             current_price = best_candidate["current_price"]
-        
+
             is_rotation_execution = False
             if cash_eur <= 0.45 and can_rotate:
-                if change_pct >= 2.5:
+                if change_pct >= 2.5 or (hourly_change_pct is not None and hourly_change_pct >= 2.0):
                     is_rotation_execution = True
                 else:
                     report["action_taken"] = "SKIP"
-                    report["details"] = f"Stale position {stale_symbol} flagged, but new signal {symbol} is not strong enough to trigger rotation (needs >= 2.5%)."
+                    report["details"] = f"Stale position {stale_symbol} flagged, but new signal {symbol} is not strong enough to trigger rotation (needs daily >= 2.5% or hourly >= 2.0%)."
                     finalize()
                     return
-                
-            # Sizing and Signal Strength
+
+            # Sizing and Signal Strength: evaluate daily and hourly tiers
+            # independently, then keep whichever yields the larger size.
             max_position_pct = 0.50
+
+            # Daily tiers
             if change_pct >= 5.0:
-                signal_strength = "EXTREME_MOMENTUM"
-                sizing_mult = 1.0
+                daily_strength = "EXTREME_MOMENTUM"
+                daily_mult = 1.0
             elif change_pct >= 3.0:
-                signal_strength = "STRONG_MOMENTUM"
-                sizing_mult = 0.67
+                daily_strength = "STRONG_MOMENTUM"
+                daily_mult = 0.67
+            elif change_pct >= 2.0:
+                daily_strength = "MODERATE_MOMENTUM"
+                daily_mult = 0.33
             else:
-                signal_strength = "MODERATE_MOMENTUM"
-                sizing_mult = 0.33
-            
+                daily_strength = None
+                daily_mult = 0.0
+
+            # Hourly tiers
+            h = hourly_change_pct if hourly_change_pct is not None else -999.0
+            if h >= 3.0:
+                hourly_strength = "EXTREME_MOMENTUM"
+                hourly_mult = 1.0
+            elif h >= 2.0:
+                hourly_strength = "STRONG_MOMENTUM"
+                hourly_mult = 0.67
+            elif h >= 1.5:
+                hourly_strength = "MODERATE_MOMENTUM"
+                hourly_mult = 0.33
+            else:
+                hourly_strength = None
+                hourly_mult = 0.0
+
+            # Choose the stronger of the two tiers.
+            if hourly_mult > daily_mult:
+                signal_strength = hourly_strength
+                sizing_mult = hourly_mult
+                hourly_is_primary = True
+            else:
+                signal_strength = daily_strength if daily_strength is not None else hourly_strength
+                sizing_mult = daily_mult if daily_mult > 0.0 else hourly_mult
+                hourly_is_primary = False
+
             order_size_eur = portfolio_value * max_position_pct * sizing_mult
-        
+
+            # Human-readable momentum tag, noting the hourly driver when it wins.
+            if hourly_is_primary:
+                momentum_desc = f"{signal_strength} (+{round(hourly_change_pct, 2)}% 1h)"
+            else:
+                momentum_desc = f"{signal_strength} (+{round(change_pct, 2)}% intraday)"
+
             # If executing rotation, we sell the stale position FIRST!
             if is_rotation_execution:
                 try:
@@ -435,7 +437,7 @@ def run_cycle():
                     should_notify = True
                     msg_lines.append(f"🔄 **Περιστροφή Crypto (Kraken)**: Πωλήθηκε το στάσιμο **{stale_symbol}** (+{round(stale_unrealized_plpc, 2)}% μετά από {round(stale_age_hours, 2)} ώρες).")
                 
-                    log_trade(
+                    log_trade(db_conn,
                         action="SELL",
                         ticker=stale_symbol,
                         signal_strength="NO_MOMENTUM",
@@ -452,7 +454,8 @@ def run_cycle():
                     )
                     if stale_symbol in new_state:
                         del new_state[stale_symbol]
-                        save_state(new_state)
+                        save_trading_state(db_conn, EXCHANGE_NAME, new_state)
+                    positions = [p for p in positions if p["symbol"] != stale_symbol]
                     
                     time.sleep(1.5) # Wait for Kraken updates
                     balance = exchange.fetch_balance()
@@ -486,18 +489,22 @@ def run_cycle():
                     should_notify = True
                 
                     if is_rotation_execution:
-                        msg_lines.append(f"🛒 **Περιστροφή Crypto (Kraken)**: Αγοράστηκε το νέο hot **{symbol}** (EUR {round(order_size_eur, 2)} - {signal_strength} +{round(change_pct, 2)}%!)")
+                        msg_lines.append(f"🛒 **Περιστροφή Crypto (Kraken)**: Αγοράστηκε το νέο hot **{symbol}** (EUR {round(order_size_eur, 2)} - {momentum_desc}!)")
                     else:
-                        msg_lines.append(f"🛒 **Αγοράστηκε {symbol} (Kraken)** (EUR {round(order_size_eur, 2)} - {signal_strength} +{round(change_pct, 2)}%)")
+                        msg_lines.append(f"🛒 **Αγοράστηκε {symbol} (Kraken)** (EUR {round(order_size_eur, 2)} - {momentum_desc})")
                 
                     new_state[symbol] = {
                         "entry_price": current_price,
                         "entry_time": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                         "peak_plpc": 0.0
                     }
-                    save_state(new_state)
+                    save_trading_state(db_conn, EXCHANGE_NAME, new_state)
+                    positions.append({
+                        "symbol": symbol,
+                        "current_price": current_price
+                    })
                 
-                    log_trade(
+                    log_trade(db_conn,
                         action="BUY",
                         ticker=symbol,
                         signal_strength=signal_strength,
@@ -510,7 +517,7 @@ def run_cycle():
                         estimated_value_eur=order_size_eur,
                         position_size_pct=order_size_eur / portfolio_value * 100.0,
                         portfolio_equity=portfolio_value,
-                        reason=f"{signal_strength} (+{round(change_pct, 2)}% intraday) on {symbol}. Deployed EUR {round(order_size_eur, 2)} per {reason_rule}."
+                        reason=f"{momentum_desc} on {symbol}. Deployed EUR {round(order_size_eur, 2)} per {reason_rule}."
                     )
                 except Exception as e:
                     report["action_taken"] = "BUY_FAILED"

@@ -96,6 +96,22 @@ def query_one(sql, args=()):
     return rows[0] if rows else None
 
 
+def _atomic_write(path, content):
+    """Write a file atomically (temp + os.replace).
+
+    The 5-min v2 cron both reads ai_gate.json and imports the v2 script every
+    cycle. A plain truncate-then-write leaves a window where a concurrent reader
+    sees a half-written / empty file. os.replace is atomic on POSIX, so readers
+    only ever see the old or the new file — never a torn one.
+    """
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with open(tmp, "w") as f:
+        f.write(content)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
 # ---------------------------------------------------------------------------
 # Gather state
 # ---------------------------------------------------------------------------
@@ -195,16 +211,32 @@ def read_v2_config():
 # Apply actions from AI
 # ---------------------------------------------------------------------------
 def apply_parameter_change(param, value):
-    """Modify a constant in v2 script."""
+    """Modify a tunable constant in the v2 script — safely.
+
+    Only constants in ADJUSTMENT_BOUNDS are editable, and only numeric values.
+    The rewritten source is parsed with ast BEFORE it is swapped in, and the
+    swap is atomic, so a malformed edit can never crash the 5-min cron that is
+    importing this file.
+    """
+    if param not in ADJUSTMENT_BOUNDS:
+        return False, f"{param} is not an adjustable parameter"
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False, f"{param} value must be numeric (got {value!r})"
     with open(V2_SCRIPT) as f:
         src = f.read()
-    old_line = re.search(rf"^{param}\s*=.*$", src, re.MULTILINE)
-    if not old_line:
+    # Match only a top-level assignment, preserving any trailing comment.
+    pat = re.compile(rf"^{re.escape(param)}\s*=\s*[^\n#]*(\s*#.*)?$", re.MULTILINE)
+    m = pat.search(src)
+    if not m:
         return False, f"{param} not found"
-    new_line = f"{param} = {value!r}"
-    src = src[:old_line.start()] + new_line + src[old_line.end():]
-    with open(V2_SCRIPT, "w") as f:
-        f.write(src)
+    trailing = m.group(1) or ""
+    new_line = f"{param} = {value!r}{trailing}"
+    new_src = src[:m.start()] + new_line + src[m.end():]
+    try:
+        ast.parse(new_src)
+    except SyntaxError as e:
+        return False, f"{param} edit would break v2 syntax: {e}"
+    _atomic_write(V2_SCRIPT, new_src)
     return True, f"{param} → {value}"
 
 
@@ -214,7 +246,6 @@ def _log_trade(action, ticker, entry_price, current_price, quantity,
     conn = get_db()
     try:
         with conn.cursor() as cur:
-            from db_prices import log_trade as db_log_trade
             cur.execute(
                 "INSERT INTO trade_log (exchange, action, ticker, signal_strength, "
                 "entry_price, current_price, quantity, estimated_value, reason, "
@@ -233,18 +264,18 @@ def _log_trade(action, ticker, entry_price, current_price, quantity,
         conn.close()
 
 
-def _save_position(symbol, price):
-    """Save open position to trading_state."""
+def _save_position(symbol, price, quantity=0.0):
+    """Upsert an open position into trading_state (incl. quantity)."""
     conn = get_db()
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "DELETE FROM trading_state WHERE exchange=%s AND symbol=%s",
-                (EXCHANGE_NAME, symbol))
-            cur.execute(
                 "INSERT INTO trading_state (exchange, symbol, entry_price, "
-                "entry_time, peak_plpc) VALUES (%s,%s,%s,NOW(),0.0)",
-                (EXCHANGE_NAME, symbol, price))
+                "entry_time, peak_plpc, quantity) VALUES (%s,%s,%s,NOW(),0.0,%s) "
+                "ON CONFLICT (exchange, symbol) DO UPDATE SET "
+                "entry_price=EXCLUDED.entry_price, entry_time=NOW(), "
+                "peak_plpc=0.0, quantity=EXCLUDED.quantity",
+                (EXCHANGE_NAME, symbol, price, quantity))
         conn.commit()
     except Exception as e:
         print(f"_save_position failed: {e}", file=sys.stderr)
@@ -267,8 +298,27 @@ def _remove_position(symbol):
         conn.close()
 
 
+def _extract_fill(res, fallback_price):
+    """Recover actual average fill price + filled qty from a CCXT order."""
+    price, qty = None, None
+    if isinstance(res, dict):
+        for k in ("average", "price"):
+            v = res.get(k)
+            if v:
+                price = float(v)
+                break
+        filled = res.get("filled")
+        cost = res.get("cost")
+        if filled:
+            qty = float(filled)
+        if price is None and cost and filled:
+            price = float(cost) / float(filled)
+    return (price or fallback_price), qty
+
+
 def execute_trade(action, symbol, size_eur, reason):
     """Buy or sell via Kraken market order."""
+    action = action.upper()
     if size_eur > MAX_TRADE_SIZE_EUR:
         size_eur = MAX_TRADE_SIZE_EUR
     # Check available balance
@@ -281,40 +331,47 @@ def execute_trade(action, symbol, size_eur, reason):
         exchange.load_markets()
         ticker = exchange.fetch_ticker(symbol)
         price = ticker["last"]
-        if action.upper() == "BUY":
+        if action == "BUY":
             if available_eur < size_eur:
                 return False, f"Insufficient EUR: have €{available_eur:.2f}, need €{size_eur:.2f}"
             qty = size_eur / price
             fqty = float(exchange.amount_to_precision(symbol, qty))
             res = exchange.create_market_buy_order(symbol, fqty)
-            # Log to DB
-            _log_trade(action="BUY", ticker=symbol, entry_price=price,
-                       current_price=price, quantity=fqty,
-                       estimated_value=qty * price,
+            # Use real fill, not the pre-trade ticker — market orders slip.
+            fill_price, fill_qty = _extract_fill(res, price)
+            if fill_qty is None:
+                fill_qty = fqty
+            _log_trade(action="BUY", ticker=symbol, entry_price=fill_price,
+                       current_price=fill_price, quantity=fill_qty,
+                       estimated_value=fill_qty * fill_price,
                        reason=f"AI overseer: {reason}")
-            # Save to trading_state
-            _save_position(symbol, price)
-        elif action.upper() == "SELL":
-            # find position qty from trading_state
-            rows = query_all(
-                "SELECT quantity FROM trading_state WHERE exchange=%s AND symbol=%s",
-                (EXCHANGE_NAME, symbol))
-            if not rows:
+            _save_position(symbol, fill_price, fill_qty)
+        elif action == "SELL":
+            # Source of truth for qty is the actual on-exchange balance, then the
+            # stored quantity, then the last BUY in trade_log.
+            base = symbol.split("/")[0]
+            qty = float(balance.get(base, {}).get("free", 0.0) or 0.0)
+            if qty <= 0:
                 rows = query_all(
-                    "SELECT quantity FROM trade_log WHERE exchange=%s AND ticker=%s "
-                    "AND action='BUY' ORDER BY timestamp DESC LIMIT 1",
+                    "SELECT quantity FROM trading_state WHERE exchange=%s AND symbol=%s",
                     (EXCHANGE_NAME, symbol))
-            if not rows:
-                return False, f"No position found for {symbol}"
-            qty = float(rows[0][0])
+                if not rows or not rows[0][0]:
+                    rows = query_all(
+                        "SELECT quantity FROM trade_log WHERE exchange=%s AND ticker=%s "
+                        "AND action='BUY' ORDER BY timestamp DESC LIMIT 1",
+                        (EXCHANGE_NAME, symbol))
+                if not rows or not rows[0][0]:
+                    return False, f"No position found for {symbol}"
+                qty = float(rows[0][0])
             fqty = float(exchange.amount_to_precision(symbol, qty))
             res = exchange.create_market_sell_order(symbol, fqty)
-            # Log to DB
-            _log_trade(action="SELL", ticker=symbol, entry_price=price,
-                       current_price=price, quantity=fqty,
-                       estimated_value=qty * price,
+            fill_price, fill_qty = _extract_fill(res, price)
+            if fill_qty is None:
+                fill_qty = fqty
+            _log_trade(action="SELL", ticker=symbol, entry_price=fill_price,
+                       current_price=fill_price, quantity=fill_qty,
+                       estimated_value=fill_qty * fill_price,
                        reason=f"AI overseer: {reason}")
-            # Remove from trading_state
             _remove_position(symbol)
         else:
             return False, f"Unknown action: {action}"
@@ -332,8 +389,7 @@ def write_gates(gates, log):
         "reason": gates.get("reason"),
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
-    with open(GATES_FILE, "w") as f:
-        json.dump(payload, f, indent=2)
+    _atomic_write(GATES_FILE, json.dumps(payload, indent=2))
     log.append(f"GATES: paused={payload['script_paused']} consult={payload['consult_on_entry']} — {payload.get('reason', 'no reason')}")
 
 

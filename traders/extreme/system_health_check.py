@@ -124,6 +124,61 @@ def main():
         "kraken_state_exists": os.path.exists("PROJECT_ROOT/traders/extreme/kraken_state.json")
     }
 
+    # 5. Heartbeat & Logging Checks
+    now_ts = datetime.now(timezone.utc).timestamp()
+    heartbeats = {
+        "alpaca": {"cycle_alive": True, "log_healthy": True, "warnings": []},
+        "kraken": {"cycle_alive": True, "log_healthy": True, "warnings": []}
+    }
+    
+    # Check Alpaca cycle heartbeat (last_notify.json)
+    alpaca_notify_path = "PROJECT_ROOT/traders/extreme/last_notify.json"
+    if os.path.exists(alpaca_notify_path):
+        mtime = os.path.getmtime(alpaca_notify_path)
+        if now_ts - mtime > 900: # 15 minutes
+            heartbeats["alpaca"]["cycle_alive"] = False
+            heartbeats["alpaca"]["warnings"].append("Alpaca cycle has not executed in the last 15 minutes (potential hang).")
+    else:
+        heartbeats["alpaca"]["cycle_alive"] = False
+        heartbeats["alpaca"]["warnings"].append("Alpaca heartbeat file last_notify.json is missing.")
+        
+    # Check Kraken cycle heartbeat (kraken_last_notify.json)
+    kraken_notify_path = "PROJECT_ROOT/traders/extreme/kraken_last_notify.json"
+    if os.path.exists(kraken_notify_path):
+        mtime = os.path.getmtime(kraken_notify_path)
+        if now_ts - mtime > 900: # 15 minutes
+            heartbeats["kraken"]["cycle_alive"] = False
+            heartbeats["kraken"]["warnings"].append("Kraken cycle has not executed in the last 15 minutes (potential hang).")
+    else:
+        heartbeats["kraken"]["cycle_alive"] = False
+        heartbeats["kraken"]["warnings"].append("Kraken heartbeat file kraken_last_notify.json is missing.")
+
+    # Check Alpaca trade log modification if there are open positions
+    alpaca_positions = diagnostics.get("alpaca", {}).get("positions", [])
+    if alpaca_positions and isinstance(alpaca_positions, list) and len(alpaca_positions) > 0:
+        if os.path.exists(alpaca_log_path):
+            log_mtime = os.path.getmtime(alpaca_log_path)
+            if now_ts - log_mtime > 3600: # 1 hour
+                heartbeats["alpaca"]["log_healthy"] = False
+                heartbeats["alpaca"]["warnings"].append("Alpaca trade log has not been updated in over 1 hour despite active positions.")
+        else:
+            heartbeats["alpaca"]["log_healthy"] = False
+            heartbeats["alpaca"]["warnings"].append("Alpaca trade log is missing despite active positions.")
+
+    # Check Kraken trade log modification if there are open positions
+    kraken_positions = diagnostics.get("kraken", {}).get("positions", [])
+    if kraken_positions and isinstance(kraken_positions, list) and len(kraken_positions) > 0:
+        if os.path.exists(kraken_log_path):
+            log_mtime = os.path.getmtime(kraken_log_path)
+            if now_ts - log_mtime > 3600: # 1 hour
+                heartbeats["kraken"]["log_healthy"] = False
+                heartbeats["kraken"]["warnings"].append("Kraken trade log has not been updated in over 1 hour despite active positions.")
+        else:
+            heartbeats["kraken"]["log_healthy"] = False
+            heartbeats["kraken"]["warnings"].append("Kraken trade log is missing despite active positions.")
+
+    diagnostics["heartbeat_checks"] = heartbeats
+
     print(json.dumps(diagnostics, indent=2))
 
 if __name__ == "__main__":

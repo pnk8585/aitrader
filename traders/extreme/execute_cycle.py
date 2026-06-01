@@ -5,6 +5,11 @@ import time
 import requests
 from datetime import datetime, timezone
 from dotenv import load_dotenv
+from db_prices import (get_connection, get_one_hour_momentum,
+                       close_connection, base_symbol,
+                       load_trading_state, save_trading_state,
+                       load_notify_state, save_notify_state as db_save_notify_state,
+                       log_trade as db_log_trade)
 
 # Load environment variables
 env_path = "PROJECT_ROOT/.env"
@@ -36,67 +41,23 @@ PLOCK_FLOOR_PCT = 3.0       # Sell if we drop below +3.0% after hitting +5.0%
 LOG_DIR = "PROJECT_ROOT/logs"
 os.makedirs(LOG_DIR, exist_ok=True)
 
-STATE_FILE = "PROJECT_ROOT/traders/extreme/state.json"
-NOTIFY_STATE_FILE = "PROJECT_ROOT/traders/extreme/last_notify.json"
+EXCHANGE_NAME = "alpaca"
 
-def load_state():
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, "r") as f:
-                return json.load(f)
-        except:
-            pass
-    return {}
-
-def save_state(state):
-    try:
-        with open(STATE_FILE, "w") as f:
-            json.dump(state, f)
-    except Exception as e:
-        print(f"Error saving state: {e}", file=sys.stderr)
-
-def load_notify_state():
-    if os.path.exists(NOTIFY_STATE_FILE):
-        try:
-            with open(NOTIFY_STATE_FILE, "r") as f:
-                return json.load(f)
-        except:
-            pass
-    return {"last_notify_time": "1970-01-01T00:00:00Z", "last_market_open": False}
-
-def save_notify_state(state):
-    try:
-        with open(NOTIFY_STATE_FILE, "w") as f:
-            json.dump(state, f)
-    except Exception as e:
-        print(f"Error saving notify state: {e}", file=sys.stderr)
-
-def log_trade(action, ticker, asset_type, signal_strength, momentum_pct, entry_price, current_price, unrealized_plpc, order_id, client_order_id, quantity, estimated_value_usd, position_size_pct, portfolio_equity, reason):
-    log_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    log_file_path = os.path.join(LOG_DIR, f"trades-{log_date}.jsonl")
-    
-    log_entry = {
-        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        "cycle": 1,
-        "action": action,
-        "ticker": ticker,
-        "asset_type": asset_type,
-        "signal_strength": signal_strength,
-        "momentum_pct": round(momentum_pct, 4) if momentum_pct else 0.0,
-        "entry_price": round(entry_price, 4) if entry_price else 0.0,
-        "current_price": round(current_price, 4) if current_price else 0.0,
-        "unrealized_plpc": round(unrealized_plpc, 5) if unrealized_plpc else 0.0,
-        "order_id": order_id,
-        "client_order_id": client_order_id,
-        "quantity": round(quantity, 6) if quantity else 0.0,
-        "estimated_value_usd": round(estimated_value_usd, 2) if estimated_value_usd else 0.0,
-        "position_size_pct": round(position_size_pct, 4) if position_size_pct else 0.0,
-        "portfolio_equity_at_decision": round(portfolio_equity, 2) if portfolio_equity else 0.0,
-        "reason": reason
-    }
-    
-    with open(log_file_path, "a") as f:
-        f.write(json.dumps(log_entry) + "\n")
+def log_trade(db_conn, action, ticker, asset_type, signal_strength, momentum_pct, entry_price, current_price, unrealized_plpc, order_id, client_order_id, quantity, estimated_value_usd, position_size_pct, portfolio_equity, reason):
+    db_log_trade(
+        db_conn, EXCHANGE_NAME,
+        action=action, ticker=ticker, signal_strength=signal_strength,
+        momentum_pct=round(momentum_pct, 4) if momentum_pct else 0.0,
+        entry_price=round(entry_price, 4) if entry_price else 0.0,
+        current_price=round(current_price, 4) if current_price else 0.0,
+        unrealized_plpc=round(unrealized_plpc, 5) if unrealized_plpc else 0.0,
+        order_id=order_id, client_order_id=client_order_id,
+        quantity=round(quantity, 6) if quantity else 0.0,
+        estimated_value=round(estimated_value_usd, 2) if estimated_value_usd else 0.0,
+        position_size_pct=round(position_size_pct, 4) if position_size_pct else 0.0,
+        portfolio_equity=round(portfolio_equity, 2) if portfolio_equity else 0.0,
+        reason=reason,
+    )
 
 def get_position_age_hours(symbol):
     try:
@@ -125,10 +86,16 @@ def run_cycle():
         "action_taken": "NONE",
         "details": ""
     }
-    
+
+    # Alpaca is read-only: open connection for hourly momentum queries only.
+    # Kraken writes the prices; Alpaca reads them.
+    db_conn = get_connection()
+
     # Load state & notify state
-    state = load_state()
-    notify_state = load_notify_state()
+    state = load_trading_state(db_conn, EXCHANGE_NAME)
+    notify_state = load_notify_state(db_conn, EXCHANGE_NAME)
+    if "last_market_open" not in notify_state:
+        notify_state["last_market_open"] = False
     should_notify = False
     msg_lines = []
 
@@ -156,7 +123,8 @@ def run_cycle():
                 msg_lines.append("🔍 Καμία ανοιχτή θέση (100% Cash).")
             print("\n".join(msg_lines))
             notify_state["last_notify_time"] = now_utc.isoformat().replace("+00:00", "Z")
-        save_notify_state(notify_state)
+        db_save_notify_state(db_conn, EXCHANGE_NAME, notify_state)
+        close_connection(db_conn)
 
     # 1. Fetch Account Info
     acc_url = f"{ALPACA_BASE_URL}/v2/account"
@@ -250,11 +218,6 @@ def run_cycle():
         elif peak_plpc >= 1.0 and unrealized_plpc <= ROUND_TRIP_FEE_PCT:
             sell_triggered = True
             sell_reason = f"Breakeven protection (Peak was +{round(peak_plpc, 2)}% | Current: +{round(unrealized_plpc, 2)}% | fee floor +{ROUND_TRIP_FEE_PCT}%)"
-        # Time-stop (1 hour) - Crypto only
-        elif age_hours > 1.0:
-            sell_triggered = True
-            sell_reason = f"Held > 1 hour stale position (age: {round(age_hours, 2)} hours)"
-            
         pos_report = {
             "symbol": symbol,
             "unrealized_plpc": unrealized_plpc,
@@ -263,10 +226,10 @@ def run_cycle():
             "reason": f"Within limits (peak: +{round(peak_plpc, 2)}%)" if not sell_triggered else sell_reason
         }
         
-        # Check for Stale Crypto Position Rotation rule (held >30 mins, flat <1.0%).
-        # Keep the FIRST stale candidate found (not can_rotate) so multiple stale
-        # positions don't overwrite each other to just the last one.
-        if asset_type == "CRYPTO" and age_hours >= 0.5 and unrealized_plpc < 1.0 and not sell_triggered and not can_rotate:
+        # Check for Stale Crypto Position Rotation rule (held >30 mins flat <1.0%, or held >1 hour).
+        # We only sell stale/time-stopped positions if we have found a new momentum target to buy.
+        is_stale = asset_type == "CRYPTO" and ((age_hours >= 0.5 and unrealized_plpc < 1.0) or (age_hours >= 1.0))
+        if is_stale and not sell_triggered and not can_rotate:
             can_rotate = True
             stale_symbol = symbol
             stale_unrealized_plpc = unrealized_plpc
@@ -287,7 +250,7 @@ def run_cycle():
                     managed_any = True
                     should_notify = True
                     msg_lines.append(f"🔄 **Πωλήθηκε {symbol}**: {sell_reason}")
-                    log_trade(
+                    log_trade(db_conn,
                         action="SELL",
                         ticker=symbol,
                         asset_type=asset_type,
@@ -306,6 +269,7 @@ def run_cycle():
                     )
                     if symbol in new_state:
                         del new_state[symbol]
+                    positions = [p for p in positions if p["symbol"] != symbol]
                     if symbol == stale_symbol:
                         can_rotate = False
                 else:
@@ -317,7 +281,7 @@ def run_cycle():
         report["positions_managed"].append(pos_report)
 
     # Save state
-    save_state(new_state)
+    save_trading_state(db_conn, EXCHANGE_NAME, new_state)
 
     # Refresh account and positions if we sold anything
     if managed_any:
@@ -358,28 +322,10 @@ def run_cycle():
             qty = float(pos["qty"])
             entry_price = float(pos["avg_entry_price"])
             current_price = float(pos["current_price"])
-            log_trade(
-                action="SKIP",
-                ticker=symbol,
-                asset_type="CRYPTO",
-                signal_strength="NO_MOMENTUM",
-                momentum_pct=0.0,
-                entry_price=entry_price,
-                current_price=current_price,
-                unrealized_plpc=unrealized_plpc,
-                order_id=None,
-                client_order_id=None,
-                quantity=0.0,
-                estimated_value_usd=qty * current_price,
-                position_size_pct=100.0,
-                portfolio_equity=equity,
-                reason="No buying power — position fully deployed"
-            )
-
     if not skip_buying:
         # --- CRYPTO MOMENTUM SCAN & STALE POSITION ROTATION ---
         candidates = []
-    
+
         crypto_symbols_str = ",".join(CRYPTO_PAIRS)
         crypto_url = f"https://data.alpaca.markets/v1beta3/crypto/us/snapshots?symbols={crypto_symbols_str}"
         crypto_res = requests.get(crypto_url, headers=headers, timeout=10)
@@ -390,61 +336,110 @@ def run_cycle():
                     continue
                 if any(p["symbol"] == symbol for p in positions):
                     continue
-            
+
                 daily = snap.get("dailyBar")
                 if not daily:
                     continue
                 open_price = float(daily.get("o", 0.0))
                 if open_price <= 0:
                     continue
-            
+
                 current_price = float(daily.get("c", 0.0))
                 if current_price <= 0:
                     continue
-                
+
                 change_pct = (current_price - open_price) / open_price * 100.0
+
+                # Query hourly momentum from shared Kraken-written DB.
+                # Alpaca uses base symbols like 'BTC', matching the DB keys.
+                hourly_change_pct = get_one_hour_momentum(db_conn, base_symbol(symbol))
+
                 candidates.append({
                     "symbol": symbol,
                     "change_pct": change_pct,
+                    "hourly_change_pct": hourly_change_pct,
                     "current_price": current_price,
                     "volume": float(daily.get("v", 0.0))
                 })
-            
-        candidates = sorted(candidates, key=lambda x: x["change_pct"], reverse=True)
+
+        # Sort by the strongest of daily vs hourly momentum.
+        candidates = sorted(
+            candidates,
+            key=lambda x: max(x["change_pct"], x["hourly_change_pct"] if x["hourly_change_pct"] is not None else -999.0),
+            reverse=True,
+        )
         report["scanned_assets"] = candidates[:10]
-    
-        signals = [c for c in candidates if c["change_pct"] >= 2.0]
+
+        # Candidate qualification: daily >= 2.0 OR hourly >= 1.5
+        signals = [
+            c for c in candidates
+            if c["change_pct"] >= 2.0
+            or (c["hourly_change_pct"] is not None and c["hourly_change_pct"] >= 1.5)
+        ]
     
         # Decide if we execute rotation or normal purchase
         if signals:
             best_candidate = signals[0]
             symbol = best_candidate["symbol"]
             change_pct = best_candidate["change_pct"]
+            hourly_change_pct = best_candidate["hourly_change_pct"]
             current_price = best_candidate["current_price"]
-        
-            # Rotation Logic: Only rotate if the new signal is stronger!
+
+            # Rotation Logic: Only rotate if the new signal is strong enough!
+            # Rotation threshold: daily >= 2.5 OR hourly >= 2.0
             is_rotation_execution = False
             if buying_power <= 0 and can_rotate:
-                if change_pct >= 2.5:
+                if change_pct >= 2.5 or (hourly_change_pct is not None and hourly_change_pct >= 2.0):
                     is_rotation_execution = True
                 else:
                     report["action_taken"] = "SKIP"
-                    report["details"] = f"Stale position {stale_symbol} flagged, but best new signal {symbol} (+{round(change_pct, 2)}%) is not strong enough to trigger rotation (needs >= 2.5%)."
+                    report["details"] = f"Stale position {stale_symbol} flagged, but best new signal {symbol} is not strong enough to trigger rotation (needs daily >= 2.5% or hourly >= 2.0%)."
                     finalize()
                     return
-        
-            # Position Sizing
+
+            # Sizing and Signal Strength: evaluate daily and hourly tiers
+            # independently, then keep whichever yields the larger size.
             max_position_pct = float(os.getenv("MAX_POSITION_PCT", "0.50"))
+
+            # Daily tiers
             if change_pct >= 5.0:
-                signal_strength = "EXTREME_MOMENTUM"
-                sizing_mult = 1.0
+                daily_strength = "EXTREME_MOMENTUM"
+                daily_mult = 1.0
             elif change_pct >= 3.0:
-                signal_strength = "STRONG_MOMENTUM"
-                sizing_mult = 0.67
+                daily_strength = "STRONG_MOMENTUM"
+                daily_mult = 0.67
+            elif change_pct >= 2.0:
+                daily_strength = "MODERATE_MOMENTUM"
+                daily_mult = 0.33
             else:
-                signal_strength = "MODERATE_MOMENTUM"
-                sizing_mult = 0.33
-            
+                daily_strength = None
+                daily_mult = 0.0
+
+            # Hourly tiers
+            h = hourly_change_pct if hourly_change_pct is not None else -999.0
+            if h >= 3.0:
+                hourly_strength = "EXTREME_MOMENTUM"
+                hourly_mult = 1.0
+            elif h >= 2.0:
+                hourly_strength = "STRONG_MOMENTUM"
+                hourly_mult = 0.67
+            elif h >= 1.5:
+                hourly_strength = "MODERATE_MOMENTUM"
+                hourly_mult = 0.33
+            else:
+                hourly_strength = None
+                hourly_mult = 0.0
+
+            # Choose the stronger of the two tiers.
+            if hourly_mult > daily_mult:
+                signal_strength = hourly_strength
+                sizing_mult = hourly_mult
+                hourly_is_primary = True
+            else:
+                signal_strength = daily_strength if daily_strength is not None else hourly_strength
+                sizing_mult = daily_mult if daily_mult > 0.0 else hourly_mult
+                hourly_is_primary = False
+
             order_size_usd = equity * max_position_pct * sizing_mult
         
             # If executing rotation, we sell the stale position FIRST!
@@ -455,7 +450,7 @@ def run_cycle():
                     should_notify = True
                     msg_lines.append(f"🔄 **Περιστροφή Crypto**: Πωλήθηκε το στάσιμο **{stale_symbol}** (+{round(stale_unrealized_plpc, 2)}% μετά από {round(stale_age_hours, 2)} ώρες).")
                 
-                    log_trade(
+                    log_trade(db_conn,
                         action="SELL",
                         ticker=stale_symbol,
                         asset_type="CRYPTO",
@@ -474,7 +469,8 @@ def run_cycle():
                     )
                     if stale_symbol in new_state:
                         del new_state[stale_symbol]
-                        save_state(new_state)
+                        save_trading_state(db_conn, EXCHANGE_NAME, new_state)
+                    positions = [p for p in positions if p["symbol"] != stale_symbol]
                     
                     # Wait 1.5 seconds for Alpaca to update buying power
                     time.sleep(1.5)
@@ -523,13 +519,26 @@ def run_cycle():
                     report["details"] = f"Successfully placed buy order for {symbol} of amount ${round(order_size_usd, 2)}."
                     report["order_id"] = order.get("id")
                     should_notify = True
+                    positions.append({
+                        "symbol": symbol,
+                        "unrealized_plpc": 0.0,
+                        "qty": order_size_usd / current_price,
+                        "avg_entry_price": current_price,
+                        "current_price": current_price
+                    })
                 
-                    if is_rotation_execution:
-                        msg_lines.append(f"🛒 **Περιστροφή Crypto**: Αγοράστηκε το νέο hot **{symbol}** (${round(order_size_usd, 2)} - {signal_strength} +{round(change_pct, 2)}%!)")
+                    # Human-readable momentum tag, noting the hourly driver when it wins.
+                    if hourly_is_primary:
+                        momentum_desc = f"{signal_strength} (+{round(hourly_change_pct, 2)}% 1h)"
                     else:
-                        msg_lines.append(f"🛒 **Αγοράστηκε {symbol}** (${round(order_size_usd, 2)} - {signal_strength} +{round(change_pct, 2)}%)")
-                
-                    log_trade(
+                        momentum_desc = f"{signal_strength} (+{round(change_pct, 2)}% intraday)"
+
+                    if is_rotation_execution:
+                        msg_lines.append(f"🛒 **Περιστροφή Crypto**: Αγοράστηκε το νέο hot **{symbol}** (${round(order_size_usd, 2)} - {momentum_desc}!)")
+                    else:
+                        msg_lines.append(f"🛒 **Αγοράστηκε {symbol}** (${round(order_size_usd, 2)} - {momentum_desc})")
+
+                    log_trade(db_conn,
                         action="BUY",
                         ticker=symbol,
                         asset_type="CRYPTO",
@@ -544,7 +553,7 @@ def run_cycle():
                         estimated_value_usd=order_size_usd,
                         position_size_pct=order_size_usd / equity * 100.0,
                         portfolio_equity=equity,
-                        reason=f"{signal_strength} (+{round(change_pct, 2)}% intraday) on {symbol}. Deployed ${round(order_size_usd, 2)} per {reason_rule}."
+                        reason=f"{momentum_desc} on {symbol}. Deployed ${round(order_size_usd, 2)} per {reason_rule}."
                     )
                 else:
                     report["action_taken"] = "BUY_FAILED"

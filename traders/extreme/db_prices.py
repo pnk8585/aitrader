@@ -78,9 +78,14 @@ def ensure_schema(conn):
                 entry_price NUMERIC,
                 entry_time TIMESTAMP WITH TIME ZONE,
                 peak_plpc NUMERIC DEFAULT 0,
+                quantity NUMERIC DEFAULT 0,
                 updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
             )
             """
+        )
+        # Migration for tables created before the quantity column existed.
+        cur.execute(
+            "ALTER TABLE trading_state ADD COLUMN IF NOT EXISTS quantity NUMERIC DEFAULT 0"
         )
         cur.execute(
             """
@@ -250,22 +255,23 @@ def close_connection(conn):
 # ---------------------------------------------------------------------------
 
 def load_trading_state(conn, exchange):
-    """Load all positions for an exchange as a dict {symbol: {entry_price, entry_time, peak_plpc}}."""
+    """Load all positions for an exchange as a dict {symbol: {entry_price, entry_time, peak_plpc, quantity}}."""
     if conn is None:
         return {}
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT symbol, entry_price, entry_time, peak_plpc FROM trading_state WHERE exchange = %s",
+                "SELECT symbol, entry_price, entry_time, peak_plpc, quantity FROM trading_state WHERE exchange = %s",
                 (exchange,),
             )
             rows = cur.fetchall()
         state = {}
-        for symbol, ep, et, peak in rows:
+        for symbol, ep, et, peak, qty in rows:
             state[symbol] = {
                 "entry_price": float(ep) if ep else 0.0,
                 "entry_time": et.isoformat().replace("+00:00", "Z") if et else None,
                 "peak_plpc": float(peak) if peak else 0.0,
+                "quantity": float(qty) if qty else 0.0,
             }
         return state
     except Exception as e:
@@ -274,25 +280,47 @@ def load_trading_state(conn, exchange):
 
 
 def save_trading_state(conn, exchange, state):
-    """Upsert all positions for an exchange. state = {symbol: {entry_price, entry_time, peak_plpc}}."""
+    """Persist all positions for an exchange via UPSERT, then prune rows no
+    longer held. state = {symbol: {entry_price, entry_time, peak_plpc, quantity}}.
+
+    Uses ON CONFLICT upsert (not DELETE-all + INSERT) so a crash mid-write can
+    never leave the exchange with zero rows / lose live positions. Only symbols
+    absent from `state` are deleted, and that delete runs in the same
+    transaction as the upserts.
+    """
     if conn is None:
         return
     try:
         with conn.cursor() as cur:
-            # Delete all existing rows for this exchange first, then insert fresh
-            cur.execute("DELETE FROM trading_state WHERE exchange = %s", (exchange,))
             for symbol, data in state.items():
                 cur.execute(
-                    """INSERT INTO trading_state (exchange, symbol, entry_price, entry_time, peak_plpc, updated_at)
-                       VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)""",
+                    """INSERT INTO trading_state
+                           (exchange, symbol, entry_price, entry_time, peak_plpc, quantity, updated_at)
+                       VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                       ON CONFLICT (exchange, symbol) DO UPDATE SET
+                           entry_price = EXCLUDED.entry_price,
+                           entry_time  = EXCLUDED.entry_time,
+                           peak_plpc   = EXCLUDED.peak_plpc,
+                           quantity    = EXCLUDED.quantity,
+                           updated_at  = CURRENT_TIMESTAMP""",
                     (
                         exchange,
                         symbol,
                         data.get("entry_price"),
                         data.get("entry_time"),
                         data.get("peak_plpc", 0.0),
+                        data.get("quantity", 0.0),
                     ),
                 )
+            # Prune positions that are no longer held (closed since last save).
+            symbols = list(state.keys())
+            if symbols:
+                cur.execute(
+                    "DELETE FROM trading_state WHERE exchange = %s AND symbol <> ALL(%s)",
+                    (exchange, symbols),
+                )
+            else:
+                cur.execute("DELETE FROM trading_state WHERE exchange = %s", (exchange,))
         conn.commit()
     except Exception as e:
         print(f"save_trading_state failed: {e}", file=sys.stderr)
