@@ -704,11 +704,19 @@ def run_cycle():
         finalize()
         return
 
+    exchange.load_markets()
+    mkt = exchange.market(symbol)
     qty = order_size_eur / current_price
+    min_amt = mkt['limits']['amount']['min']
+    if min_amt and qty < min_amt:
+        report["action_taken"] = "SKIP"
+        report["details"] = (f"Order qty ({qty:.2f} {mkt['base']}) below exchange minimum "
+                             f"({min_amt} {mkt['base']}).")
+        finalize()
+        return
     momentum_desc = (f"PULLBACK_IN_UPTREND (3h +{round(best['t3'],2)}%, "
                      f"dip -{round(best['pullback'],2)}%, vol {round(best['rng'],2)}%)")
     try:
-        exchange.load_markets()
         fqty = float(exchange.amount_to_precision(symbol, qty))
         res = exchange.create_market_buy_order(symbol, fqty)
         # Use the ACTUAL average fill price/qty — market orders slip, and the
