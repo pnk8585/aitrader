@@ -11,6 +11,7 @@ import sys
 import json
 import re
 import ast
+import fcntl
 import ccxt
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
@@ -60,7 +61,6 @@ ADJUSTMENT_BOUNDS = {
     "BLOWOFF_GUARD_1H_PCT": (2.0, 8.0),
     "MIN_HARD_STOP_PCT": (1.0, 5.0),
     "TRAIL_ARM_PCT": (0.5, 3.0),
-    "TRAIL_GIVEBACK_PCT": (0.2, 1.5),
     "HARD_TP_CAP_PCT": (3.0, 15.0),
     "MAX_HOLD_HOURS": (4.0, 48.0),
     "DEPLOY_FRACTION": (0.1, 0.97),
@@ -464,6 +464,62 @@ Return JSON:
     return prompt
 
 
+def _build_review_prompt(pending, ctx, portfolio, available_eur, num_positions, recent_pnl):
+    """Build a focused prompt to evaluate ONE candidate trade setup via self-debate."""
+    sym = pending.get("symbol", "?")
+    bot = pending.get("bot", "?")
+    price = pending.get("price", "?")
+    score = pending.get("score", "?")
+    signals = pending.get("signals", {})
+    desc = pending.get("momentum_desc", "N/A")
+    strategy = pending.get("strategy", bot)
+
+    pnl_lines = []
+    wins = losses = 0
+    for t in recent_pnl[:10]:
+        ts, tk, pl, r = t
+        plf = float(pl) if pl else 0.0
+        if plf > 0:
+            wins += 1
+        elif plf < 0:
+            losses += 1
+        pnl_lines.append(f"  {ts.strftime('%H:%M')} {tk:10s} pl={plf*100:+.2f}% {r or ''}")
+    pnl_block = chr(10).join(pnl_lines) if pnl_lines else "  (no recent sells)"
+    track = f"{wins}W/{losses}L last {wins + losses}" if (wins + losses) else "no recent history"
+
+    prompt = f"""You are a disciplined crypto risk officer deciding whether to BUY {sym} on Kraken RIGHT NOW.
+
+CANDIDATE
+  Symbol: {sym}  Price: €{price}  Strategy: {strategy} ({bot})
+  Setup: {desc}
+  Quality score: {score}
+  Signals: {json.dumps(signals)}
+
+MARKET ({sym})
+  6h range: {ctx.get('rng6h_pct', 'N/A')}%   3h momentum: {ctx.get('mom3h_pct', 'N/A')}%
+
+PORTFOLIO
+  Equity ~€{portfolio or '?'}  Available EUR: €{available_eur:.2f}  Open positions: {num_positions}
+
+THIS BOT'S RECENT TRACK RECORD ({track}):
+{pnl_block}
+
+Debate this internally before answering. Do NOT show the debate.
+1. BULL CASE: What supports buying NOW? Momentum direction, setup quality ({score}), trend structure, room to run in the 6h range.
+2. BEAR CASE: What argues against? Recent losses in the track record, choppy/overextended price, weak score, thin macro, too little EUR (€{available_eur:.2f}) for a meaningful size.
+3. RISK ASSESSMENT: Weigh both sides. Is reward worth the downside? If the bot is bleeding ({track}), demand a stronger edge. If EUR can't fund a real position, lean REJECT.
+4. DECISION: Pick the side with stronger evidence.
+
+Then respond with VALID JSON only:
+{{
+  "verdict": "APPROVE or REJECT",
+  "reason": "Short explanation (max 100 chars)",
+  "confidence": 5
+}}
+Confidence 1-10. 1 = very unsure, 10 = extremely confident."""
+    return prompt
+
+
 def call_ai(prompt):
     client = OpenAI(api_key=DEEPSEEK_KEY, base_url=DEEPSEEK_BASE)
     resp = client.chat.completions.create(
@@ -500,7 +556,182 @@ def main():
     log.append(f"Open positions: {len(positions)}")
     log.append(f"Recent trades: {len(trades)}")
 
-    # 2. Build prompt & call AI
+    # ---------------------------------------------------------------
+    # 2a. Handle pending per-trade review (bot → AI → approve/reject)
+    # ---------------------------------------------------------------
+    PENDING_REVIEW_FILE = os.path.join(PROJECT_DIR, "ai_overseer/pending_review.json")
+    if os.path.exists(PENDING_REVIEW_FILE):
+        try:
+            with open(PENDING_REVIEW_FILE) as f:
+                pending = json.load(f)
+        except (json.JSONDecodeError, IOError):
+            pending = {}
+
+        if pending.get("status") == "pending":
+            sym = pending.get("symbol", "?")
+            bot = pending.get("bot", "?")
+            price = pending.get("price")
+            score = pending.get("score")
+            signals = pending.get("signals", {})
+            desc = pending.get("momentum_desc", "")
+            log.append(f"Processing pending review: {sym} ({bot}, score {score})")
+            # Capture candidate_id to detect overwrites during AI call
+            original_candidate_id = pending.get("candidate_id")
+
+            # Gather market context for this symbol only
+            ctx = {"symbol": sym, "price": price}
+            base = sym.split("/")[0] if "/" in sym else sym
+            row6 = query_one(
+                "SELECT MIN(price), MAX(price) FROM asset_prices "
+                "WHERE exchange=%s AND symbol=%s "
+                "AND timestamp >= CURRENT_TIMESTAMP - make_interval(mins => 360)",
+                (EXCHANGE_NAME, base))
+            rng6 = ((float(row6[1]) - float(row6[0])) / float(row6[0]) * 100.0
+                    if row6 and row6[0] and row6[1] and float(row6[0]) > 0 else None)
+            row3 = query_one(
+                "SELECT a.price / b.price - 1 FROM "
+                "(SELECT price FROM asset_prices WHERE exchange=%s AND symbol=%s "
+                " ORDER BY timestamp DESC LIMIT 1) a, "
+                "(SELECT price FROM asset_prices WHERE exchange=%s AND symbol=%s "
+                " AND timestamp <= CURRENT_TIMESTAMP - make_interval(mins => 180) "
+                " ORDER BY timestamp DESC LIMIT 1) b",
+                (EXCHANGE_NAME, base, EXCHANGE_NAME, base))
+            mom3 = (float(row3[0]) * 100.0 if row3 and row3[0] else None)
+            ctx["rng6h_pct"] = round(rng6, 2) if rng6 else "N/A"
+            ctx["mom3h_pct"] = round(mom3, 2) if mom3 else "N/A"
+
+            # Recent PnL for this bot
+            recent_pnl = query_all(
+                "SELECT timestamp, ticker, unrealized_plpc, reason FROM trade_log "
+                "WHERE exchange=%s AND action='SELL' "
+                "ORDER BY timestamp DESC LIMIT 20",
+                (bot,))
+
+            review_prompt = _build_review_prompt(pending, ctx, portfolio, available_eur,
+                                                  len(positions), recent_pnl)
+            try:
+                reply = call_ai(review_prompt)
+                log.append(f"Review AI reply received for {sym}")
+            except Exception as e:
+                log.append(f"Review AI call failed for {sym}: {e}")
+                with open(os.path.join(LOG_DIR, "last_review_reply.txt"), "w") as f:
+                    f.write(f"ERROR: {e}")
+                # Leave pending as-is for next retry
+                _write_log(log)
+                # Continue to main AI call below — don't block the overseer
+                pending = {}
+
+            if reply:
+                reply_clean = re.sub(r"^```(?:json)?\s*", "", reply.strip(), flags=re.MULTILINE)
+                reply_clean = re.sub(r"\s*```$", "", reply_clean.strip())
+                with open(os.path.join(LOG_DIR, "last_review_reply.txt"), "w") as f:
+                    f.write(reply_clean)
+                try:
+                    decision = json.loads(reply_clean)
+                    verdict = decision.get("verdict", "REJECT")
+                    reason = decision.get("reason", "")
+                    confidence = decision.get("confidence", 5)
+
+                    # Normalize: bots check for "approved"/"rejected" (with 'd')
+                    # while the prompt asks the AI for "APPROVE"/"REJECT"
+                    v = verdict.strip().upper()
+                    if v.startswith("APPROV"):
+                        pending["status"] = "approved"
+                        pending["verdict"] = "APPROVE"
+                    elif v.startswith("REJECT"):
+                        pending["status"] = "rejected"
+                        pending["verdict"] = "REJECT"
+                    else:
+                        pending["status"] = "rejected"
+                        pending["verdict"] = "REJECT"
+                        # Also propagate unknown verdict as the reason
+                        reason = f"Unknown verdict '{verdict}': {reason}" if reason else f"Unknown verdict '{verdict}'"
+                    pending["verdict_reason"] = reason
+                    pending["confidence"] = confidence
+                    PENDING_LOCK_FILE = os.path.join(PROJECT_DIR, "ai_overseer/.pending_review.lock")
+                    os.makedirs(os.path.dirname(PENDING_LOCK_FILE), exist_ok=True)
+                    pending["reviewed_at"] = datetime.now(timezone.utc).isoformat()
+
+                    # Re-read file under flock: if candidate_id changed, discard
+                    verdict_written = False
+                    try:
+                        with open(PENDING_LOCK_FILE, "w") as lf, \
+                             open(PENDING_REVIEW_FILE) as f_check:
+                            fcntl.flock(lf, fcntl.LOCK_EX)
+                            current = json.load(f_check)
+                            if current.get("candidate_id") != original_candidate_id:
+                                log.append(f"⚠️ Discarding verdict for {sym}: candidate changed "
+                                           f"(new candidate_id) during AI call")
+                                pending = {}
+                                verdict = None
+                            else:
+                                tmp = f"{PENDING_REVIEW_FILE}.tmp.{os.getpid()}"
+                                with open(tmp, "w") as f:
+                                    json.dump(pending, f, indent=2, default=str)
+                                    f.flush()
+                                    os.fsync(f.fileno())
+                                os.replace(tmp, PENDING_REVIEW_FILE)
+                                verdict_written = True
+                    except FileNotFoundError:
+                        log.append(f"⚠️ Discarding verdict for {sym}: pending file gone")
+                        pending = {}
+                        verdict = None
+                    except Exception:
+                        tmp = f"{PENDING_REVIEW_FILE}.tmp.{os.getpid()}"
+                        with open(tmp, "w") as f:
+                            json.dump(pending, f, indent=2, default=str)
+                            f.flush()
+                            os.fsync(f.fileno())
+                        os.replace(tmp, PENDING_REVIEW_FILE)
+                        verdict_written = True
+
+                    if not verdict_written and pending:
+                        tmp = f"{PENDING_REVIEW_FILE}.tmp.{os.getpid()}"
+                        with open(tmp, "w") as f:
+                            json.dump(pending, f, indent=2, default=str)
+                            f.flush()
+                            os.fsync(f.fileno())
+                        os.replace(tmp, PENDING_REVIEW_FILE)
+
+                    if verdict is not None:
+                        log.append(f"✅ Review verdict for {sym}: {verdict} — {reason}")
+                        emoji = "✅" if verdict == "APPROVE" else "❌"
+                        print(f"🤖 {emoji} {bot}: {verdict} {sym} — {reason}")
+                except (json.JSONDecodeError, KeyError) as e:
+                    log.append(f"Review verdict parse error for {sym}: {e}")
+                    # Don't leave pending — reject on parse failure
+                    pending["status"] = "rejected"
+                    pending["verdict"] = "REJECT"
+                    pending["verdict_reason"] = f"AI reply parse error: {e}"
+                    pending["reviewed_at"] = datetime.now(timezone.utc).isoformat()
+                    # Re-read file under flock: don't overwrite if candidate changed during AI call
+                    try:
+                        with open(PENDING_LOCK_FILE, "w") as lf, \
+                             open(PENDING_REVIEW_FILE) as f_check:
+                            fcntl.flock(lf, fcntl.LOCK_EX)
+                            current = json.load(f_check)
+                            if current.get("candidate_id") != original_candidate_id:
+                                log.append(f"⚠️ Not writing parse-error rejection for {sym}: "
+                                           f"candidate changed during AI call")
+                                pending = {}
+                            else:
+                                tmp = f"{PENDING_REVIEW_FILE}.tmp.{os.getpid()}"
+                                with open(tmp, "w") as f:
+                                    json.dump(pending, f, indent=2, default=str)
+                                    f.flush()
+                                    os.fsync(f.fileno())
+                                os.replace(tmp, PENDING_REVIEW_FILE)
+                    except FileNotFoundError:
+                        pending = {}
+                    except Exception:
+                        tmp = f"{PENDING_REVIEW_FILE}.tmp.{os.getpid()}"
+                        with open(tmp, "w") as f:
+                            json.dump(pending, f, indent=2, default=str)
+                            f.flush()
+                            os.fsync(f.fileno())
+                        os.replace(tmp, PENDING_REVIEW_FILE)
+
+    # 2b. Build prompt & call AI
     prompt = build_prompt(portfolio, positions, trades, market, config, available_eur)
     # log full prompt for debugging
     with open(os.path.join(LOG_DIR, "last_prompt.txt"), "w") as f:

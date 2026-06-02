@@ -22,6 +22,7 @@ Kraken plumbing, same "Kraken is the sole price writer" responsibility.
 import os
 import sys
 import json
+import uuid
 import fcntl
 import ccxt
 from datetime import datetime, timezone, timedelta
@@ -82,18 +83,20 @@ TREND_6H_MIN = 360         # price must also be > price 6h ago
 # --- Entry (buy the dip inside the uptrend, never the blow-off top) -------
 PULLBACK_MIN_PCT = 0.5     # current price must be >=0.5% below the last-1h high
 BLOWOFF_GUARD_1H_PCT = 4.0 # skip if 1h momentum > +4% (that's the top, it reverts)
+RR_MIN = 2.0               # require room-to-6h-high >= RR_MIN × stop distance (reward:risk gate)
 
 # --- Exits ----------------------------------------------------------------
-MIN_HARD_STOP_PCT = 2.5
+MIN_HARD_STOP_PCT = 2.0
 MAX_HARD_STOP_PCT = 8.0    # cap the vol-widened stop so a crazy range can't risk the account
-TRAIL_ARM_PCT = 1.5
-TRAIL_GIVEBACK_PCT = 0.7
+TRAIL_ARM_PCT = 2.5        # arm the trailing TP only after a real +2.5% peak
+TRAIL_GIVEBACK_FRAC = 0.40       # let winners run: give back 40% of the peak gain...
+TRAIL_GIVEBACK_MIN_PCT = 1.0     # ...but never trail tighter than this absolute floor
 HARD_TP_CAP_PCT = 6.0      # absolute take-profit ceiling
 MAX_HOLD_HOURS = 12.0      # only force-exit a *dead* (net-neg, trend-broken) bag
 STALE_HOLD_HOURS = 18.0    # free capital from a stalled, trend-broken, barely-green bag
 
 # --- Position sizing / risk -----------------------------------------------
-DEPLOY_FRACTION = 0.97     # deploy ~97% of cash into the single best setup
+DEPLOY_FRACTION = 0.60     # deploy ~60% of cash into the single best setup
 # Volatility-adjusted cap: never risk more than RISK_PER_TRADE_PCT of equity if
 # the stop is hit. size = riskEUR / (stop% / 100). Generous on purpose — it only
 # trims size on high-volatility coins whose stop sits far away; tight setups
@@ -126,6 +129,75 @@ def load_ai_gates():
         return {**default, **gates}
     except (json.JSONDecodeError, IOError):
         return default
+
+
+# ---------------------------------------------------------------------------
+# Pending AI review — bot finds candidates, AI approves before buying
+# ---------------------------------------------------------------------------
+PENDING_REVIEW_FILE = "PROJECT_ROOT/ai_overseer/pending_review.json"
+PENDING_LOCK_FILE = "PROJECT_ROOT/ai_overseer/.pending_review.lock"
+PENDING_REVIEW_TIMEOUT_MIN = 120  # drop stale pending after this many minutes
+
+
+def _with_pending_lock(func):
+    """Execute func with exclusive flock on the pending lock file."""
+    os.makedirs(os.path.dirname(PENDING_LOCK_FILE), exist_ok=True)
+    with open(PENDING_LOCK_FILE, "w") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        try:
+            return func()
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
+
+
+def load_pending_review():
+    """Read the pending review file. Returns dict with defaults if absent."""
+    default = {"status": None, "bot": None, "symbol": None,
+               "verdict": None, "verdict_reason": None,
+               "created_at": None, "reviewed_at": None}
+    if not os.path.exists(PENDING_REVIEW_FILE):
+        return default
+    try:
+        with open(PENDING_REVIEW_FILE) as f:
+            data = json.load(f)
+        return {**default, **data}
+    except (json.JSONDecodeError, IOError):
+        return default
+
+
+def write_pending_review(data):
+    """Atomically write pending review data (locked against concurrent bots)."""
+    os.makedirs(os.path.dirname(PENDING_REVIEW_FILE), exist_ok=True)
+    tmp = f"{PENDING_REVIEW_FILE}.tmp.{os.getpid()}"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2, default=str)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, PENDING_REVIEW_FILE)
+
+
+def clear_pending_review():
+    """Remove the pending review file."""
+    if os.path.exists(PENDING_REVIEW_FILE):
+        os.remove(PENDING_REVIEW_FILE)
+
+
+def _submit_candidate(pending_data):
+    """Submit candidate under lock — re-checks that no other bot got there first."""
+    def _do():
+        # Re-check under exclusive lock: another bot might have just submitted
+        if os.path.exists(PENDING_REVIEW_FILE):
+            try:
+                with open(PENDING_REVIEW_FILE) as f:
+                    existing = json.load(f)
+                if existing.get("status") == "pending":
+                    # Another bot already submitted — don't overwrite
+                    return False
+            except (json.JSONDecodeError, IOError):
+                pass
+        write_pending_review(pending_data)
+        return True
+    return _with_pending_lock(_do)
 
 
 COOLDOWN_MIN = 90          # per-coin cooldown after any exit (kills churn)
@@ -397,6 +469,10 @@ def run_cycle():
                     break
         elif has_fail:
             print(f"⚠️ Kraken pullback {action}: {report.get('details', '')}")
+        elif action == "PENDING_AI_REVIEW":
+            for line in msg_lines:
+                print(line)
+            should_notify = True
         elif hourly:
             pos_lines = []
             for p in positions:
@@ -494,16 +570,23 @@ def run_cycle():
         # dynamic stop: at least MIN_HARD_STOP_PCT, wider for volatile coins, but
         # capped at MAX_HARD_STOP_PCT so an extreme 6h range can't risk the account.
         rng_6h = get_range_pct(db_conn, symbol, 360)
+        # Tighten the stop to 60% of its distance when the day is already bleeding
+        # (realized <= -2.0%): protect remaining capital instead of giving losers room.
+        rpnl_today = realized_pnl_today_pct(db_conn)
+        stop_tighten = 0.6 if rpnl_today <= -2.0 else 1.0
         effective_stop = -min(MAX_HARD_STOP_PCT,
-                              max(MIN_HARD_STOP_PCT, 0.5 * (rng_6h or MIN_HARD_STOP_PCT * 2)))
+                              max(MIN_HARD_STOP_PCT, 0.5 * (rng_6h or MIN_HARD_STOP_PCT * 2))) * stop_tighten
 
         if unrealized_plpc <= effective_stop:
             sell, reason = True, f"Hard stop ({round(unrealized_plpc,2)}% <= {round(effective_stop,2)}%, rng6h={round(rng_6h or 0,2)}%)"
         elif unrealized_plpc >= HARD_TP_CAP_PCT:
             sell, reason = True, f"Take-profit cap (+{round(unrealized_plpc,2)}% >= +{HARD_TP_CAP_PCT}%)"
-        elif peak_plpc >= TRAIL_ARM_PCT and unrealized_plpc <= (peak_plpc - TRAIL_GIVEBACK_PCT):
+        elif peak_plpc >= TRAIL_ARM_PCT and unrealized_plpc <= (
+                peak_plpc - max(TRAIL_GIVEBACK_MIN_PCT, peak_plpc * TRAIL_GIVEBACK_FRAC)):
+            giveback = max(TRAIL_GIVEBACK_MIN_PCT, peak_plpc * TRAIL_GIVEBACK_FRAC)
             sell, reason = True, (f"Trailing TP (peak +{round(peak_plpc,2)}% -> "
-                                  f"+{round(unrealized_plpc,2)}%, net +{round(unrealized_plpc-ROUND_TRIP_FEE_PCT,2)}%)")
+                                  f"+{round(unrealized_plpc,2)}%, giveback {round(giveback,2)}%, "
+                                  f"net +{round(unrealized_plpc-ROUND_TRIP_FEE_PCT,2)}%)")
         elif age_hours >= MAX_HOLD_HOURS and unrealized_plpc < 0:
             # Only time-stop a DEAD bag: net-negative AND trend broken. Never a winner.
             trend_3h = get_momentum_over(db_conn, symbol, TREND_3H_MIN)
@@ -646,6 +729,18 @@ def run_cycle():
         if pullback < PULLBACK_MIN_PCT:
             continue
 
+        # R:R gate: upside room to the 6h high must be >= RR_MIN × the stop
+        # distance this setup would use. Rejects setups with little headroom
+        # above where the stop sits (asymmetric risk).
+        hi6h = get_recent_high(db_conn, sym, 360)
+        stop_dist = min(MAX_HARD_STOP_PCT,
+                        max(MIN_HARD_STOP_PCT, 0.5 * (rng or MIN_HARD_STOP_PCT * 2)))
+        if hi6h is None or hi6h <= 0:
+            continue
+        room_pct = (hi6h - price) / price * 100.0
+        if room_pct < RR_MIN * stop_dist:
+            continue
+
         # bounce gate: require price to be bouncing off lows,
         # not still falling (rejects falling knives)
         price_5m = get_momentum_over(db_conn, sym, 5)
@@ -680,6 +775,137 @@ def run_cycle():
         report["action_taken"] = "SKIP"
         report["details"] = (f"AI consult active: best score {round(best['score'],2)} "
                              f"< {CONSULT_MIN_SCORE} conviction floor.")
+        finalize()
+        return
+
+    # ---------------------------------------------------------------
+    # AI PER-TRADE REVIEW — every buy must be AI-approved first
+    # ---------------------------------------------------------------
+    pending = load_pending_review()
+    now_utc = datetime.now(timezone.utc)
+    execute_approved = False  # set True when AI approved a buy and we're executing
+
+    # Process existing verdict for THIS bot
+    if pending.get("status") == "approved" and pending.get("bot") == EXCHANGE_NAME:
+        # AI approved our pending candidate — execute the buy on this tick
+        approved_symbol = pending["symbol"]
+        # Check that the symbol is still valid
+        if approved_symbol not in [c["symbol"] for c in candidates]:
+            report["details"] = (f"AI approved {approved_symbol} but it's no longer "
+                                 f"a candidate — re-submitting {symbol}.")
+            clear_pending_review()
+        else:
+            symbol = approved_symbol
+            best = next(c for c in candidates if c["symbol"] == approved_symbol)
+            current_price = best["price"]
+            # Price deviation guard
+            recorded = pending.get("price")
+            ai_price = float(recorded) if recorded is not None else current_price
+            deviation = abs(current_price - ai_price) / ai_price * 100
+            if deviation > 2.0:
+                clear_pending_review()
+                report["details"] = (f"AI approved {approved_symbol} at €{ai_price:.2f} but "
+                                     f"price moved {deviation:.1f}% (now €{current_price:.2f}) — skipping.")
+                finalize()
+                return
+            clear_pending_review()
+            execute_approved = True  # skip re-submit, proceed to buy
+
+    elif pending.get("status") == "rejected" and pending.get("bot") == EXCHANGE_NAME:
+        # AI said no — clear and report
+        reason = pending.get("verdict_reason", "No reason given")
+        clear_pending_review()
+        report["action_taken"] = "SKIP"
+        report["details"] = f"AI rejected {pending['symbol']}: {reason}"
+        msg_lines.append(f"❌ AI απέρριψε {pending['symbol']}: {reason}")
+        should_notify = True
+        finalize()
+        return
+
+    elif pending.get("status") == "pending" and pending.get("bot") != EXCHANGE_NAME:
+        # Another bot has a pending review — skip this tick
+        # But if it's stale (>120min), clear it so we can proceed
+        stale = False
+        if pending.get("created_at"):
+            created = datetime.fromisoformat(pending["created_at"].replace("Z", "+00:00"))
+            age = (now_utc - created).total_seconds() / 60.0
+            if age > PENDING_REVIEW_TIMEOUT_MIN:
+                print(f"Other bot's pending review stale ({round(age)} min) — clearing.",
+                      file=sys.stderr)
+                clear_pending_review()
+                stale = True
+        if not stale:
+            report["action_taken"] = "SKIP"
+            report["details"] = (f"Other bot ({pending.get('bot')}) has a pending review — "
+                                 f"will re-check next tick.")
+            finalize()
+            return
+
+    elif pending.get("status") == "pending" and pending.get("bot") == EXCHANGE_NAME:
+        # Our own review is in progress — still waiting for AI
+        # Drop stale pending (AI might have crashed / never reviewed)
+        if pending.get("created_at"):
+            created = datetime.fromisoformat(pending["created_at"].replace("Z", "+00:00"))
+            age = (now_utc - created).total_seconds() / 60.0
+            if age > PENDING_REVIEW_TIMEOUT_MIN:
+                print(f"Stale pending review ({round(age)} min) — clearing.", file=sys.stderr)
+                clear_pending_review()
+            else:
+                report["action_taken"] = "SKIP"
+                report["details"] = (f"Waiting for AI review of {pending['symbol']} "
+                                     f"({round(age)} min old)")
+                finalize()
+                return
+        else:
+            report["action_taken"] = "SKIP"
+            report["details"] = f"Pending review active for {pending.get('symbol', '?')} — waiting"
+            finalize()
+            return
+
+    # No pending review for this bot — submit the best candidate to AI
+    # (unless the AI already approved a buy — skip to sizing/execution)
+    if not execute_approved:
+        pending = load_pending_review()  # reload in case we cleared stale above
+        if pending.get("status") is not None or pending.get("bot") is not None:
+            # Another bot's verdict or stale state exists — don't overwrite
+            report["action_taken"] = "SKIP"
+            report["details"] = (f"Pending state exists ({pending.get('status', '?')} "
+                                 f"bot={pending.get('bot', '?')}) — not overwriting.")
+            finalize()
+            return
+        pending_data = {
+            "bot": EXCHANGE_NAME,
+            "symbol": symbol,
+            "price": current_price,
+            "score": round(best["score"], 4),
+            "signals": {
+                "t3": round(best["t3"], 4) if best.get("t3") is not None else None,
+                "t6": round(best["t6"], 4) if best.get("t6") is not None else None,
+                "rng": round(best["rng"], 4) if best.get("rng") is not None else None,
+                "pullback": round(best["pullback"], 4) if best.get("pullback") is not None else None,
+                "h1": round(best["h1"], 4) if best.get("h1") is not None else None,
+            },
+            "momentum_desc": (f"3h +{round(best['t3'],2) if best.get('t3') else 0}%, "
+                              f"pullback -{round(best['pullback'],2) if best.get('pullback') else 0}%"),
+            "created_at": now_utc.isoformat(),
+            "candidate_id": str(uuid.uuid4()),
+            "status": "pending",
+            "verdict": None,
+            "verdict_reason": None,
+            "reviewed_at": None,
+        }
+        submitted = _submit_candidate(pending_data)
+        if submitted:
+            report["action_taken"] = "PENDING_AI_REVIEW"
+            report["details"] = (f"Candidate {symbol} (score {round(best['score'],2)}) "
+                                 f"submitted for AI review.")
+            msg_lines.append(f"🤔 **{symbol} (Kraken pullback)** σε αναμονή AI αξιολόγησης "
+                             f"(score {round(best['score'],1)})")
+            should_notify = True
+        else:
+            report["action_taken"] = "SKIP"
+            report["details"] = (f"Other bot submitted first — "
+                                 f"will check again next cycle.")
         finalize()
         return
 

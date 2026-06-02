@@ -16,7 +16,12 @@ two strategies fighting over the same coin:
 Each strategy has its own lock file so a */5 cron overlap can't double-fire.
 """
 
-import os, sys, json, time, fcntl
+import os
+import sys
+import json
+import uuid
+import time
+import fcntl
 import ccxt
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
@@ -72,8 +77,8 @@ TTP_PEAK_PCT = 3.0          # trailing take-profit arms after +3.0% peak
 TTP_GIVEBACK_PCT = 1.0      # ...sell if we give back 1.0% from peak
 PLOCK_PEAK_PCT = 5.0        # profit-lock arms after +5.0% peak
 PLOCK_FLOOR_PCT = 3.0       # ...sell if we drop below +3.0%
-STOP_LOSS_PCT = -3.5        # hard stop-loss
-BREAKEVEN_PEAK_PCT = 1.0    # breakeven protection: peak armed >= +1.0%...
+STOP_LOSS_PCT = -2.5        # hard stop-loss
+BREAKEVEN_PEAK_PCT = 2.0    # breakeven protection: peak armed >= +2.0%...
 # ...exits at the fee floor (ROUND_TRIP_FEE_PCT) so we never round-trip a loss.
 STALE_FLAT_HOURS = 0.75     # held >45min and still flat (<+1.0%) => rotation candidate
 STALE_FLAT_PLPC = 1.0
@@ -81,7 +86,7 @@ STALE_MAX_HOURS = 1.5       # held >1.5h => rotation candidate regardless
 MAX_HOLD_HOURS = 12.0       # hard time-stop
 
 # --- Position sizing / risk -----------------------------------------------
-DEPLOY_FRACTION = 0.97     # base fraction of cash to deploy on the best setup
+DEPLOY_FRACTION = 0.60     # base fraction of cash to deploy on the best setup
 RISK_PER_TRADE_PCT = 4.0   # volatility cap: never risk more than this if stopped
 MIN_TRADE_EUR = 0.45       # Kraken minimum
 MAX_OPEN_MOMENTUM = 2      # max positions this strategy holds at once
@@ -114,6 +119,73 @@ def load_ai_gates():
 
 
 # ---------------------------------------------------------------------------
+# Pending AI review — bot finds candidates, AI approves before buying
+# ---------------------------------------------------------------------------
+PENDING_REVIEW_FILE = "PROJECT_ROOT/ai_overseer/pending_review.json"
+PENDING_LOCK_FILE = "PROJECT_ROOT/ai_overseer/.pending_review.lock"
+PENDING_REVIEW_TIMEOUT_MIN = 120
+
+
+def _with_pending_lock(func):
+    """Execute func with exclusive flock on the pending lock file."""
+    os.makedirs(os.path.dirname(PENDING_LOCK_FILE), exist_ok=True)
+    with open(PENDING_LOCK_FILE, "w") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        try:
+            return func()
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
+
+
+def load_pending_review():
+    """Read the pending review file. Returns dict with defaults if absent."""
+    default = {"status": None, "bot": None, "symbol": None,
+               "verdict": None, "verdict_reason": None,
+               "created_at": None, "reviewed_at": None}
+    if not os.path.exists(PENDING_REVIEW_FILE):
+        return default
+    try:
+        with open(PENDING_REVIEW_FILE) as f:
+            data = json.load(f)
+        return {**default, **data}
+    except (json.JSONDecodeError, IOError):
+        return default
+
+
+def write_pending_review(data):
+    """Atomically write pending review data."""
+    os.makedirs(os.path.dirname(PENDING_REVIEW_FILE), exist_ok=True)
+    tmp = f"{PENDING_REVIEW_FILE}.tmp.{os.getpid()}"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2, default=str)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, PENDING_REVIEW_FILE)
+
+
+def clear_pending_review():
+    """Remove the pending review file."""
+    if os.path.exists(PENDING_REVIEW_FILE):
+        os.remove(PENDING_REVIEW_FILE)
+
+
+def _submit_candidate(pending_data):
+    """Submit candidate under lock — re-checks that no other bot got there first."""
+    def _do():
+        if os.path.exists(PENDING_REVIEW_FILE):
+            try:
+                with open(PENDING_REVIEW_FILE) as f:
+                    existing = json.load(f)
+                if existing.get("status") == "pending":
+                    return False
+            except (json.JSONDecodeError, IOError):
+                pass
+        write_pending_review(pending_data)
+        return True
+    return _with_pending_lock(_do)
+
+
+COOLDOWN_MIN = 90          # per-coin cooldown after any exit
 # Local SQL helpers (read-only; asset_prices is written by this cycle)
 # ---------------------------------------------------------------------------
 def get_momentum_over(conn, symbol, minutes):
@@ -357,6 +429,10 @@ def run_cycle():
                     break
         elif has_fail:
             print(f"⚠️ Kraken momentum {action}: {report.get('details', '')}")
+        elif action == "PENDING_AI_REVIEW":
+            for line in msg_lines:
+                print(line)
+            should_notify = True
         elif hourly:
             pos_lines = []
             for p in my_positions:
@@ -629,6 +705,137 @@ def run_cycle():
                              f"< {CONSULT_MIN_SCORE} conviction floor.")
         finalize()
         return
+
+    # ---------------------------------------------------------------
+    # AI PER-TRADE REVIEW — every buy must be AI-approved first
+    # ---------------------------------------------------------------
+    pending = load_pending_review()
+    now_utc = datetime.now(timezone.utc)
+    execute_approved = False  # set True when AI approved a buy and we're executing
+
+    # Process existing verdict for THIS bot
+    if pending.get("status") == "approved" and pending.get("bot") == EXCHANGE_NAME:
+        # AI approved our pending candidate — execute the buy on this tick
+        approved_symbol = pending["symbol"]
+        # Check that the symbol is still valid
+        if approved_symbol in [c["symbol"] for c in candidates]:
+            symbol = approved_symbol
+            best = next(c for c in candidates if c["symbol"] == approved_symbol)
+            current_price = best["price"]
+            # Price deviation guard
+            recorded = pending.get("price")
+            ai_price = float(recorded) if recorded is not None else current_price
+            deviation = abs(current_price - ai_price) / ai_price * 100
+            if deviation > 2.0:
+                clear_pending_review()
+                report["details"] = (f"AI approved {approved_symbol} at €{ai_price:.2f} but "
+                                     f"price moved {deviation:.1f}% (now €{current_price:.2f}) — skipping.")
+                finalize()
+                return
+            clear_pending_review()
+            execute_approved = True  # skip re-submit, proceed to buy
+        else:
+            # Approved coin no longer in candidates — can't buy
+            report["action_taken"] = "SKIP"
+            report["details"] = (f"AI approved {approved_symbol} but it no longer passes "
+                                 f"entry filters — re-submitting.")
+            clear_pending_review()
+            # Fall through to submit new candidate below
+
+    elif pending.get("status") == "rejected" and pending.get("bot") == EXCHANGE_NAME:
+        reason = pending.get("verdict_reason", "No reason given")
+        clear_pending_review()
+        report["action_taken"] = "SKIP"
+        report["details"] = f"AI rejected {pending['symbol']}: {reason}"
+        msg_lines.append(f"❌ AI απέρριψε {pending['symbol']}: {reason}")
+        should_notify = True
+        finalize()
+        return
+
+    elif pending.get("status") == "pending" and pending.get("bot") != EXCHANGE_NAME:
+        # Another bot has a pending review — skip this tick
+        # But if it's stale (>120min), clear it so we can proceed
+        stale = False
+        if pending.get("created_at"):
+            created = datetime.fromisoformat(pending["created_at"].replace("Z", "+00:00"))
+            age = (now_utc - created).total_seconds() / 60.0
+            if age > PENDING_REVIEW_TIMEOUT_MIN:
+                print(f"Other bot's pending review stale ({round(age)} min) — clearing.",
+                      file=sys.stderr)
+                clear_pending_review()
+                stale = True
+        if not stale:
+            report["action_taken"] = "SKIP"
+            report["details"] = (f"Other bot ({pending.get('bot')}) has a pending review — "
+                                 f"will re-check next tick.")
+            finalize()
+            return
+
+    elif pending.get("status") == "pending" and pending.get("bot") == EXCHANGE_NAME:
+        # Our own review is in progress — still waiting for AI
+        # Drop stale pending (AI might have crashed / never reviewed)
+        if pending.get("created_at"):
+            created = datetime.fromisoformat(pending["created_at"].replace("Z", "+00:00"))
+            age = (now_utc - created).total_seconds() / 60.0
+            if age > PENDING_REVIEW_TIMEOUT_MIN:
+                print(f"Stale pending review ({round(age)} min) — clearing.", file=sys.stderr)
+                clear_pending_review()
+            else:
+                report["action_taken"] = "SKIP"
+                report["details"] = (f"Waiting for AI review of {pending['symbol']} "
+                                     f"({round(age)} min old)")
+                finalize()
+                return
+        else:
+            report["action_taken"] = "SKIP"
+            report["details"] = f"Pending review active for {pending.get('symbol', '?')} — waiting"
+            finalize()
+            return
+
+    # Check if we need to submit a new candidate (no pending, or pending was cleared)
+    # (unless the AI already approved a buy — skip to rotation/execution)
+    if not execute_approved:
+        pending = load_pending_review()  # reload in case we cleared above
+        if pending.get("status") is None and pending.get("bot") is None:
+            # No pending review — submit the best candidate to AI
+            daily_str = f"+{round(best['daily'],2)}%" if best.get('daily') is not None else "N/A"
+            hourly_str = f"+{round(best['hourly'],2)}%" if best.get('hourly') is not None else "N/A"
+            pending_data = {
+                "bot": EXCHANGE_NAME,
+                "strategy": "momentum-breakout",
+                "symbol": symbol,
+                "price": current_price,
+                "score": round(best["score"], 4),
+                "signals": {
+                    "daily": round(best["daily"], 4) if best.get("daily") is not None else None,
+                    "hourly": round(best["hourly"], 4) if best.get("hourly") is not None else None,
+                    "signal": best.get("signal"),
+                    "mult": best.get("mult"),
+                },
+                "momentum_desc": f"{best['signal']} (daily {daily_str}, hourly {hourly_str})",
+                "created_at": now_utc.isoformat(),
+                "candidate_id": str(uuid.uuid4()),
+                "status": "pending",
+                "verdict": None,
+                "verdict_reason": None,
+                "reviewed_at": None,
+            }
+            submitted = _submit_candidate(pending_data)
+            if submitted:
+                report["action_taken"] = "PENDING_AI_REVIEW"
+                report["details"] = (f"Candidate {symbol} (score {round(best['score'],2)}) "
+                                     f"submitted for AI review.")
+                msg_lines.append(f"🤔 **{symbol} (Kraken momentum)** σε αναμονή AI αξιολόγησης "
+                                 f"(score {round(best['score'],1)})")
+                should_notify = True
+            else:
+                report["action_taken"] = "SKIP"
+                report["details"] = (f"Other bot submitted first — "
+                                     f"will check again next cycle.")
+            finalize()
+            return
+    # If we reach here, the AI approved a buy and we kept the symbol — proceed below.
+    # If we didn't keep the symbol, finalize() already returned.
 
     # If we are out of cash / at the momentum cap but flagged a stale position,
     # only rotate when the fresh signal is clearly stronger than a plain entry.
