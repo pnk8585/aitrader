@@ -441,25 +441,26 @@ Market snapshot:
 Current script config (v2):
 {chr(10).join(config_lines) if config_lines else '  (empty)'}
 
-YOUR JOB (respond with VALID JSON only — no markdown, no explanation):
-1. ANALYSIS: 1-2 sentence summary of what's happening in the market right now.
+YOUR JOB (respond with ONLY valid JSON — no markdown, no backticks, no explanation):
+1. ANALYSIS: 1-2 sentence summary.
 2. PARAMETER_ADJUSTMENTS: If the script is tuned wrong, suggest new values. Bounds:
    {json.dumps(ADJUSTMENT_BOUNDS, indent=2)}
-3. TRADE_SIGNALS: If you see a clear opportunity the script is missing (e.g., a regime shift, a pair not in the pool, a breakout the script's pullback logic would reject), suggest a direct trade. Max {MAX_TRADE_SIZE_EUR} EUR per trade.
+3. TRADE_SIGNALS: **You MUST submit a BUY signal when you see a strong setup.** Available EUR is €{available_eur:.2f}. Look for: NEAR/RENDER with strong 3h momentum (>+1%) and high vol (>5%), or any pair with momentum >+2%. If no pair qualifies, leave empty. Max {MAX_TRADE_SIZE_EUR} EUR per trade.
 4. GATES: Set conditions for the 5-min script. Use these sparingly — only when market regime demands it:
-   - script_paused: true/false — stop the script from trading entirely
-   - consult_on_entry: true/false — script must get AI approval before entering
+   - script_paused: true/false
+   - consult_on_entry: true/false
    - reason: short explanation
 5. SCRIPT_IMPROVEMENTS: Any logic changes the script needs (1 sentence max).
 
-Return JSON:
-{{
+Return strict JSON — no comments, no trailing commas:
+{{{{
   "analysis": "...",
   "parameter_adjustments": [{{"param": "PARAM_NAME", "value": number, "reason": "..."}}],
-  "trade_signals": [{{"action": "BUY|SELL", "symbol": "BTC/EUR", "size_eur": number, "reason": "..."}}],
+  "trade_signals": [{{"action": "BUY", "symbol": "NEAR/EUR", "size_eur": {MAX_TRADE_SIZE_EUR}, "reason": "..."}}],
   "gates": {{ "script_paused": false, "consult_on_entry": false, "reason": null }},
   "script_improvements": ["..."]
-}}
+}}}}
+IMPORTANT: If NEAR/EUR or RENDER/EUR has 3h momentum > +1% AND 6h range > 5% AND you have available EUR, you SHOULD submit a BUY signal. Available EUR: €{available_eur:.2f}.
 """
     return prompt
 
@@ -518,6 +519,19 @@ Then respond with VALID JSON only:
 }}
 Confidence 1-10. 1 = very unsure, 10 = extremely confident."""
     return prompt
+
+
+def _extract_json(text):
+    """Extract JSON from AI response — handles markdown fences, leading/trailing text."""
+    # Strip markdown fences
+    text = re.sub(r"^```(?:json)?\s*\n?", "", text.strip(), flags=re.MULTILINE)
+    text = re.sub(r"\s*```\s*$", "", text.strip())
+    # Find first { and last }
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        text = text[start:end+1]
+    return text
 
 
 def call_ai(prompt):
@@ -622,8 +636,7 @@ def main():
                 pending = {}
 
             if reply:
-                reply_clean = re.sub(r"^```(?:json)?\s*", "", reply.strip(), flags=re.MULTILINE)
-                reply_clean = re.sub(r"\s*```$", "", reply_clean.strip())
+                reply_clean = _extract_json(reply)
                 with open(os.path.join(LOG_DIR, "last_review_reply.txt"), "w") as f:
                     f.write(reply_clean)
                 try:
@@ -747,16 +760,23 @@ def main():
     with open(os.path.join(LOG_DIR, "last_reply.txt"), "w") as f:
         f.write(reply)
 
-    # 3. Parse JSON
-    # Strip markdown fences if present
-    reply_clean = re.sub(r"^```(?:json)?\s*", "", reply.strip(), flags=re.MULTILINE)
-    reply_clean = re.sub(r"\s*```$", "", reply_clean.strip())
+    # 3. Parse JSON — retry once if invalid
+    reply_clean = _extract_json(reply)
     try:
         decision = json.loads(reply_clean)
     except json.JSONDecodeError:
-        log.append(f"AI reply not valid JSON: {reply[:500]}")
-        _write_log(log)
-        return
+        log.append(f"AI reply not valid JSON (1st attempt): {reply[:300]}...")
+        # Retry: ask again with stricter instruction
+        try:
+            retry_prompt = prompt + "\n\n⚠️ Your previous response was NOT valid JSON. Return ONLY raw JSON with no backticks, no markdown, no extra text. Start with { and end with }."
+            reply2 = call_ai(retry_prompt)
+            reply2_clean = _extract_json(reply2)
+            decision = json.loads(reply2_clean)
+            log.append("AI replied valid JSON on retry")
+        except (json.JSONDecodeError, Exception) as e2:
+            log.append(f"AI reply not valid JSON (retry failed): {e2}")
+            _write_log(log)
+            return
 
     log.append(f"AI analysis: {decision.get('analysis', '(none)')}")
 
