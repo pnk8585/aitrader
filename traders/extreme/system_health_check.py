@@ -17,7 +17,8 @@ def get_last_n_lines(filepath, n=15):
         return [f"Error reading log {filepath}: {e}"]
 
 def main():
-    env_path = "PROJECT_ROOT/.env"
+    ROOT_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+    env_path = os.path.join(ROOT_DIR, ".env")
     load_dotenv(dotenv_path=env_path)
 
     diagnostics = {
@@ -112,16 +113,16 @@ def main():
 
     # 3. Read Trade Logs
     log_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    alpaca_log_path = f"PROJECT_ROOT/logs/trades-{log_date}.jsonl"
-    kraken_log_path = f"PROJECT_ROOT/logs/kraken_trades-{log_date}.jsonl"
+    alpaca_log_path = os.path.join(ROOT_DIR, f"logs/trades-{log_date}.jsonl")
+    kraken_log_path = os.path.join(ROOT_DIR, f"logs/kraken_trades-{log_date}.jsonl")
     
     diagnostics["recent_logs"]["alpaca_trades"] = get_last_n_lines(alpaca_log_path, 10)
     diagnostics["recent_logs"]["kraken_trades"] = get_last_n_lines(kraken_log_path, 10)
 
     # 4. Check for state files
     diagnostics["state_files"] = {
-        "alpaca_state_exists": os.path.exists("PROJECT_ROOT/traders/extreme/state.json"),
-        "kraken_state_exists": os.path.exists("PROJECT_ROOT/traders/extreme/kraken_state.json")
+        "alpaca_state_exists": os.path.exists(os.path.join(ROOT_DIR, "traders/extreme/state.json")),
+        "kraken_state_exists": os.path.exists(os.path.join(ROOT_DIR, "traders/extreme/kraken_state.json"))
     }
 
     # 5. Heartbeat & Logging Checks
@@ -132,7 +133,7 @@ def main():
     }
     
     # Check Alpaca cycle heartbeat (last_notify.json)
-    alpaca_notify_path = "PROJECT_ROOT/traders/extreme/last_notify.json"
+    alpaca_notify_path = os.path.join(ROOT_DIR, "traders/extreme/last_notify.json")
     if os.path.exists(alpaca_notify_path):
         mtime = os.path.getmtime(alpaca_notify_path)
         if now_ts - mtime > 900: # 15 minutes
@@ -143,7 +144,7 @@ def main():
         heartbeats["alpaca"]["warnings"].append("Alpaca heartbeat file last_notify.json is missing.")
         
     # Check Kraken cycle heartbeat (kraken_last_notify.json)
-    kraken_notify_path = "PROJECT_ROOT/traders/extreme/kraken_last_notify.json"
+    kraken_notify_path = os.path.join(ROOT_DIR, "traders/extreme/kraken_last_notify.json")
     if os.path.exists(kraken_notify_path):
         mtime = os.path.getmtime(kraken_notify_path)
         if now_ts - mtime > 900: # 15 minutes

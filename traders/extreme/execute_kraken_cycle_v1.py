@@ -12,7 +12,8 @@ from db_prices import (get_connection, insert_prices, get_one_hour_momentum,
                        log_trade as db_log_trade)
 
 # Load environment variables
-env_path = "PROJECT_ROOT/.env"
+ROOT_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+env_path = os.path.join(ROOT_DIR, ".env")
 load_dotenv(dotenv_path=env_path)
 
 KRAKEN_API_KEY = os.getenv("KRAKEN_API_KEY")
@@ -41,7 +42,7 @@ TTP_GIVEBACK_PCT = 1.0      # Sell if we give back 1.0% from peak
 PLOCK_PEAK_PCT = 5.0        # Profit-Lock: activate after +5.0% peak
 PLOCK_FLOOR_PCT = 3.0       # Sell if we drop below +3.0% after hitting +5.0%
 
-LOG_DIR = "PROJECT_ROOT/logs"
+LOG_DIR = os.path.join(ROOT_DIR, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
 EXCHANGE_NAME = "kraken"

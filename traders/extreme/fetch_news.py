@@ -4,7 +4,8 @@ import requests
 from dotenv import load_dotenv
 
 def main():
-    env_path = "PROJECT_ROOT/.env"
+    ROOT_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+    env_path = os.path.join(ROOT_DIR, ".env")
     load_dotenv(dotenv_path=env_path)
 
     api_key = os.getenv("ALPACA_API_KEY")

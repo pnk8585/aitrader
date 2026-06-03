@@ -27,7 +27,8 @@ from db_prices import (get_connection, close_connection,
                        log_trade as db_log_trade)
 
 # Load environment variables
-env_path = "PROJECT_ROOT/.env"
+ROOT_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "../.."))
+env_path = os.path.join(ROOT_DIR, ".env")
 load_dotenv(dotenv_path=env_path)
 
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
@@ -71,7 +72,7 @@ INTRADAY_ENTRY_PCT = 1.0    # OR intraday change (vs open) >= 1.0% qualifies
 MAX_TRADES_PER_DAY = 3      # hard cap on entries per UTC day (PDT protection)
 MAX_OPEN_POSITIONS = 5
 
-LOG_DIR = "PROJECT_ROOT/logs"
+LOG_DIR = os.path.join(ROOT_DIR, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
 EXCHANGE_NAME = "alpaca-stocks"
@@ -79,10 +80,10 @@ EXCHANGE_NAME = "alpaca-stocks"
 # --- Concurrency guard ------------------------------------------------------
 # Overlapping crons would double entries and race trading_state. A single flock
 # makes any second concurrent run exit.
-LOCK_FILE = "PROJECT_ROOT/logs/alpaca_stocks.lock"
+LOCK_FILE = os.path.join(ROOT_DIR, "logs/alpaca_stocks.lock")
 
 # --- AI Gates ---------------------------------------------------------------
-AI_GATE_PATH = "PROJECT_ROOT/ai_overseer/ai_gate.json"
+AI_GATE_PATH = os.path.join(ROOT_DIR, "ai_overseer/ai_gate.json")
 
 
 def load_ai_gates():
