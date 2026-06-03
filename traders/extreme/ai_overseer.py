@@ -452,6 +452,7 @@ YOUR JOB (respond with ONLY valid JSON — no markdown, no backticks, no explana
 2. PARAMETER_ADJUSTMENTS: If the script is tuned wrong, suggest new values. Bounds:
    {json.dumps(ADJUSTMENT_BOUNDS, indent=2)}
 3. TRADE_SIGNALS: **You MUST submit a BUY signal when you see a strong setup.** Available EUR is €{available_eur:.2f}. Look for: NEAR/RENDER with strong 3h momentum (>+1%) and high vol (>5%), or any pair with momentum >+2%. If no pair qualifies, leave empty. Max {MAX_TRADE_SIZE_EUR} EUR per trade.
+   **ROTATION:** If you hold a position (e.g. NEAR) but another pair has clearly better momentum (e.g. RENDER >+3% vs your position <+1%), submit TWO signals in the same array: SELL the current position, BUY the better one. The SELL size_eur is ignored (sells full position).
 4. GATES: Set conditions for the 5-min script. Use these sparingly — only when market regime demands it:
    - script_paused: true/false
    - consult_on_entry: true/false
@@ -466,7 +467,7 @@ Return strict JSON — no comments, no trailing commas:
   "gates": {{ "script_paused": false, "consult_on_entry": false, "reason": null }},
   "script_improvements": ["..."]
 }}}}
-IMPORTANT: If NEAR/EUR or RENDER/EUR has 3h momentum > +1% AND 6h range > 5% AND you have available EUR, you SHOULD submit a BUY signal. Available EUR: €{available_eur:.2f}.
+IMPORTANT: If NEAR/EUR or RENDER/EUR has 3h momentum > +1% AND 6h range > 5% AND you have available EUR (>€5), you SHOULD submit a BUY signal. If available EUR is low but you hold a position with weak momentum and another pair has >+2% stronger momentum, SELL the weak position and BUY the strong one.
 """
     return prompt
 
