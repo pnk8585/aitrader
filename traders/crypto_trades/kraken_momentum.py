@@ -35,7 +35,8 @@ from db_prices import (get_connection, insert_prices, get_one_hour_momentum,
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-env_path = "PROJECT_ROOT/.env"
+ROOT_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "../.."))
+env_path = os.path.join(ROOT_DIR, ".env")
 load_dotenv(dotenv_path=env_path)
 
 KRAKEN_API_KEY = os.getenv("KRAKEN_API_KEY")
@@ -52,7 +53,7 @@ exchange = ccxt.kraken({
 })
 
 EXCHANGE_NAME = "kraken-momentum"
-LOG_DIR = "PROJECT_ROOT/logs"
+LOG_DIR = os.path.join(ROOT_DIR, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
 # Same candidate pool as the pullback strategy.
@@ -93,10 +94,10 @@ MAX_OPEN_MOMENTUM = 2      # max positions this strategy holds at once
 MAX_TOTAL_OPEN = 5         # global cap across BOTH Kraken strategies (shared wallet)
 
 # --- Concurrency guard ------------------------------------------------------
-LOCK_FILE = "PROJECT_ROOT/logs/kraken_momentum.lock"
+LOCK_FILE = os.path.join(ROOT_DIR, "logs/kraken_momentum.lock")
 
 # --- AI Gates ---------------------------------------------------------------
-AI_GATE_FILE = "PROJECT_ROOT/ai_overseer/ai_gate.json"
+AI_GATE_FILE = os.path.join(ROOT_DIR, "ai_overseer/ai_gate.json")
 
 COOLDOWN_MIN = 90          # per-coin cooldown after any exit
 MAX_TRADES_PER_DAY = 4     # hard overtrading cap
@@ -121,8 +122,8 @@ def load_ai_gates():
 # ---------------------------------------------------------------------------
 # Pending AI review — bot finds candidates, AI approves before buying
 # ---------------------------------------------------------------------------
-PENDING_REVIEW_FILE = "PROJECT_ROOT/ai_overseer/pending_review.json"
-PENDING_LOCK_FILE = "PROJECT_ROOT/ai_overseer/.pending_review.lock"
+PENDING_REVIEW_FILE = os.path.join(ROOT_DIR, "ai_overseer/pending_review.json")
+PENDING_LOCK_FILE = os.path.join(ROOT_DIR, "ai_overseer/.pending_review.lock")
 PENDING_REVIEW_TIMEOUT_MIN = 120
 
 

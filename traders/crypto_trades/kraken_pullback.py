@@ -40,7 +40,8 @@ from db_prices import (get_connection, insert_prices, get_one_hour_momentum,
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-env_path = "PROJECT_ROOT/.env"
+ROOT_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "../.."))
+env_path = os.path.join(ROOT_DIR, ".env")
 load_dotenv(dotenv_path=env_path)
 
 KRAKEN_API_KEY = os.getenv("KRAKEN_API_KEY")
@@ -59,7 +60,7 @@ exchange = ccxt.kraken({
 EXCHANGE_NAME = "kraken-pullback"
 # DB prices are always written under exchange='kraken' (hardcoded in db_prices.insert_prices).
 PRICE_EXCHANGE = "kraken"
-LOG_DIR = "PROJECT_ROOT/logs"
+LOG_DIR = os.path.join(ROOT_DIR, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
 # Full candidate pool. The volatility filter below decides which are tradeable
@@ -112,10 +113,10 @@ EQUITY_TWO_POS = 400.0
 # --- Concurrency guard ------------------------------------------------------
 # Two */5 cron jobs (or an overrun) running this script at once would double the
 # orders and race on trading_state. A single flock makes overlapping runs exit.
-LOCK_FILE = "PROJECT_ROOT/logs/kraken_pullback.lock"
+LOCK_FILE = os.path.join(ROOT_DIR, "logs/kraken_pullback.lock")
 
 # --- AI Gates ---------------------------------------------------------------
-AI_GATE_FILE = "PROJECT_ROOT/ai_overseer/ai_gate.json"
+AI_GATE_FILE = os.path.join(ROOT_DIR, "ai_overseer/ai_gate.json")
 
 
 def load_ai_gates():
@@ -134,8 +135,8 @@ def load_ai_gates():
 # ---------------------------------------------------------------------------
 # Pending AI review — bot finds candidates, AI approves before buying
 # ---------------------------------------------------------------------------
-PENDING_REVIEW_FILE = "PROJECT_ROOT/ai_overseer/pending_review.json"
-PENDING_LOCK_FILE = "PROJECT_ROOT/ai_overseer/.pending_review.lock"
+PENDING_REVIEW_FILE = os.path.join(ROOT_DIR, "ai_overseer/pending_review.json")
+PENDING_LOCK_FILE = os.path.join(ROOT_DIR, "ai_overseer/.pending_review.lock")
 PENDING_REVIEW_TIMEOUT_MIN = 120  # drop stale pending after this many minutes
 
 
