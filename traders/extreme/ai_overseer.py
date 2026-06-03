@@ -826,6 +826,23 @@ def main():
 
     _write_log(log)
 
+    # Heartbeat: account status
+    try:
+        bal_local = exchange.fetch_balance()
+        cash_e = float(bal_local["EUR"]["free"])
+        pos_parts = []
+        for m in market:
+            coin = m["symbol"].split("/")[0]
+            qty = float(bal_local["total"].get(coin, 0))
+            if qty > 1e-8 and m.get("price"):
+                val = qty * m["price"]
+                if val > 1.0:
+                    pos_parts.append(f"{coin} {round(val,2)}€")
+        pos_str = " · ".join(pos_parts) if pos_parts else "κανένα"
+        print(f"🤖 AI Overseer: {round(cash_e,2)}€ free · {pos_str}")
+    except Exception:
+        pass
+
 
 def _write_log(lines):
     """Append to today's log file (all lines written to file). Print only key findings."""
