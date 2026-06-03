@@ -898,6 +898,15 @@ def run_cycle():
         return
 
     qty = order_size_eur / current_price
+    exchange.load_markets()
+    mkt = exchange.market(symbol)
+    min_amt = mkt['limits']['amount']['min']
+    if min_amt and qty < min_amt:
+        report["action_taken"] = "SKIP"
+        report["details"] = (f"Order qty ({qty:.2f} {mkt['base']}) below exchange minimum "
+                             f"({min_amt} {mkt['base']}).")
+        finalize()
+        return
     d_val = best["daily"] if best["daily"] is not None else -999.0
     h_val = best["hourly"] if best["hourly"] is not None else -999.0
     if h_val >= d_val and best["hourly"] is not None:
