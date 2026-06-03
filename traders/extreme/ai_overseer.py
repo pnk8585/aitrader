@@ -335,6 +335,12 @@ def execute_trade(action, symbol, size_eur, reason):
             if available_eur < size_eur:
                 return False, f"Insufficient EUR: have €{available_eur:.2f}, need €{size_eur:.2f}"
             qty = size_eur / price
+            # Pre-flight min lot check (Kraken rejects orders below minimum)
+            mkt = exchange.market(symbol)
+            min_amt = mkt['limits']['amount']['min']
+            if min_amt and qty < min_amt:
+                return False, (f"Order qty ({qty:.4f} {mkt['base']}) below exchange minimum "
+                               f"({min_amt} {mkt['base']})")
             fqty = float(exchange.amount_to_precision(symbol, qty))
             res = exchange.create_market_buy_order(symbol, fqty)
             # Use real fill, not the pre-trade ticker — market orders slip.
