@@ -444,7 +444,7 @@ def run_cycle():
                 pl = (cur_p - ent) / ent * 100.0 if ent else 0.0
                 pos_lines.append(f"{base_symbol(sym)} {round(pl,1)}%")
             pos_str = " | ".join(pos_lines) if pos_lines else "c"
-            print(f"💰 Kraken momentum: {round(portfolio_value,2)}€ · {len(my_positions)} pos · {pos_str}")
+            print(f"💰 Kraken momentum: {round(cash_eur,2)}€ free · {len(my_positions)} pos · {pos_str}")
             should_notify = True
             notify_state["last_notify_time"] = now_utc.isoformat().replace("+00:00", "Z")
         # else: silent
