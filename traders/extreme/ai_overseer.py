@@ -826,7 +826,7 @@ def main():
 
     _write_log(log)
 
-    # Heartbeat: account status
+    # Heartbeat: account status + notify state
     try:
         bal_local = exchange.fetch_balance()
         cash_e = float(bal_local["EUR"]["free"])
@@ -840,6 +840,18 @@ def main():
                     pos_parts.append(f"{coin} {round(val,2)}€")
         pos_str = " · ".join(pos_parts) if pos_parts else "κανένα"
         print(f"🤖 AI Overseer: {round(cash_e,2)}€ free · {pos_str}")
+
+        # Save notify_state to DB so system_health_check sees heartbeat
+        db2 = get_db()
+        with db2.cursor() as cur:
+            cur.execute(
+                """INSERT INTO notify_state (exchange, last_notify_time, extra, updated_at)
+                   VALUES (%s, %s, '{}'::jsonb, CURRENT_TIMESTAMP)
+                   ON CONFLICT (exchange) DO UPDATE SET
+                       updated_at = CURRENT_TIMESTAMP""",
+                (EXCHANGE_NAME, datetime.now(timezone.utc).isoformat()))
+        db2.commit()
+        db2.close()
     except Exception:
         pass
 
