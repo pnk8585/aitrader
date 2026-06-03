@@ -579,6 +579,66 @@ def main():
     log.append(f"Recent trades: {len(trades)}")
 
     # ---------------------------------------------------------------
+    # 1b. Trailing stop — auto-exit positions that dropped too far
+    #     from their peak, before the AI call (no hallucinations, no delay).
+    # ---------------------------------------------------------------
+    TRAILING_STOP_PCT = 4.0  # exit if retraced this much from peak profit
+    remaining_positions = []
+    for p in positions:
+        sym, entry, etime, peak_plpc_v = p
+        entry_f = float(entry)
+        # find current price from market snapshot
+        cur_price = None
+        for m in market:
+            if m["symbol"] == sym:
+                cur_price = m.get("price")
+                break
+        if not cur_price or entry_f <= 0:
+            remaining_positions.append(p)
+            continue
+        cur_pl = (cur_price - entry_f) / entry_f * 100.0
+        old_peak = float(peak_plpc_v) if peak_plpc_v else 0.0
+        if cur_pl > old_peak:
+            old_peak = cur_pl
+            # update peak_plpc in trading_state
+            try:
+                db2 = get_db()
+                with db2.cursor() as cur:
+                    cur.execute(
+                        "UPDATE trading_state SET peak_plpc=%s "
+                        "WHERE exchange=%s AND symbol=%s",
+                        (cur_pl, EXCHANGE_NAME, sym))
+                db2.commit()
+                db2.close()
+            except Exception:
+                pass
+        retrace = old_peak - cur_pl
+        if old_peak > 0 and retrace > TRAILING_STOP_PCT:
+            # trailing stop triggered — auto-sell full position
+            log.append(f"🛑 TRAILING STOP: {sym} retraced {retrace:.1f}% from peak ({cur_pl:.1f}% vs peak {old_peak:.1f}%)")
+            try:
+                base = sym.split("/")[0]
+                bal_local = exchange.fetch_balance()
+                fqty = float(bal_local["total"].get(base, 0))
+                if fqty > 0:
+                    res = exchange.create_market_sell_order(sym, fqty)
+                    fill_price = float(res.get("price", cur_price))
+                    fill_qty = float(res.get("filled", fqty))
+                    _log_trade(action="SELL", ticker=sym, entry_price=entry_f,
+                               current_price=fill_price, quantity=fill_qty,
+                               estimated_value=fill_qty * fill_price,
+                               reason=f"trailing stop: -{retrace:.1f}% from peak")
+                    _remove_position(sym)
+                    log.append(f"✅ TRAILING STOP sold {fill_qty} {sym} @ {fill_price:.4f}")
+            except Exception as e:
+                log.append(f"❌ TRAILING STOP sell failed: {e}")
+        else:
+            remaining_positions.append(p)
+    # Replace positions list with positions NOT auto-exited
+    positions = remaining_positions
+    log.append(f"After trailing stop: {len(positions)} positions remaining")
+
+    # ---------------------------------------------------------------
     # 2a. Handle pending per-trade review (bot → AI → approve/reject)
     # ---------------------------------------------------------------
     PENDING_REVIEW_FILE = os.path.join(PROJECT_DIR, "ai_overseer/pending_review.json")
