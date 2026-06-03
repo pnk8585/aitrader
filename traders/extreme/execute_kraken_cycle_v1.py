@@ -12,7 +12,7 @@ from db_prices import (get_connection, insert_prices, get_one_hour_momentum,
                        log_trade as db_log_trade)
 
 # Load environment variables
-ROOT_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+ROOT_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "../.."))
 env_path = os.path.join(ROOT_DIR, ".env")
 load_dotenv(dotenv_path=env_path)
 

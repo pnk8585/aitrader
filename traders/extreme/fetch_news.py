@@ -4,7 +4,7 @@ import requests
 from dotenv import load_dotenv
 
 def main():
-    ROOT_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+    ROOT_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "../.."))
     env_path = os.path.join(ROOT_DIR, ".env")
     load_dotenv(dotenv_path=env_path)
 

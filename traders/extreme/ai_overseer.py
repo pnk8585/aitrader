@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 # --- Paths -----------------------------------------------------------------
-PROJECT_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+PROJECT_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "../.."))
 V2_SCRIPT = os.path.join(PROJECT_DIR, "traders/crypto_trades/kraken_pullback.py")
 ENV_PATH = os.path.join(PROJECT_DIR, ".env")
 HERMES_ENV = os.path.join(os.path.expanduser("~"), ".hermes/.env")
