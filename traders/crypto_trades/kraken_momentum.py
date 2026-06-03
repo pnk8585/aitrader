@@ -26,11 +26,14 @@ import ccxt
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "extreme"))
-from db_prices import (get_connection, insert_prices, get_one_hour_momentum,
+from db_prices import (
+                       DEBUG,get_connection, insert_prices, get_one_hour_momentum,
                        close_connection, base_symbol,
                        load_trading_state, save_trading_state,
                        load_notify_state, save_notify_state as db_save_notify_state,
-                       log_trade as db_log_trade)
+                       log_trade as db_log_trade,
+                       get_momentum_over, get_range_pct, last_exit_time,
+                       trades_today, realized_pnl_today_pct)
 
 # ---------------------------------------------------------------------------
 # Config
@@ -51,8 +54,8 @@ exchange = ccxt.kraken({
     'secret': KRAKEN_SECRET,
     'enableRateLimit': True,
 })
-
 EXCHANGE_NAME = "kraken-momentum"
+PRICE_EXCHANGE = "kraken"  # shared price feed (insert_prices writes under 'kraken')
 LOG_DIR = os.path.join(ROOT_DIR, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
@@ -187,121 +190,7 @@ def _submit_candidate(pending_data):
 
 
 COOLDOWN_MIN = 90          # per-coin cooldown after any exit
-# Local SQL helpers (read-only; asset_prices is written by this cycle)
-# ---------------------------------------------------------------------------
-def get_momentum_over(conn, symbol, minutes):
-    """% change of latest price vs the price ~`minutes` ago.
-
-    Reads against the shared "kraken" price feed (the pullback script and this
-    one both write base prices under exchange='kraken' via insert_prices).
-    Returns None if there isn't enough history yet.
-    """
-    if conn is None:
-        return None
-    base = base_symbol(symbol)
-    lo = int(minutes * 1.15)
-    hi = int(minutes * 0.85)
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT price FROM asset_prices WHERE exchange='kraken' AND symbol=%s "
-                "ORDER BY timestamp DESC LIMIT 1", (base,))
-            latest = cur.fetchone()
-            if not latest or latest[0] is None:
-                return None
-            latest_price = float(latest[0])
-            cur.execute(
-                "SELECT price FROM asset_prices WHERE exchange='kraken' AND symbol=%s "
-                "AND timestamp <= CURRENT_TIMESTAMP - make_interval(mins => %s) "
-                "AND timestamp >= CURRENT_TIMESTAMP - make_interval(mins => %s) "
-                "ORDER BY timestamp DESC LIMIT 1",
-                (base, hi, lo))
-            past = cur.fetchone()
-            if not past or past[0] is None:
-                return None
-            past_price = float(past[0])
-    except Exception as e:
-        print(f"get_momentum_over failed: {e}", file=sys.stderr)
-        return None
-    if past_price == 0:
-        return None
-    return (latest_price - past_price) / past_price * 100.0
-
-
-def get_range_pct(conn, symbol, minutes):
-    """Hi-lo range (%) over the last `minutes`. None if too little history."""
-    if conn is None:
-        return None
-    base = base_symbol(symbol)
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT MIN(price), MAX(price), COUNT(*) FROM asset_prices "
-                "WHERE exchange='kraken' AND symbol=%s "
-                "AND timestamp >= CURRENT_TIMESTAMP - make_interval(mins => %s)",
-                (base, minutes))
-            row = cur.fetchone()
-    except Exception as e:
-        print(f"get_range_pct failed: {e}", file=sys.stderr)
-        return None
-    if not row or row[0] is None or row[2] < 6:
-        return None
-    lo, hi = float(row[0]), float(row[1])
-    if lo == 0:
-        return None
-    return (hi - lo) / lo * 100.0
-
-
-def last_exit_time(conn, symbol):
-    """Timestamp of the most recent SELL for this coin (this strategy), for cooldown."""
-    if conn is None:
-        return None
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT MAX(timestamp) FROM trade_log WHERE exchange=%s "
-                "AND ticker=%s AND action='SELL'", (EXCHANGE_NAME, symbol))
-            row = cur.fetchone()
-    except Exception as e:
-        print(f"last_exit_time failed: {e}", file=sys.stderr)
-        return None
-    return row[0] if row else None
-
-
-def trades_today(conn):
-    """Count of BUYs since 00:00 UTC for this strategy, for the daily cap."""
-    if conn is None:
-        return 0
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT COUNT(*) FROM trade_log WHERE exchange=%s AND action='BUY' "
-                "AND timestamp >= date_trunc('day', CURRENT_TIMESTAMP AT TIME ZONE 'UTC')",
-                (EXCHANGE_NAME,))
-            return int(cur.fetchone()[0])
-    except Exception as e:
-        print(f"trades_today failed: {e}", file=sys.stderr)
-        return 0
-
-
-def realized_pnl_today_pct(conn):
-    """Approx realized PnL today (%) for the daily loss circuit-breaker."""
-    if conn is None:
-        return 0.0
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT COALESCE(SUM(unrealized_plpc),0), COUNT(*) FROM trade_log "
-                "WHERE exchange=%s AND action='SELL' "
-                "AND timestamp >= date_trunc('day', CURRENT_TIMESTAMP AT TIME ZONE 'UTC')",
-                (EXCHANGE_NAME,))
-            row = cur.fetchone()
-    except Exception as e:
-        print(f"realized_pnl_today_pct failed: {e}", file=sys.stderr)
-        return 0.0
-    gross_pct = float(row[0]) * 100.0
-    n = int(row[1])
-    return gross_pct - n * ROUND_TRIP_FEE_PCT
+# (DB market-read helpers moved to db_prices.py — imported above)
 
 
 # ---------------------------------------------------------------------------
@@ -634,10 +523,10 @@ def run_cycle():
         skip, skip_reason = True, f"Momentum position cap reached ({MAX_OPEN_MOMENTUM})."
     elif cash_eur < MIN_TRADE_EUR and not can_rotate:
         skip, skip_reason = True, "No buying power."
-    elif trades_today(db_conn) >= MAX_TRADES_PER_DAY:
+    elif trades_today(db_conn, exchange_name=EXCHANGE_NAME) >= MAX_TRADES_PER_DAY:
         skip, skip_reason = True, f"Daily trade cap reached ({MAX_TRADES_PER_DAY})."
     else:
-        rpnl = realized_pnl_today_pct(db_conn)
+        rpnl = realized_pnl_today_pct(db_conn, exchange_name=EXCHANGE_NAME, round_trip_fee_pct=ROUND_TRIP_FEE_PCT)
         if rpnl <= DAILY_LOSS_BREAKER_PCT:
             skip, skip_reason = True, f"Daily loss breaker tripped ({round(rpnl,2)}% <= {DAILY_LOSS_BREAKER_PCT}%)."
             should_notify = True
@@ -665,11 +554,11 @@ def run_cycle():
         price = ticker['last']
 
         # cooldown
-        lx = last_exit_time(db_conn, sym)
+        lx = last_exit_time(db_conn, sym, exchange_name=EXCHANGE_NAME)
         if lx is not None and (now - lx) < timedelta(minutes=COOLDOWN_MIN):
             continue
 
-        daily = get_momentum_over(db_conn, sym, DAILY_WINDOW_MIN)
+        daily = get_momentum_over(db_conn, sym, DAILY_WINDOW_MIN, price_exchange=PRICE_EXCHANGE)
         hourly = get_one_hour_momentum(db_conn, sym)
 
         qualifies = ((daily is not None and daily >= DAILY_ENTRY_PCT)

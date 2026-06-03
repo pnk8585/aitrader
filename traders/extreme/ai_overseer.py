@@ -116,29 +116,29 @@ def _atomic_write(path, content):
 # Gather state
 # ---------------------------------------------------------------------------
 def get_portfolio_value():
-    """Latest portfolio_equity from trade_log."""
+    """Latest portfolio_equity from trade_log (any kraken strategy)."""
     row = query_one("SELECT portfolio_equity FROM trade_log "
-                     "WHERE exchange=%s ORDER BY timestamp DESC LIMIT 1",
-                     (EXCHANGE_NAME,))
+                     "WHERE exchange LIKE 'kraken%' ORDER BY timestamp DESC LIMIT 1",
+                     ())
     return float(row[0]) if row else None
 
 
 def get_open_positions():
-    """Read current positions from trading_state."""
+    """Read current positions from trading_state (all kraken strategies)."""
     rows = query_all(
         "SELECT symbol, entry_price, entry_time, peak_plpc "
-        "FROM trading_state WHERE exchange=%s", (EXCHANGE_NAME,))
+        "FROM trading_state WHERE exchange LIKE 'kraken%'", ())
     return rows
 
 
 def get_recent_trades(limit=15):
-    """Last N trades with details."""
+    """Last N trades with details (all kraken strategies)."""
     rows = query_all(
         "SELECT timestamp, action, ticker, entry_price, current_price, "
         "       unrealized_plpc, estimated_value, reason "
-        "FROM trade_log WHERE exchange=%s "
+        "FROM trade_log WHERE exchange LIKE 'kraken%' "
         "ORDER BY timestamp DESC LIMIT %s",
-        (EXCHANGE_NAME, limit))
+        (limit,))
     return rows
 
 

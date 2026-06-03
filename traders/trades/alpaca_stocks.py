@@ -21,7 +21,8 @@ from dotenv import load_dotenv
 # db_prices lives in traders/extreme/ — add it to the import path so this
 # script works when invoked from traders/trades/.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "extreme"))
-from db_prices import (get_connection, close_connection,
+from db_prices import (
+                       DEBUG,get_connection, close_connection,
                        load_trading_state, save_trading_state,
                        load_notify_state, save_notify_state as db_save_notify_state,
                        log_trade as db_log_trade)

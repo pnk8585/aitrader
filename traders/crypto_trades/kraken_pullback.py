@@ -31,11 +31,14 @@ from dotenv import load_dotenv
 # db_prices lives in traders/extreme/ — add it to the import path so this
 # script works when invoked from traders/crypto_trades/.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "extreme"))
-from db_prices import (get_connection, insert_prices, get_one_hour_momentum,
+from db_prices import (
+                       DEBUG,get_connection, insert_prices, get_one_hour_momentum,
                        close_connection, base_symbol,
                        load_trading_state, save_trading_state,
                        load_notify_state, save_notify_state as db_save_notify_state,
-                       log_trade as db_log_trade)
+                       log_trade as db_log_trade,
+                       get_momentum_over, get_range_pct, get_recent_high, get_recent_low,
+                       last_exit_time, trades_today, realized_pnl_today_pct)
 
 # ---------------------------------------------------------------------------
 # Config
@@ -209,162 +212,7 @@ DAILY_LOSS_BREAKER_PCT = -4.0  # stop trading for the UTC day past this realized
 # ---------------------------------------------------------------------------
 # Local SQL helpers (read-only; asset_prices is written by the cycle itself)
 # ---------------------------------------------------------------------------
-def get_momentum_over(conn, symbol, minutes):
-    """% change of latest price vs the price ~`minutes` ago.
-
-    Looks in a +-15% window around the target age so a missing exact sample
-    doesn't break the read. Returns None if there isn't enough history yet.
-    """
-    if conn is None:
-        return None
-    base = base_symbol(symbol)
-    lo = int(minutes * 1.15)
-    hi = int(minutes * 0.85)
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT price FROM asset_prices WHERE exchange=%s AND symbol=%s "
-                "ORDER BY timestamp DESC LIMIT 1", (PRICE_EXCHANGE, base))
-            latest = cur.fetchone()
-            if not latest or latest[0] is None:
-                return None
-            latest_price = float(latest[0])
-            cur.execute(
-                "SELECT price FROM asset_prices WHERE exchange=%s AND symbol=%s "
-                "AND timestamp <= CURRENT_TIMESTAMP - make_interval(mins => %s) "
-                "AND timestamp >= CURRENT_TIMESTAMP - make_interval(mins => %s) "
-                "ORDER BY timestamp DESC LIMIT 1",
-                (PRICE_EXCHANGE, base, hi, lo))
-            past = cur.fetchone()
-            if not past or past[0] is None:
-                return None
-            past_price = float(past[0])
-    except Exception as e:
-        print(f"get_momentum_over failed: {e}", file=sys.stderr)
-        return None
-    if past_price == 0:
-        return None
-    return (latest_price - past_price) / past_price * 100.0
-
-
-def get_range_pct(conn, symbol, minutes):
-    """Hi-lo range (%) over the last `minutes`. None if too little history."""
-    if conn is None:
-        return None
-    base = base_symbol(symbol)
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT MIN(price), MAX(price), COUNT(*) FROM asset_prices "
-                "WHERE exchange=%s AND symbol=%s "
-                "AND timestamp >= CURRENT_TIMESTAMP - make_interval(mins => %s)",
-                (PRICE_EXCHANGE, base, minutes))
-            row = cur.fetchone()
-    except Exception as e:
-        print(f"get_range_pct failed: {e}", file=sys.stderr)
-        return None
-    if not row or row[0] is None or row[2] < 6:  # need a handful of samples
-        return None
-    lo, hi = float(row[0]), float(row[1])
-    if lo == 0:
-        return None
-    return (hi - lo) / lo * 100.0
-
-
-def get_recent_high(conn, symbol, minutes):
-    """Highest price over the last `minutes`. None if no history."""
-    if conn is None:
-        return None
-    base = base_symbol(symbol)
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT MAX(price) FROM asset_prices WHERE exchange=%s AND symbol=%s "
-                "AND timestamp >= CURRENT_TIMESTAMP - make_interval(mins => %s)",
-                (PRICE_EXCHANGE, base, minutes))
-            row = cur.fetchone()
-    except Exception as e:
-        print(f"get_recent_high failed: {e}", file=sys.stderr)
-        return None
-    if not row or row[0] is None:
-        return None
-    return float(row[0])
-
-
-def get_recent_low(conn, symbol, minutes):
-    """Lowest price over the last `minutes`. None if no history."""
-    if conn is None:
-        return None
-    base = base_symbol(symbol)
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT MIN(price) FROM asset_prices WHERE exchange=%s AND symbol=%s "
-                "AND timestamp >= CURRENT_TIMESTAMP - make_interval(mins => %s)",
-                (PRICE_EXCHANGE, base, minutes))
-            row = cur.fetchone()
-    except Exception as e:
-        print(f"get_recent_low failed: {e}", file=sys.stderr)
-        return None
-    if not row or row[0] is None:
-        return None
-    return float(row[0])
-
-
-def last_exit_time(conn, symbol):
-    """Timestamp of the most recent SELL for this coin, for cooldown. None if never."""
-    if conn is None:
-        return None
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT MAX(timestamp) FROM trade_log WHERE exchange=%s "
-                "AND ticker=%s AND action='SELL'", (EXCHANGE_NAME, symbol))
-            row = cur.fetchone()
-    except Exception as e:
-        print(f"last_exit_time failed: {e}", file=sys.stderr)
-        return None
-    return row[0] if row else None
-
-
-def trades_today(conn):
-    """Count of BUYs since 00:00 UTC, for the daily overtrading cap."""
-    if conn is None:
-        return 0
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT COUNT(*) FROM trade_log WHERE exchange=%s AND action='BUY' "
-                "AND timestamp >= date_trunc('day', CURRENT_TIMESTAMP AT TIME ZONE 'UTC')",
-                (EXCHANGE_NAME,))
-            return int(cur.fetchone()[0])
-    except Exception as e:
-        print(f"trades_today failed: {e}", file=sys.stderr)
-        return 0
-
-
-def realized_pnl_today_pct(conn):
-    """Sum of today's SELL unrealized_plpc (stored as a fraction) as a %.
-
-    Approximates realized PnL for the daily loss circuit-breaker. Net of fee is
-    not stored, so we subtract the round-trip fee per closed trade.
-    """
-    if conn is None:
-        return 0.0
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT COALESCE(SUM(unrealized_plpc),0), COUNT(*) FROM trade_log "
-                "WHERE exchange=%s AND action='SELL' "
-                "AND timestamp >= date_trunc('day', CURRENT_TIMESTAMP AT TIME ZONE 'UTC')",
-                (EXCHANGE_NAME,))
-            row = cur.fetchone()
-    except Exception as e:
-        print(f"realized_pnl_today_pct failed: {e}", file=sys.stderr)
-        return 0.0
-    gross_pct = float(row[0]) * 100.0
-    n = int(row[1])
-    return gross_pct - n * ROUND_TRIP_FEE_PCT
+# (DB market-read helpers moved to db_prices.py — imported above)
 
 
 # ---------------------------------------------------------------------------
@@ -574,10 +422,10 @@ def run_cycle():
 
         # dynamic stop: at least MIN_HARD_STOP_PCT, wider for volatile coins, but
         # capped at MAX_HARD_STOP_PCT so an extreme 6h range can't risk the account.
-        rng_6h = get_range_pct(db_conn, symbol, 360)
+        rng_6h = get_range_pct(db_conn, symbol, 360, price_exchange=PRICE_EXCHANGE)
         # Tighten the stop to 60% of its distance when the day is already bleeding
         # (realized <= -2.0%): protect remaining capital instead of giving losers room.
-        rpnl_today = realized_pnl_today_pct(db_conn)
+        rpnl_today = realized_pnl_today_pct(db_conn, exchange_name=EXCHANGE_NAME, round_trip_fee_pct=ROUND_TRIP_FEE_PCT)
         stop_tighten = 0.6 if rpnl_today <= -2.0 else 1.0
         effective_stop = -min(MAX_HARD_STOP_PCT,
                               max(MIN_HARD_STOP_PCT, 0.5 * (rng_6h or MIN_HARD_STOP_PCT * 2))) * stop_tighten
@@ -594,7 +442,7 @@ def run_cycle():
                                   f"net +{round(unrealized_plpc-ROUND_TRIP_FEE_PCT,2)}%)")
         elif age_hours >= MAX_HOLD_HOURS and unrealized_plpc < 0:
             # Only time-stop a DEAD bag: net-negative AND trend broken. Never a winner.
-            trend_3h = get_momentum_over(db_conn, symbol, TREND_3H_MIN)
+            trend_3h = get_momentum_over(db_conn, symbol, TREND_3H_MIN, price_exchange=PRICE_EXCHANGE)
             if trend_3h is not None and trend_3h < 0:
                 sell, reason = True, (f"Max-hold dead-bag exit ({round(age_hours,1)}h, "
                                       f"{round(unrealized_plpc,2)}%, 3h trend {round(trend_3h,2)}%)")
@@ -604,7 +452,7 @@ def run_cycle():
             # green (net-positive after fees but never armed the trailing TP).
             # Free the capital for a fresh setup — but only bank a *net win*, so
             # this never becomes the flat/fee-loss churn that killed v1.
-            trend_3h = get_momentum_over(db_conn, symbol, TREND_3H_MIN)
+            trend_3h = get_momentum_over(db_conn, symbol, TREND_3H_MIN, price_exchange=PRICE_EXCHANGE)
             if trend_3h is not None and trend_3h < 0:
                 sell, reason = True, (f"Stale-winner exit ({round(age_hours,1)}h, "
                                       f"net +{round(unrealized_plpc-ROUND_TRIP_FEE_PCT,2)}%, "
@@ -675,10 +523,10 @@ def run_cycle():
         skip, skip_reason = True, f"Max positions reached ({max_open})."
     elif cash_eur < MIN_TRADE_EUR:
         skip, skip_reason = True, "No buying power."
-    elif trades_today(db_conn) >= MAX_TRADES_PER_DAY:
+    elif trades_today(db_conn, exchange_name=EXCHANGE_NAME) >= MAX_TRADES_PER_DAY:
         skip, skip_reason = True, f"Daily trade cap reached ({MAX_TRADES_PER_DAY})."
     else:
-        rpnl = realized_pnl_today_pct(db_conn)
+        rpnl = realized_pnl_today_pct(db_conn, exchange_name=EXCHANGE_NAME, round_trip_fee_pct=ROUND_TRIP_FEE_PCT)
         if rpnl <= DAILY_LOSS_BREAKER_PCT:
             skip, skip_reason = True, f"Daily loss breaker tripped ({round(rpnl,2)}% <= {DAILY_LOSS_BREAKER_PCT}%)."
             should_notify = True
@@ -706,18 +554,18 @@ def run_cycle():
         price = ticker['last']
 
         # cooldown
-        lx = last_exit_time(db_conn, sym)
+        lx = last_exit_time(db_conn, sym, exchange_name=EXCHANGE_NAME)
         if lx is not None and (now - lx) < timedelta(minutes=COOLDOWN_MIN):
             continue
 
         # volatility floor — moves must be able to clear the fee
-        rng = get_range_pct(db_conn, sym, VOL_WINDOW_MIN)
+        rng = get_range_pct(db_conn, sym, VOL_WINDOW_MIN, price_exchange=PRICE_EXCHANGE)
         if rng is None or rng < VOL_FLOOR_PCT:
             continue
 
         # higher-timeframe uptrend
-        t3 = get_momentum_over(db_conn, sym, TREND_3H_MIN)
-        t6 = get_momentum_over(db_conn, sym, TREND_6H_MIN)
+        t3 = get_momentum_over(db_conn, sym, TREND_3H_MIN, price_exchange=PRICE_EXCHANGE)
+        t6 = get_momentum_over(db_conn, sym, TREND_6H_MIN, price_exchange=PRICE_EXCHANGE)
         if t3 is None or t6 is None or t3 < TREND_3H_MIN_PCT or t6 <= 0:
             continue
 
@@ -727,7 +575,7 @@ def run_cycle():
             continue
 
         # pullback: price must be at least PULLBACK_MIN_PCT below the 1h high
-        hi1h = get_recent_high(db_conn, sym, 60)
+        hi1h = get_recent_high(db_conn, sym, 60, price_exchange=PRICE_EXCHANGE)
         if hi1h is None or hi1h <= 0:
             continue
         pullback = (hi1h - price) / hi1h * 100.0
@@ -737,7 +585,7 @@ def run_cycle():
         # R:R gate: upside room to the 6h high must be >= RR_MIN × the stop
         # distance this setup would use. Rejects setups with little headroom
         # above where the stop sits (asymmetric risk).
-        hi6h = get_recent_high(db_conn, sym, 360)
+        hi6h = get_recent_high(db_conn, sym, 360, price_exchange=PRICE_EXCHANGE)
         stop_dist = min(MAX_HARD_STOP_PCT,
                         max(MIN_HARD_STOP_PCT, 0.5 * (rng or MIN_HARD_STOP_PCT * 2)))
         if hi6h is None or hi6h <= 0:
@@ -748,8 +596,8 @@ def run_cycle():
 
         # bounce gate: require price to be bouncing off lows,
         # not still falling (rejects falling knives)
-        price_5m = get_momentum_over(db_conn, sym, 5)
-        low15m = get_recent_low(db_conn, sym, 15)
+        price_5m = get_momentum_over(db_conn, sym, 5, price_exchange=PRICE_EXCHANGE)
+        low15m = get_recent_low(db_conn, sym, 15, price_exchange=PRICE_EXCHANGE)
         if (price_5m is not None and price_5m <= 0
                 and low15m is not None and float(price) <= low15m * 1.001):  # type: ignore[operator]
             continue
@@ -921,7 +769,7 @@ def run_cycle():
     deploy_fraction = CONSULT_DEPLOY_FRACTION if consulting else DEPLOY_FRACTION
     order_size_eur = cash_eur * deploy_fraction
 
-    rng_6h_best = get_range_pct(db_conn, symbol, 360)
+    rng_6h_best = get_range_pct(db_conn, symbol, 360, price_exchange=PRICE_EXCHANGE)
     stop_pct = min(MAX_HARD_STOP_PCT,
                    max(MIN_HARD_STOP_PCT, 0.5 * (rng_6h_best or MIN_HARD_STOP_PCT * 2)))
     risk_cap_eur = (RISK_PER_TRADE_PCT / 100.0 * portfolio_value) / (stop_pct / 100.0)

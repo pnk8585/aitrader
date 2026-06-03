@@ -11,6 +11,7 @@ env_path = os.path.join(ROOT_DIR, ".env")
 load_dotenv(dotenv_path=env_path)
 
 EXCHANGE = "kraken"
+DEBUG = os.getenv("DEBUG", "").lower() in ("1", "true", "yes")
 
 
 def base_symbol(pair):
@@ -36,12 +37,16 @@ def get_connection():
             connect_timeout=5,
         )
     except Exception as e:
+        if DEBUG:
+            raise
         print(f"DB connection failed: {e}", file=sys.stderr)
         return None
 
     try:
         ensure_schema(conn)
     except Exception as e:
+        if DEBUG:
+            raise
         print(f"Schema bootstrap failed: {e}", file=sys.stderr)
         close_connection(conn)
         return None
@@ -175,6 +180,8 @@ def insert_prices(conn, price_map):
         conn.commit()
         return len(rows)
     except Exception as e:
+        if DEBUG:
+            raise
         print(f"insert_prices failed: {e}", file=sys.stderr)
         try:
             conn.rollback()
@@ -232,6 +239,8 @@ def get_one_hour_momentum(conn, symbol):
                 return None
             past_price = float(past[0])
     except Exception as e:
+        if DEBUG:
+            raise
         print(f"get_one_hour_momentum failed: {e}", file=sys.stderr)
         return None
 
@@ -248,7 +257,184 @@ def close_connection(conn):
     try:
         conn.close()
     except Exception as e:
+        if DEBUG:
+            raise
         print(f"close_connection failed: {e}", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# Shared market-read helpers (used by both pullback & momentum strategies)
+# ---------------------------------------------------------------------------
+
+def get_momentum_over(conn, symbol, minutes, price_exchange="kraken"):
+    """% change of latest price vs the price ~`minutes` ago.
+
+    Looks in a +-15% window around the target age so a missing exact sample
+    doesn't break the read. Returns None if there isn't enough history yet.
+    """
+    if conn is None:
+        return None
+    base = base_symbol(symbol)
+    lo = int(minutes * 1.15)
+    hi = int(minutes * 0.85)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT price FROM asset_prices WHERE exchange=%s AND symbol=%s "
+                "ORDER BY timestamp DESC LIMIT 1", (price_exchange, base))
+            latest = cur.fetchone()
+            if not latest or latest[0] is None:
+                return None
+            latest_price = float(latest[0])
+            cur.execute(
+                "SELECT price FROM asset_prices WHERE exchange=%s AND symbol=%s "
+                "AND timestamp <= CURRENT_TIMESTAMP - make_interval(mins => %s) "
+                "AND timestamp >= CURRENT_TIMESTAMP - make_interval(mins => %s) "
+                "ORDER BY timestamp DESC LIMIT 1",
+                (price_exchange, base, hi, lo))
+            past = cur.fetchone()
+            if not past or past[0] is None:
+                return None
+            past_price = float(past[0])
+    except Exception as e:
+        if DEBUG:
+            raise
+        print(f"get_momentum_over failed: {e}", file=sys.stderr)
+        return None
+    if past_price == 0:
+        return None
+    return (latest_price - past_price) / past_price * 100.0
+
+
+def get_range_pct(conn, symbol, minutes, price_exchange="kraken"):
+    """Hi-lo range (%) over the last `minutes`. None if too little history."""
+    if conn is None:
+        return None
+    base = base_symbol(symbol)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT MIN(price), MAX(price), COUNT(*) FROM asset_prices "
+                "WHERE exchange=%s AND symbol=%s "
+                "AND timestamp >= CURRENT_TIMESTAMP - make_interval(mins => %s)",
+                (price_exchange, base, minutes))
+            row = cur.fetchone()
+    except Exception as e:
+        if DEBUG:
+            raise
+        print(f"get_range_pct failed: {e}", file=sys.stderr)
+        return None
+    if not row or row[0] is None or row[2] < 6:
+        return None
+    lo, hi = float(row[0]), float(row[1])
+    if lo == 0:
+        return None
+    return (hi - lo) / lo * 100.0
+
+
+def get_recent_high(conn, symbol, minutes, price_exchange="kraken"):
+    """Highest price over the last `minutes`. None if no history."""
+    if conn is None:
+        return None
+    base = base_symbol(symbol)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT MAX(price) FROM asset_prices WHERE exchange=%s AND symbol=%s "
+                "AND timestamp >= CURRENT_TIMESTAMP - make_interval(mins => %s)",
+                (price_exchange, base, minutes))
+            row = cur.fetchone()
+    except Exception as e:
+        if DEBUG:
+            raise
+        print(f"get_recent_high failed: {e}", file=sys.stderr)
+        return None
+    if not row or row[0] is None:
+        return None
+    return float(row[0])
+
+
+def get_recent_low(conn, symbol, minutes, price_exchange="kraken"):
+    """Lowest price over the last `minutes`. None if no history."""
+    if conn is None:
+        return None
+    base = base_symbol(symbol)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT MIN(price) FROM asset_prices WHERE exchange=%s AND symbol=%s "
+                "AND timestamp >= CURRENT_TIMESTAMP - make_interval(mins => %s)",
+                (price_exchange, base, minutes))
+            row = cur.fetchone()
+    except Exception as e:
+        if DEBUG:
+            raise
+        print(f"get_recent_low failed: {e}", file=sys.stderr)
+        return None
+    if not row or row[0] is None:
+        return None
+    return float(row[0])
+
+
+def last_exit_time(conn, symbol, exchange_name):
+    """Timestamp of the most recent SELL for this coin (this strategy), for cooldown."""
+    if conn is None:
+        return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT MAX(timestamp) FROM trade_log WHERE exchange=%s "
+                "AND ticker=%s AND action='SELL'", (exchange_name, symbol))
+            row = cur.fetchone()
+    except Exception as e:
+        if DEBUG:
+            raise
+        print(f"last_exit_time failed: {e}", file=sys.stderr)
+        return None
+    return row[0] if row else None
+
+
+def trades_today(conn, exchange_name):
+    """Count of BUYs since 00:00 UTC for the daily overtrading cap."""
+    if conn is None:
+        return 0
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM trade_log WHERE exchange=%s AND action='BUY' "
+                "AND timestamp >= date_trunc('day', CURRENT_TIMESTAMP AT TIME ZONE 'UTC')",
+                (exchange_name,))
+            return int(cur.fetchone()[0])
+    except Exception as e:
+        if DEBUG:
+            raise
+        print(f"trades_today failed: {e}", file=sys.stderr)
+        return 0
+
+
+def realized_pnl_today_pct(conn, exchange_name, round_trip_fee_pct):
+    """Approx realized PnL today (%) for the daily loss circuit-breaker.
+
+    Sum of today's SELL unrealized_plpc minus round-trip fees.
+    """
+    if conn is None:
+        return 0.0
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COALESCE(SUM(unrealized_plpc),0), COUNT(*) FROM trade_log "
+                "WHERE exchange=%s AND action='SELL' "
+                "AND timestamp >= date_trunc('day', CURRENT_TIMESTAMP AT TIME ZONE 'UTC')",
+                (exchange_name,))
+            row = cur.fetchone()
+    except Exception as e:
+        if DEBUG:
+            raise
+        print(f"realized_pnl_today_pct failed: {e}", file=sys.stderr)
+        return 0.0
+    gross_pct = float(row[0]) * 100.0
+    n = int(row[1])
+    return gross_pct - n * round_trip_fee_pct
 
 
 # ---------------------------------------------------------------------------
@@ -276,6 +462,8 @@ def load_trading_state(conn, exchange):
             }
         return state
     except Exception as e:
+        if DEBUG:
+            raise
         print(f"load_trading_state failed: {e}", file=sys.stderr)
         return {}
 
@@ -324,6 +512,8 @@ def save_trading_state(conn, exchange, state):
                 cur.execute("DELETE FROM trading_state WHERE exchange = %s", (exchange,))
         conn.commit()
     except Exception as e:
+        if DEBUG:
+            raise
         print(f"save_trading_state failed: {e}", file=sys.stderr)
         try:
             conn.rollback()
@@ -354,6 +544,8 @@ def load_notify_state(conn, exchange):
         result.update(extra)
         return result
     except Exception as e:
+        if DEBUG:
+            raise
         print(f"load_notify_state failed: {e}", file=sys.stderr)
         return {"last_notify_time": "1970-01-01T00:00:00Z"}
 
@@ -378,6 +570,8 @@ def save_notify_state(conn, exchange, state):
             )
         conn.commit()
     except Exception as e:
+        if DEBUG:
+            raise
         print(f"save_notify_state failed: {e}", file=sys.stderr)
         try:
             conn.rollback()
@@ -427,6 +621,8 @@ def log_trade(conn, exchange, **kwargs):
             )
         conn.commit()
     except Exception as e:
+        if DEBUG:
+            raise
         print(f"log_trade failed: {e}", file=sys.stderr)
         try:
             conn.rollback()
