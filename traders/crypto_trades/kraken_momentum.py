@@ -436,6 +436,7 @@ def run_cycle():
             should_notify = True
         elif hourly:
             pos_lines = []
+            this_value_eur = 0.0
             for p in my_positions:
                 sym = p["symbol"]
                 ss = new_state.get(sym, {})
@@ -443,8 +444,10 @@ def run_cycle():
                 cur_p = p["current_price"]
                 pl = (cur_p - ent) / ent * 100.0 if ent else 0.0
                 pos_lines.append(f"{base_symbol(sym)} {round(pl,1)}%")
-            pos_str = " | ".join(pos_lines) if pos_lines else "c"
-            print(f"💰 Kraken momentum: {round(cash_eur,2)}€ free · {len(my_positions)} pos · {pos_str}")
+                this_value_eur += p["value_eur"]
+            pos_str = " | ".join(pos_lines) if pos_lines else ""
+            other_value_eur = sum(p["value_eur"] for p in all_positions if p["symbol"] not in state)
+            print(f"💰 Kraken momentum: {round(cash_eur,2)}€ free · this: {round(this_value_eur,2)}€ {pos_str} · other: {round(other_value_eur,2)}€")
             should_notify = True
             notify_state["last_notify_time"] = now_utc.isoformat().replace("+00:00", "Z")
         # else: silent

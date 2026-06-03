@@ -476,6 +476,7 @@ def run_cycle():
             should_notify = True
         elif hourly:
             pos_lines = []
+            this_value_eur = 0.0
             for p in positions:
                 sym = p["symbol"]
                 ss = new_state.get(sym, {})
@@ -483,8 +484,10 @@ def run_cycle():
                 cur_p = p["current_price"]
                 pl = (cur_p - ent) / ent * 100.0 if ent else 0.0
                 pos_lines.append(f"{base_symbol(sym)} {round(pl,1)}%")
+                this_value_eur += p["value_eur"]
             pos_str = " | ".join(pos_lines) if pos_lines else ""
-            print(f"💰 Kraken pullback: {round(cash_eur,2)}€ free · {len(positions)} pos · {pos_str}")
+            other_value_eur = sum(p["value_eur"] for p in all_positions if p["symbol"] not in state)
+            print(f"💰 Kraken pullback: {round(cash_eur,2)}€ free · this: {round(this_value_eur,2)}€ {pos_str} · other: {round(other_value_eur,2)}€")
             should_notify = True
             notify_state["last_notify_time"] = now_utc.isoformat().replace("+00:00", "Z")
         # else: silent — no action, no error, no hourly tick
@@ -527,6 +530,7 @@ def run_cycle():
 
     # Only manage coins THIS strategy owns (recorded in our state). On a shared
     # Kraken wallet, momentum may hold other coins — never adopt/sell those.
+    all_positions = list(positions)
     positions = [p for p in positions if p["symbol"] in state]
 
     report["portfolio_equity"] = portfolio_value
