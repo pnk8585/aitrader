@@ -15,7 +15,7 @@ import sys
 import json
 import fcntl
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 
 # db_prices lives in traders/extreme/ — add it to the import path so this
@@ -31,6 +31,32 @@ from db_prices import (
 ROOT_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "../.."))
 env_path = os.path.join(ROOT_DIR, ".env")
 load_dotenv(dotenv_path=env_path)
+
+# --- Daily Strategy Integration ---
+DAILY_STRATEGY_PATH = os.path.join(ROOT_DIR, "daily_strategy.json")
+
+def load_daily_strategy():
+    """Load Market Architect's daily strategy, or None if unavailable/stale."""
+    try:
+        if os.path.exists(DAILY_STRATEGY_PATH):
+            with open(DAILY_STRATEGY_PATH) as f:
+                data = json.load(f)
+            # Check staleness (allow yesterday for 00:00-06:30 window)
+            try:
+                import pytz
+                athens_tz = pytz.timezone('Europe/Athens')
+                today = datetime.now(athens_tz).strftime('%Y-%m-%d')
+                yesterday = (datetime.now(athens_tz) - timedelta(days=1)).strftime('%Y-%m-%d')
+                date_str = data.get("date", "")
+                if date_str not in (today, yesterday):
+                    print(f"⚠️ Daily strategy stale (date={date_str}), ignoring", file=sys.stderr)
+                    return None
+            except ImportError:
+                pass  # pytz not available, accept strategy as-is
+            return data
+    except (json.JSONDecodeError, IOError) as e:
+        print(f"⚠️ Could not load daily strategy: {e}", file=sys.stderr)
+    return None
 
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
@@ -177,11 +203,6 @@ def run_cycle():
         has_trade = action in ("BUY", "SELL")
         has_fail = action in ("BUY_FAILED", "SELL_FAILED")
 
-        last_notify_str = notify_state.get("last_notify_time", "1970-01-01T00:00:00Z")
-        last_notify_time = datetime.fromisoformat(last_notify_str.replace("Z", "+00:00"))
-        now_utc = datetime.now(timezone.utc)
-        hourly = (now_utc - last_notify_time).total_seconds() >= 3600.0
-
         if is_error:
             print(f"❌ Alpaca stocks: {report.get('details', 'unknown error')}")
         elif has_trade:
@@ -191,17 +212,7 @@ def run_cycle():
                     break
         elif has_fail:
             print(f"⚠️ Alpaca stocks {action}: {report.get('details', '')}")
-        elif hourly:
-            pos_lines = []
-            for p in positions:
-                sym = p["symbol"]
-                pl = float(p["unrealized_plpc"]) * 100.0
-                pos_lines.append(f"{sym} {round(pl,1)}%")
-            pos_str = " | ".join(pos_lines) if pos_lines else "c"
-            print(f"💰 Alpaca stocks: {round(equity,2)}$ · {len(positions)} pos · {pos_str}")
-            should_notify = True
-            notify_state["last_notify_time"] = now_utc.isoformat().replace("+00:00", "Z")
-        # else silent
+        # else silent — heartbeat moved to hourly combined report
 
         db_save_notify_state(db_conn, EXCHANGE_NAME, notify_state)
         close_connection(db_conn)
@@ -374,7 +385,26 @@ def run_cycle():
         report["details"] = f"Daily entry cap reached ({MAX_TRADES_PER_DAY}/day)."
         skip_buying = True
 
+    # Load daily strategy (used for filters and logging)
+    daily_strategy = load_daily_strategy()
+
     if not skip_buying:
+        # Daily strategy filters
+        focus_pairs = []
+        avoid_pairs = []
+        btc_regime_filter = False
+        focus_pairs = []
+        avoid_pairs = []
+        btc_regime_filter = False
+        if daily_strategy:
+            focus_pairs = [s.upper() for s in daily_strategy.get("focus_pairs", [])]
+            avoid_pairs = [s.upper() for s in daily_strategy.get("avoid_pairs", [])]
+            btc_regime = daily_strategy.get("btc_regime", "")
+            if btc_regime in ("below", "bearish"):
+                btc_regime_filter = True
+                print("📊 BTC regime: bearish — Alpaca entries may be restricted", file=sys.stderr)
+            print(f"📊 Daily strategy loaded: {len(focus_pairs)} focus, {len(avoid_pairs)} avoid pairs", file=sys.stderr)
+
         # --- STOCK MOMENTUM SCAN ---
         candidates = []
 
@@ -388,6 +418,12 @@ def run_cycle():
                     continue
                 if any(p["symbol"] == symbol for p in positions):
                     continue
+
+                # Daily strategy filters
+                if focus_pairs and symbol not in focus_pairs:
+                    continue  # Only trade focus pairs today
+                if avoid_pairs and symbol in avoid_pairs:
+                    continue  # Skip avoid pairs today
 
                 daily = snap.get("dailyBar") or {}
                 prev_daily = snap.get("prevDailyBar") or {}
@@ -556,6 +592,10 @@ def run_cycle():
         else:
             report["action_taken"] = "SKIP"
             report["details"] = "No momentum signals found."
+
+    if daily_strategy:
+        print(f"📊 Strategy: {daily_strategy.get('market_regime', 'unknown')} regime, "
+              f"risk={daily_strategy.get('risk_level', 'unknown')}")
 
     finalize()
 

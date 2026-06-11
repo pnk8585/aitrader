@@ -20,6 +20,7 @@ ASSET_PRICE_STALE_S = 600   # 10 min — scripts insert prices every 5 min
 TRADE_LOG_STALE_S = 7200    # 2h — no trade in 2h is OK for slow strategies
 NO_TRADE_24H_WARN = 0       # zero trades in 24h is suspicious
 DB_TIMEOUT_S = 5
+EXPECTED_HEARTBEATS = {"kraken-momentum", "kraken-pullback", "alpaca-stocks", "ai_overseer"}
 
 
 def connect_db():
@@ -39,10 +40,17 @@ def now_utc():
 
 
 def elapsed_secs(dt):
-    """Seconds since *dt* (UTC-aware datetime) -- now() if dt is None."""
+    """Seconds since *dt* -- float('inf') if dt is None. Naive dts assumed UTC."""
     if dt is None:
         return float("inf")
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
     return (now_utc() - dt).total_seconds()
+
+
+def secs_label(secs):
+    """Display label for elapsed seconds; survives float('inf') from NULL rows."""
+    return "never" if secs == float("inf") else f"{round(secs)}s"
 
 
 def status_ok(ok, detail=""):
@@ -63,7 +71,7 @@ def main():
         "live_balances": {},
         "summary": {"healthy": True, "warnings": []},
     }
-    DEPRECATED_EXCHANGES = {"alpaca", "kraken"}  # v1 names no longer in use
+    DEPRECATED_EXCHANGES = {"alpaca"}  # v1 names no longer in use
 
     # ------------------------------------------------------------------
     # 1. Database connection & table freshness
@@ -88,11 +96,11 @@ def main():
             secs = elapsed_secs(last_price_ts)
             report["database"]["price_feed"] = status_ok(
                 secs < ASSET_PRICE_STALE_S,
-                f"last price {round(secs)}s ago"
+                f"last price {secs_label(secs)} ago"
             )
             if secs >= ASSET_PRICE_STALE_S:
                 report["summary"]["warnings"].append(
-                    f"Price feed stale ({round(secs)}s since last insert)")
+                    f"Price feed stale ({secs_label(secs)} since last insert)")
 
             # --- trade_log freshness ---
             cur.execute("SELECT MAX(timestamp) FROM trade_log")
@@ -101,11 +109,11 @@ def main():
             secs = elapsed_secs(last_trade_ts)
             report["database"]["last_trade"] = status_ok(
                 secs < TRADE_LOG_STALE_S,
-                f"last trade {round(secs)}s ago"
+                f"last trade {secs_label(secs)} ago"
             )
             if secs >= TRADE_LOG_STALE_S:
                 report["summary"]["warnings"].append(
-                    f"No trade in {round(secs)}s")
+                    f"No trade in {secs_label(secs)}")
 
             cur.execute(
                 "SELECT COUNT(*) FROM trade_log "
@@ -131,19 +139,27 @@ def main():
             cur.execute(
                 "SELECT exchange, MAX(updated_at) FROM notify_state "
                 "GROUP BY exchange ORDER BY exchange")
+            seen_exchanges = set()
             for ex, ts in cur.fetchall():
+                seen_exchanges.add(ex)
                 secs = elapsed_secs(ts)
                 ok = secs < NOTIFY_STALE_S
                 if ex in DEPRECATED_EXCHANGES:
                     ok = True  # old v1 names, not actively updated
                 report["database"].setdefault("heartbeats", {})[ex] = {
                     "ok": ok,
-                    "since_s": round(secs),
+                    "since_s": round(secs) if secs != float("inf") else None,
                     "last": ts.isoformat() if ts else None,
                 }
                 if not ok:
                     report["summary"]["warnings"].append(
-                        f"Exchange '{ex}' heartbeat stale ({round(secs)}s)")
+                        f"Exchange '{ex}' heartbeat stale ({secs_label(secs)})")
+            for ex in sorted(EXPECTED_HEARTBEATS - seen_exchanges):
+                report["database"].setdefault("heartbeats", {})[ex] = {
+                    "ok": False, "since_s": None, "last": None,
+                }
+                report["summary"]["warnings"].append(
+                    f"Exchange '{ex}' has no heartbeat row")
     except Exception as e:
         report["database"]["heartbeat_error"] = str(e)
 
@@ -162,7 +178,7 @@ def main():
                 open_positions.setdefault(ex, []).append({
                     "symbol": sym,
                     "entry": float(entry) if entry else 0,
-                    "age_h": round(float(age_h), 1),
+                    "age_h": round(float(age_h), 1) if age_h is not None else 0,
                 })
             report["database"]["open_positions"] = open_positions
     except Exception as e:
@@ -246,8 +262,17 @@ def main():
     # ------------------------------------------------------------------
     # Summary
     # ------------------------------------------------------------------
+    balance_errors = []
+    for name, val in report["live_balances"].items():
+        if name.endswith("_error"):
+            balance_errors.append(f"{name}: {val}")
+        elif isinstance(val, dict) and val.get("error"):
+            balance_errors.append(f"{name}: {val['error']}")
+    for err in balance_errors:
+        report["summary"]["warnings"].append(f"Live balance API error — {err}")
+
     has_warnings = len(report["summary"]["warnings"]) > 0
-    has_errors = any(
+    has_errors = bool(balance_errors) or any(
         v.get("ok") is False
         for section in ["database", "kraken_strategies", "alpaca_strategies"]
         for k, v in report.get(section, {}).items()

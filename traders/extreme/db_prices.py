@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import psycopg2
 import psycopg2.extras
 from psycopg2.extras import execute_values
@@ -476,49 +477,61 @@ def save_trading_state(conn, exchange, state):
     never leave the exchange with zero rows / lose live positions. Only symbols
     absent from `state` are deleted, and that delete runs in the same
     transaction as the upserts.
+
+    Retries up to 3 times with exponential-style backoff to survive transient
+    DB failures that would otherwise leave ghost positions in trading_state.
     """
     if conn is None:
         return
-    try:
-        with conn.cursor() as cur:
-            for symbol, data in state.items():
-                cur.execute(
-                    """INSERT INTO trading_state
-                           (exchange, symbol, entry_price, entry_time, peak_plpc, quantity, updated_at)
-                       VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
-                       ON CONFLICT (exchange, symbol) DO UPDATE SET
-                           entry_price = EXCLUDED.entry_price,
-                           entry_time  = EXCLUDED.entry_time,
-                           peak_plpc   = EXCLUDED.peak_plpc,
-                           quantity    = EXCLUDED.quantity,
-                           updated_at  = CURRENT_TIMESTAMP""",
-                    (
-                        exchange,
-                        symbol,
-                        data.get("entry_price"),
-                        data.get("entry_time"),
-                        data.get("peak_plpc", 0.0),
-                        data.get("quantity", 0.0),
-                    ),
-                )
-            # Prune positions that are no longer held (closed since last save).
-            symbols = list(state.keys())
-            if symbols:
-                cur.execute(
-                    "DELETE FROM trading_state WHERE exchange = %s AND symbol <> ALL(%s)",
-                    (exchange, symbols),
-                )
-            else:
-                cur.execute("DELETE FROM trading_state WHERE exchange = %s", (exchange,))
-        conn.commit()
-    except Exception as e:
-        if DEBUG:
-            raise
-        print(f"save_trading_state failed: {e}", file=sys.stderr)
+    max_attempts = 3
+    for attempt in range(max_attempts):
         try:
-            conn.rollback()
-        except Exception:
-            pass
+            with conn.cursor() as cur:
+                for symbol, data in state.items():
+                    cur.execute(
+                        """INSERT INTO trading_state
+                               (exchange, symbol, entry_price, entry_time, peak_plpc, quantity, updated_at)
+                           VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                           ON CONFLICT (exchange, symbol) DO UPDATE SET
+                               entry_price = EXCLUDED.entry_price,
+                               entry_time  = EXCLUDED.entry_time,
+                               peak_plpc   = EXCLUDED.peak_plpc,
+                               quantity    = EXCLUDED.quantity,
+                               updated_at  = CURRENT_TIMESTAMP""",
+                        (
+                            exchange,
+                            symbol,
+                            data.get("entry_price"),
+                            data.get("entry_time"),
+                            data.get("peak_plpc", 0.0),
+                            data.get("quantity", 0.0),
+                        ),
+                    )
+                # Prune positions that are no longer held (closed since last save).
+                symbols = list(state.keys())
+                if symbols:
+                    cur.execute(
+                        "DELETE FROM trading_state WHERE exchange = %s AND symbol <> ALL(%s)",
+                        (exchange, symbols),
+                    )
+                else:
+                    cur.execute("DELETE FROM trading_state WHERE exchange = %s", (exchange,))
+            conn.commit()
+            return
+        except Exception as e:
+            if attempt < max_attempts - 1:
+                # Rollback so the connection is usable for the next attempt.
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                time.sleep(0.5 * (attempt + 1))
+            else:
+                print(f"save_trading_state failed after {max_attempts} attempts: {e}", file=sys.stderr)
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
 
 
 # ---------------------------------------------------------------------------

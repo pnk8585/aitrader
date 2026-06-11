@@ -13,7 +13,6 @@ import re
 import ast
 import fcntl
 import time
-import pytz
 import ccxt
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
@@ -29,9 +28,6 @@ ENV_PATH = os.path.join(PROJECT_DIR, ".env")
 HERMES_ENV = os.path.join(os.path.expanduser("~"), ".hermes/.env")
 LOG_DIR = os.path.join(PROJECT_DIR, "logs/ai_overseer")
 os.makedirs(LOG_DIR, exist_ok=True)
-
-PENDING_REVIEW_FILE = os.path.join(PROJECT_DIR, "ai_overseer/pending_review.json")
-PENDING_LOCK_FILE = os.path.join(PROJECT_DIR, "ai_overseer/.pending_review.lock")
 
 load_dotenv(dotenv_path=ENV_PATH)
 
@@ -63,7 +59,6 @@ EXCHANGE_NAME = "kraken"
 GATES_FILE = os.path.join(PROJECT_DIR, "ai_overseer/ai_gate.json")
 MAX_TRADE_SIZE_EUR = 30.0         # max EUR per AI-triggered trade
 MAX_POSITIONS_AI = 1               # max positions opened by AI
-PAUSE_AUTO_EXPIRE_HOURS = 6       # auto-resume pause after N hours if BTC not down
 ADJUSTMENT_BOUNDS = {
     "VOL_FLOOR_PCT": (1.5, 8.0),
     "PULLBACK_MIN_PCT": (0.2, 3.0),
@@ -79,61 +74,14 @@ ADJUSTMENT_BOUNDS = {
 DAILY_STRATEGY_PATH = os.path.join(PROJECT_DIR, "daily_strategy.json")
 
 def load_daily_strategy():
-    """Load Market Architect's daily strategy file with normalization and validation."""
+    """Load the Market Architect's daily strategy file, if available."""
     try:
-        if not os.path.exists(DAILY_STRATEGY_PATH):
-            return None
-        with open(DAILY_STRATEGY_PATH) as f:
-            data = json.load(f)
-        
-        # H2: Staleness guard - check date against Athens timezone
-        date_str = data.get("date")
-        if date_str:
-            athens_tz = pytz.timezone('Europe/Athens')
-            today_athens = datetime.now(athens_tz).strftime('%Y-%m-%d')
-            yesterday_athens = (datetime.now(athens_tz) - timedelta(days=1)).strftime('%Y-%m-%d')
-            if date_str != today_athens and date_str != yesterday_athens:
-                print(f"WARN: Daily strategy is stale (date={date_str}, today={today_athens})", file=sys.stderr)
-                return None
-        
-        # C1: Normalize focus_pairs and avoid_pairs
-        focus_pairs = data.get("focus_pairs", [])
-        avoid_pairs = data.get("avoid_pairs", [])
-        
-        # Strip /EUR suffix, uppercase, filter to valid CRYPTO_PAIRS
-        normalized_focus = []
-        normalized_avoid = []
-        crypto_bases = {"BTC", "ETH", "SOL", "AVAX", "LINK", "XRP", "DOGE", "SUI", "NEAR", "RENDER", "ADA", "DOT"}
-        
-        for pair in focus_pairs:
-            if isinstance(pair, str):
-                base = pair.replace('/EUR', '').upper()
-                if base in crypto_bases:
-                    normalized_focus.append(base)
-        
-        for pair in avoid_pairs:
-            if isinstance(pair, str):
-                base = pair.replace('/EUR', '').upper()
-                if base in crypto_bases:
-                    normalized_avoid.append(base)
-        
-        # If normalized focus set ∩ pool is empty, ignore filter and log warning
-        if focus_pairs and not normalized_focus:
-            print(f"WARN: Daily strategy focus_pairs filter ignored - no valid pairs in {focus_pairs}", file=sys.stderr)
-        
-        data["focus_pairs"] = normalized_focus
-        data["avoid_pairs"] = normalized_avoid
-        
-        # H1: Log unknown adjustment values
-        ai_adj = data.get("ai_overseer_adjustment", "normal")
-        if ai_adj not in ["hold", "aggressive_sell", "normal", "reduce_risk"]:
-            print(f"WARN: Unknown ai_overseer_adjustment '{ai_adj}', defaulting to 'normal'", file=sys.stderr)
-            data["ai_overseer_adjustment"] = "normal"
-        
-        return data
+        if os.path.exists(DAILY_STRATEGY_PATH):
+            with open(DAILY_STRATEGY_PATH) as f:
+                return json.load(f)
     except (json.JSONDecodeError, IOError) as e:
         print(f"WARN: Could not load daily strategy: {e}", file=sys.stderr)
-        return None
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -179,7 +127,7 @@ def get_portfolio_value():
 def get_open_positions():
     """Read current positions from trading_state (all kraken strategies)."""
     rows = query_all(
-        "SELECT exchange, symbol, entry_price, entry_time, peak_plpc, quantity "
+        "SELECT symbol, entry_price, entry_time, peak_plpc "
         "FROM trading_state WHERE exchange LIKE %s", ("kraken%",))
     return rows
 
@@ -231,7 +179,7 @@ def get_market_snapshot():
             "AND timestamp >= CURRENT_TIMESTAMP - make_interval(mins => 360)",
             (EXCHANGE_NAME, base))
         rng6 = ((float(row6[1]) - float(row6[0])) / float(row6[0]) * 100.0
-                if row6 and row6[0] is not None and row6[1] is not None and float(row6[0]) > 0 else None)
+                if row6 and row6[0] and row6[1] and float(row6[0]) > 0 else None)
         # 3h momentum
         row3 = query_one(
             "SELECT a.price / b.price - 1 FROM "
@@ -241,7 +189,7 @@ def get_market_snapshot():
             " AND timestamp <= CURRENT_TIMESTAMP - make_interval(mins => 180) "
             " ORDER BY timestamp DESC LIMIT 1) b",
             (EXCHANGE_NAME, base, EXCHANGE_NAME, base))
-        mom3 = (float(row3[0]) * 100.0 if row3 and row3[0] is not None else None)
+        mom3 = (float(row3[0]) * 100.0 if row3 and row3[0] else None)
         snapshot.append({
             "symbol": sym,
             "price": round(price, 6),
@@ -308,7 +256,7 @@ def apply_parameter_change(param, value):
 
 
 def _log_trade(action, ticker, entry_price, current_price, quantity,
-               estimated_value, reason, unrealized_plpc=None):
+               estimated_value, reason):
     """Log a trade to the DB."""
     conn = get_db()
     try:
@@ -318,12 +266,12 @@ def _log_trade(action, ticker, entry_price, current_price, quantity,
                 "entry_price, current_price, quantity, estimated_value, reason, "
                 "portfolio_equity, unrealized_plpc, momentum_pct, position_size_pct) "
                 "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,"
-                "COALESCE((SELECT portfolio_equity FROM trade_log WHERE exchange=%s "
-                " ORDER BY timestamp DESC LIMIT 1), 0.0),"
-                "%s, 0.0, 0.0)",
+                "(SELECT portfolio_equity FROM trade_log WHERE exchange=%s "
+                " ORDER BY timestamp DESC LIMIT 1),"
+                "0.0, 0.0, 0.0)",
                 (EXCHANGE_NAME, action, ticker, "AI_OVERSEER",
                  entry_price, current_price, quantity, estimated_value, reason,
-                 EXCHANGE_NAME, unrealized_plpc or 0.0))
+                 EXCHANGE_NAME))
         conn.commit()
     except Exception as e:
         print(f"_log_trade failed: {e}", file=sys.stderr)
@@ -350,7 +298,7 @@ def _save_position(symbol, price, quantity=0.0):
         conn.close()
 
 
-def _remove_position(exchange, symbol):
+def _remove_position(symbol):
     """Remove position from trading_state.
 
     Retries up to 3 times with a FRESH connection per attempt to survive
@@ -364,7 +312,7 @@ def _remove_position(exchange, symbol):
             with conn.cursor() as cur:
                 cur.execute(
                     "DELETE FROM trading_state WHERE exchange=%s AND symbol=%s",
-                    (exchange, symbol))
+                    (EXCHANGE_NAME, symbol))
             conn.commit()
             return
         except Exception as e:
@@ -460,7 +408,7 @@ def execute_trade(action, symbol, size_eur, reason):
                        current_price=fill_price, quantity=fill_qty,
                        estimated_value=fill_qty * fill_price,
                        reason=f"AI overseer: {reason}")
-            _remove_position(EXCHANGE_NAME, symbol)
+            _remove_position(symbol)
         else:
             return False, f"Unknown action: {action}"
         return True, f"{action} {symbol} (EUR {size_eur}) — order {res.get('id')}"
@@ -471,49 +419,14 @@ def execute_trade(action, symbol, size_eur, reason):
 def write_gates(gates, log):
     """Save AI gate conditions to file for the 5-min script to read."""
     os.makedirs(os.path.dirname(GATES_FILE), exist_ok=True)
-    # Read previous gates to track pause duration
-    prev = {}
-    try:
-        if os.path.exists(GATES_FILE):
-            with open(GATES_FILE) as f:
-                prev = json.load(f)
-    except (json.JSONDecodeError, IOError):
-        pass
-    now = datetime.now(timezone.utc).isoformat()
-    was_paused = prev.get("script_paused", False)
-    is_paused = gates.get("script_paused", False)
-    paused_since = prev.get("paused_since")
-    if is_paused and not was_paused:
-        paused_since = now  # new pause event
-    elif not is_paused:
-        paused_since = None  # clear on resume
     payload = {
-        "script_paused": is_paused,
+        "script_paused": gates.get("script_paused", False),
         "consult_on_entry": gates.get("consult_on_entry", False),
         "reason": gates.get("reason"),
-        "paused_since": paused_since,
-        "updated_at": now,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     atomic_write_text(GATES_FILE, json.dumps(payload, indent=2))
     log.append(f"GATES: paused={payload['script_paused']} consult={payload['consult_on_entry']} — {payload.get('reason', 'no reason')}")
-
-
-def _auto_resume_if_expired(gates, log):
-    """Auto-resume pause if BTC recovered and pause has expired."""
-    paused_since = gates.get("paused_since")
-    if not paused_since:
-        return  # no pause timestamp, nothing to expire
-    try:
-        paused_dt = datetime.fromisoformat(paused_since)
-        if isinstance(paused_dt, datetime) and paused_dt.tzinfo is None:
-            paused_dt = paused_dt.replace(tzinfo=timezone.utc)
-        elapsed_hours = (datetime.now(timezone.utc) - paused_dt).total_seconds() / 3600.0
-    except (ValueError, TypeError):
-        return
-    if elapsed_hours >= PAUSE_AUTO_EXPIRE_HOURS:
-        log.append(f"⏰ Auto-re-arm: paused {elapsed_hours:.1f}h >= {PAUSE_AUTO_EXPIRE_HOURS}h, BTC recovered — resuming")
-        write_gates({"script_paused": False, "consult_on_entry": False,
-                     "reason": "Auto-resume: pause expired"}, log)
 
 
 # ---------------------------------------------------------------------------
@@ -524,25 +437,14 @@ def build_prompt(portfolio, positions, trades, market, config, available_eur):
 
     pos_lines = []
     for p in positions:
-        ex, sym, entry, etime, peak, qty_ = p
-        entry_f = float(entry)
-        # find current price from market snapshot
-        cur_pl_price = None
-        for m in market:
-            if m["symbol"] == sym:
-                cur_pl_price = m.get("price")
-                break
-        cur_pl_str = ""
-        if cur_pl_price and entry_f > 0:
-            cur_pl_val = (cur_pl_price - entry_f) / entry_f * 100.0
-            cur_pl_str = f", cur_pl={cur_pl_val:.2f}%"
-        pos_lines.append(f"  {sym}: entry={entry_f:.6f}, peak_plpc={float(peak):.2f}%{cur_pl_str}, age={etime.strftime('%H:%M') if hasattr(etime, 'strftime') else etime}")
+        sym, entry, etime, peak = p
+        pos_lines.append(f"  {sym}: entry={float(entry):.6f}, peak_plpc={float(peak):.2f}%")
 
     trade_lines = []
     for t in trades[:10]:
         ts, act, sym, ep, cp, pl, val, reason = t
         trade_lines.append(f"  {ts.strftime('%H:%M')} {act:4s} {sym:10s} "
-                           f"pl={float(pl):+.2f}% {reason or ''}")
+                           f"pl={float(pl)*100 if pl else 0:+.2f}% {reason or ''}")
 
     market_lines = []
     for m in market:
@@ -566,8 +468,7 @@ def build_prompt(portfolio, positions, trades, market, config, available_eur):
                         f"  Risk level: {_ds_raw.get('risk_level', '?')}\n"
                         f"  Focus pairs: {_ds_raw.get('focus_pairs', [])}\n"
                         f"  Avoid pairs: {_ds_raw.get('avoid_pairs', [])}\n"
-                        f"  Notes: {_ds_raw.get('strategy_notes', '—')}\n"
-                        f"  AI Overseer adjustment: {_ds_raw.get('ai_overseer_adjustment', 'normal')}")
+                        f"  Notes: {_ds_raw.get('strategy_notes', '—')}")
     else:
         _ds_strategy = ""
 
@@ -578,7 +479,7 @@ Portfolio: ~€{portfolio or '?'}  (available EUR: €{available_eur:.2f})
 Open positions:
 {chr(10).join(pos_lines) if pos_lines else '  (none)'}
 
-Recent trades (last {len(trades)}):
+Recent trades (last 24h):
 {chr(10).join(trade_lines) if trade_lines else '  (none)'}
 
 Market snapshot:
@@ -598,7 +499,6 @@ YOUR JOB (respond with ONLY valid JSON — no markdown, no backticks, no explana
    **CUT LOSSES:** If you hold a position that is in loss (current PL < -2%) for 2+ hours with no recovery (3h momentum still negative), SELL it. Do not wait for recovery when the whole market is red.
    **ROTATION:** Not available — you can only SELL, not BUY. If a position is weak, SELL it to free capital for the bot scripts to re-enter.
 4. GATES: Set conditions for the 5-min script. Use these sparingly — only when market regime demands it:
-   Recent trades shown above are context, NOT a reason to stay paused. Only set script_paused=true if market conditions are bad RIGHT NOW. Do not pause out of caution over past losses.
    - script_paused: true/false
    - consult_on_entry: true/false
    - reason: short explanation
@@ -608,7 +508,7 @@ Return strict JSON — no comments, no trailing commas:
 {{{{
   "analysis": "...",
   "parameter_adjustments": [{{"param": "PARAM_NAME", "value": number, "reason": "..."}}],
-  "trade_signals": [{{"action": "SELL", "symbol": "NEAR/EUR", "size_eur": {MAX_TRADE_SIZE_EUR}, "reason": "..."}}],
+  "trade_signals": [{{"action": "BUY", "symbol": "NEAR/EUR", "size_eur": {MAX_TRADE_SIZE_EUR}, "reason": "..."}}],
   "gates": {{ "script_paused": false, "consult_on_entry": false, "reason": null }},
   "script_improvements": ["..."]
 }}}}
@@ -636,7 +536,7 @@ def _build_review_prompt(pending, ctx, portfolio, available_eur, num_positions, 
             wins += 1
         elif plf < 0:
             losses += 1
-        pnl_lines.append(f"  {ts.strftime('%H:%M')} {tk:10s} pl={plf:+.2f}% {r or ''}")
+        pnl_lines.append(f"  {ts.strftime('%H:%M')} {tk:10s} pl={plf*100:+.2f}% {r or ''}")
     pnl_block = chr(10).join(pnl_lines) if pnl_lines else "  (no recent sells)"
     track = f"{wins}W/{losses}L last {wins + losses}" if (wins + losses) else "no recent history"
 
@@ -711,7 +611,7 @@ def main():
     trades = get_recent_trades()
     market = get_market_snapshot()
     config = read_v2_config()
-    # Get available EUR balance — separate from trailing stop, used only for AI prompt/review
+    # Get available EUR balance
     try:
         balance = exchange.fetch_balance()
         available_eur = float(balance["EUR"]["free"])
@@ -722,16 +622,16 @@ def main():
     log.append(f"Portfolio: ~€{portfolio or '?'}")
     log.append(f"Open positions: {len(positions)}")
     log.append(f"Recent trades: {len(trades)}")
+
     # ---------------------------------------------------------------
     # 1b. Trailing stop — auto-exit positions that dropped too far
     #     from their peak, before the AI call (no hallucinations, no delay).
     # ---------------------------------------------------------------
     TRAILING_STOP_PCT = 4.0  # exit if retraced this much from peak profit
-    HARD_STOP_LOSS_PCT = 5.0  # unconditional exit if down this much
-    TRAIL_ARM_PCT = 2.0       # only trail after position has reached this gain
+    HARD_STOP_LOSS_PCT = 5.0  # exit if never was green and down this much
     remaining_positions = []
     for p in positions:
-        ex, sym, entry, etime, peak_plpc_v, pos_qty_v = p
+        sym, entry, etime, peak_plpc_v = p
         entry_f = float(entry)
         # find current price from market snapshot
         cur_price = None
@@ -747,125 +647,90 @@ def main():
 
         # Backfill historical peak from asset_prices (covers the gap where
         # the AI Overseer never tracked peak_plpc before the trailing stop
-        # was deployed).  Cheap indexed MAX query — run only when peak is 0/NULL.
-        if old_peak <= 0:
-            try:
-                db2 = get_db()
-                with db2.cursor() as cur:
-                    cur.execute(
-                        "SELECT MAX(price) FROM asset_prices "
-                        "WHERE symbol=%s AND exchange='kraken' "
-                        "AND timestamp >= %s",
-                        (sym.split("/")[0], etime))
-                    row = cur.fetchone()
-                    if row and row[0]:
-                        hist_peak = (float(row[0]) - entry_f) / entry_f * 100.0
-                        if hist_peak > old_peak:
-                            old_peak = hist_peak
-                            cur.execute(
-                                "UPDATE trading_state SET peak_plpc=%s "
-                                "WHERE exchange=%s AND symbol=%s",
-                                (hist_peak, ex, sym))
-                db2.commit()
-                db2.close()
-            except Exception:
-                pass
+        # was deployed).  Cheap indexed MAX query — always run to be safe.
+        try:
+            db2 = get_db()
+            with db2.cursor() as cur:
+                cur.execute(
+                    "SELECT MAX(price) FROM asset_prices "
+                    "WHERE symbol=%s AND exchange='kraken' "
+                    "AND timestamp >= %s",
+                    (sym.split("/")[0], etime))
+                row = cur.fetchone()
+                if row and row[0]:
+                    hist_peak = (float(row[0]) - entry_f) / entry_f * 100.0
+                    if hist_peak > old_peak:
+                        old_peak = hist_peak
+                        cur.execute(
+                            "UPDATE trading_state SET peak_plpc=%s "
+                            "WHERE exchange=%s AND symbol=%s",
+                            (hist_peak, EXCHANGE_NAME, sym))
+            db2.commit()
+            db2.close()
+        except Exception:
+            pass
         if cur_pl > old_peak:
             old_peak = cur_pl
-            # update peak_plpc in trading_state — use position's own exchange
+            # update peak_plpc in trading_state
             try:
                 db2 = get_db()
                 with db2.cursor() as cur:
                     cur.execute(
                         "UPDATE trading_state SET peak_plpc=%s "
                         "WHERE exchange=%s AND symbol=%s",
-                        (cur_pl, ex, sym))
+                        (cur_pl, EXCHANGE_NAME, sym))
                 db2.commit()
                 db2.close()
             except Exception:
                 pass
         retrace = old_peak - cur_pl
         sold_ok = False
-
-        # 1) Unconditional hard stop: exit at -5% regardless of peak history
-        if cur_pl <= -HARD_STOP_LOSS_PCT:
-            log.append(f"🛑 HARD STOP: {sym} down {cur_pl:.1f}% from entry (exchange={ex})")
+        if old_peak > 0 and retrace > TRAILING_STOP_PCT:
+            # trailing stop triggered — auto-sell full position
+            log.append(f"🛑 TRAILING STOP: {sym} retraced {retrace:.1f}% from peak ({cur_pl:.1f}% vs peak {old_peak:.1f}%)")
             try:
-                exchange.load_markets()
                 base = sym.split("/")[0]
                 bal_local = exchange.fetch_balance()
-                fqty = float(bal_local.get("free", {}).get(base) or 0)
+                totals = bal_local.get("total", {}) or {}
+                fqty = float(totals.get(base) or 0)
                 if fqty > 0:
-                    fqty = float(exchange.amount_to_precision(sym, fqty))
                     res = exchange.create_market_sell_order(sym, fqty)
-                    fill_price, _ = _extract_fill(res, cur_price)
+                    fill_price = float(res.get("average") or res.get("price") or cur_price)
                     fill_qty = float(res.get("filled") or fqty)
-                    fill_price = fill_price or cur_price
                     _log_trade(action="SELL", ticker=sym, entry_price=entry_f,
                                current_price=fill_price, quantity=fill_qty,
                                estimated_value=fill_qty * fill_price,
-                               reason=f"hard stop: {cur_pl:.1f}% loss",
-                               unrealized_plpc=cur_pl)
-                    _remove_position(ex, sym)
+                               reason=f"trailing stop: -{retrace:.1f}% from peak")
+                    _remove_position(sym)
+                    sold_ok = True
+                    log.append(f"✅ TRAILING STOP sold {fill_qty} {sym} @ {fill_price:.4f}")
+                else:
+                    log.append(f"⚠️  TRAILING STOP: {sym} has 0 balance, skipping")
+            except Exception as e:
+                log.append(f"❌ TRAILING STOP sell failed: {e}")
+        elif old_peak <= 0 and cur_pl <= -HARD_STOP_LOSS_PCT:
+            # hard stop-loss — position never went green and is bleeding
+            log.append(f"🛑 HARD STOP: {sym} down {cur_pl:.1f}% from entry (never green, peak={old_peak:.1f}%)")
+            try:
+                base = sym.split("/")[0]
+                bal_local = exchange.fetch_balance()
+                totals = bal_local.get("total", {}) or {}
+                fqty = float(totals.get(base) or 0)
+                if fqty > 0:
+                    res = exchange.create_market_sell_order(sym, fqty)
+                    fill_price = float(res.get("average") or res.get("price") or cur_price)
+                    fill_qty = float(res.get("filled") or fqty)
+                    _log_trade(action="SELL", ticker=sym, entry_price=entry_f,
+                               current_price=fill_price, quantity=fill_qty,
+                               estimated_value=fill_qty * fill_price,
+                               reason=f"hard stop: {cur_pl:.1f}% loss, never green")
+                    _remove_position(sym)
                     sold_ok = True
                     log.append(f"✅ HARD STOP sold {fill_qty} {sym} @ {fill_price:.4f}")
                 else:
-                    log.append(f"⚠️  HARD STOP: {sym} has 0 free balance, skipping")
+                    log.append(f"⚠️  HARD STOP: {sym} has 0 balance, skipping")
             except Exception as e:
                 log.append(f"❌ HARD STOP sell failed: {e}")
-
-        # 2) Trailing stop: only activate after position has reached TRAIL_ARM_PCT gain
-        elif old_peak >= TRAIL_ARM_PCT and retrace > TRAILING_STOP_PCT:
-            log.append(f"🛑 TRAILING STOP: {sym} retraced {retrace:.1f}% from peak ({cur_pl:.1f}% vs peak {old_peak:.1f}%)")
-            try:
-                exchange.load_markets()
-                base = sym.split("/")[0]
-                bal_local = exchange.fetch_balance()
-                # Sell the position's stored quantity, capped at free balance
-                pos_qty = float(pos_qty_v) if pos_qty_v else 0
-                fqty = float(bal_local.get("free", {}).get(base) or 0)
-                sell_qty = min(fqty, pos_qty) if pos_qty > 0 else fqty
-                if sell_qty > 0:
-                    sell_qty = float(exchange.amount_to_precision(sym, sell_qty))
-                    # TOCTOU guard: re-read position exists before selling
-                    check = query_one(
-                        "SELECT 1 FROM trading_state WHERE exchange=%s AND symbol=%s",
-                        (ex, sym))
-                    if check:
-                        res = exchange.create_market_sell_order(sym, sell_qty)
-                        fill_price, fill_qty = _extract_fill(res, cur_price)
-                        filled = fill_qty or sell_qty
-                        fill_price = fill_price or cur_price
-                        _log_trade(action="SELL", ticker=sym, entry_price=entry_f,
-                                   current_price=fill_price, quantity=filled,
-                                   estimated_value=filled * fill_price,
-                                   reason=f"trailing stop: -{retrace:.1f}% from peak",
-                                   unrealized_plpc=cur_pl)
-                        # If partial fill, update position quantity; else remove
-                        if filled < pos_qty:
-                            conn = get_db()
-                            try:
-                                with conn.cursor() as cur:
-                                    cur.execute(
-                                        "UPDATE trading_state SET quantity=%s "
-                                        "WHERE exchange=%s AND symbol=%s",
-                                        (pos_qty - filled, ex, sym))
-                                conn.commit()
-                            finally:
-                                conn.close()
-                            sold_ok = True
-                            log.append(f"⚠️  TRAILING STOP: partial fill {filled}/{pos_qty} {sym}, quantity reduced")
-                        else:
-                            _remove_position(ex, sym)
-                            sold_ok = True
-                        log.append(f"✅ TRAILING STOP sold {filled} {sym} @ {fill_price:.4f}")
-                    else:
-                        log.append(f"⚠️  TRAILING STOP: {sym} position already removed, skipping")
-                else:
-                    log.append(f"⚠️  TRAILING STOP: {sym} has 0 free balance, skipping")
-            except Exception as e:
-                log.append(f"❌ TRAILING STOP sell failed: {e}")
-
         if not sold_ok:
             remaining_positions.append(p)
     # Replace positions list with positions NOT auto-exited
@@ -875,6 +740,7 @@ def main():
     # ---------------------------------------------------------------
     # 2a. Handle pending per-trade review (bot → AI → approve/reject)
     # ---------------------------------------------------------------
+    PENDING_REVIEW_FILE = os.path.join(PROJECT_DIR, "ai_overseer/pending_review.json")
     if os.path.exists(PENDING_REVIEW_FILE):
         try:
             with open(PENDING_REVIEW_FILE) as f:
@@ -902,7 +768,7 @@ def main():
                 "AND timestamp >= CURRENT_TIMESTAMP - make_interval(mins => 360)",
                 (EXCHANGE_NAME, base))
             rng6 = ((float(row6[1]) - float(row6[0])) / float(row6[0]) * 100.0
-                    if row6 and row6[0] is not None and row6[1] is not None and float(row6[0]) > 0 else None)
+                    if row6 and row6[0] and row6[1] and float(row6[0]) > 0 else None)
             row3 = query_one(
                 "SELECT a.price / b.price - 1 FROM "
                 "(SELECT price FROM asset_prices WHERE exchange=%s AND symbol=%s "
@@ -911,16 +777,16 @@ def main():
                 " AND timestamp <= CURRENT_TIMESTAMP - make_interval(mins => 180) "
                 " ORDER BY timestamp DESC LIMIT 1) b",
                 (EXCHANGE_NAME, base, EXCHANGE_NAME, base))
-            mom3 = (float(row3[0]) * 100.0 if row3 and row3[0] is not None else None)
-            ctx["rng6h_pct"] = round(rng6, 2) if rng6 is not None else "N/A"
-            ctx["mom3h_pct"] = round(mom3, 2) if mom3 is not None else "N/A"
+            mom3 = (float(row3[0]) * 100.0 if row3 and row3[0] else None)
+            ctx["rng6h_pct"] = round(rng6, 2) if rng6 else "N/A"
+            ctx["mom3h_pct"] = round(mom3, 2) if mom3 else "N/A"
 
             # Recent PnL for this bot
             recent_pnl = query_all(
                 "SELECT timestamp, ticker, unrealized_plpc, reason FROM trade_log "
-                "WHERE exchange LIKE %s AND action='SELL' "
+                "WHERE exchange=%s AND action='SELL' "
                 "ORDER BY timestamp DESC LIMIT 20",
-                (f"{bot}%",))
+                (bot,))
 
             review_prompt = _build_review_prompt(pending, ctx, portfolio, available_eur,
                                                   len(positions), recent_pnl)
@@ -964,9 +830,10 @@ def main():
                         # Also propagate unknown verdict as the reason
                         reason = f"Unknown verdict '{verdict}': {reason}" if reason else f"Unknown verdict '{verdict}'"
                     pending["verdict_reason"] = reason
-                    pending['confidence'] = confidence
+                    pending["confidence"] = confidence
+                    PENDING_LOCK_FILE = os.path.join(PROJECT_DIR, "ai_overseer/.pending_review.lock")
                     os.makedirs(os.path.dirname(PENDING_LOCK_FILE), exist_ok=True)
-                    pending['reviewed_at'] = datetime.now(timezone.utc).isoformat()
+                    pending["reviewed_at"] = datetime.now(timezone.utc).isoformat()
 
                     # Re-read file under flock: if candidate_id changed, discard
                     verdict_written = False
@@ -992,6 +859,14 @@ def main():
                         log.append(f"⚠️ Discarding verdict for {sym}: pending file gone")
                         pending = {}
                         verdict = None
+                    except Exception:
+                        tmp = f"{PENDING_REVIEW_FILE}.tmp.{os.getpid()}"
+                        with open(tmp, "w") as f:
+                            json.dump(pending, f, indent=2, default=str)
+                            f.flush()
+                            os.fsync(f.fileno())
+                        os.replace(tmp, PENDING_REVIEW_FILE)
+                        verdict_written = True
 
                     if not verdict_written and pending:
                         tmp = f"{PENDING_REVIEW_FILE}.tmp.{os.getpid()}"
@@ -1069,11 +944,6 @@ def main():
             _write_log(log)
             return
 
-    # BTC regime filter
-    btc_up = get_btc_trend_up()
-    if not btc_up:
-        log.append("BTC trend DOWN — blocking all new entries")
-
     log.append(f"AI analysis: {decision.get('analysis', '(none)')}")
 
     # 4. Apply parameter adjustments
@@ -1087,6 +957,11 @@ def main():
             continue
         ok, msg = apply_parameter_change(param, value)
         log.append(f"{'OK' if ok else 'FAIL'} param: {msg} — {reason}")
+
+    # BTC regime filter
+    btc_up = get_btc_trend_up()
+    if not btc_up:
+        log.append("BTC trend DOWN — blocking all new entries")
 
     # 5. Execute trade signals (SELL only — BUY disabled)
     for sig in decision.get("trade_signals", []):
@@ -1103,17 +978,10 @@ def main():
         ok, msg = execute_trade(action, symbol, size_eur, reason)
         log.append(f"{'OK' if ok else 'FAIL'} trade: {msg} — {reason}")
 
-    # 5.5. Process gates — BTC override takes precedence
+    # 5.5. Process gates
     gates = decision.get("gates", {})
-    if not btc_up:
-        gates["script_paused"] = True
-        gates["consult_on_entry"] = False
-        gates["reason"] = "BTC trend down — market-wide caution (override)"
-    write_gates(gates, log)
-
-    # 5.6. Auto-re-arm: if paused and BTC recovered (or expired), un-pause
-    if gates.get("script_paused", False) and btc_up:
-        _auto_resume_if_expired(gates, log)
+    if gates:
+        write_gates(gates, log)
 
     # 6. Log script improvements
     for imp in decision.get("script_improvements", []):
@@ -1121,7 +989,7 @@ def main():
 
     _write_log(log)
 
-    # Heartbeat: account status — written even if balance fetch fails
+    # Heartbeat: account status + notify state
     try:
         bal_local = exchange.fetch_balance()
         cash_e = float(bal_local["EUR"]["free"])
@@ -1133,20 +1001,18 @@ def main():
                 val = qty * m["price"]
                 if val > 1.0:
                     pos_parts.append(f"{coin} {round(val,2)}€")
-    except Exception:
-        pass
+        pos_str = " · ".join(pos_parts) if pos_parts else "κανένα"
+        print(f"🤖 AI Overseer: {round(cash_e,2)}€ free · {pos_str}")
 
-    # Always write notify_state heartbeat (independent of balance fetch)
-    try:
+        # Save notify_state to DB so system_health_check sees heartbeat
         db2 = get_db()
         with db2.cursor() as cur:
             cur.execute(
                 """INSERT INTO notify_state (exchange, last_notify_time, extra, updated_at)
                    VALUES (%s, %s, '{}'::jsonb, CURRENT_TIMESTAMP)
                    ON CONFLICT (exchange) DO UPDATE SET
-                       last_notify_time = EXCLUDED.last_notify_time,
                        updated_at = CURRENT_TIMESTAMP""",
-                ('ai_overseer', datetime.now(timezone.utc).isoformat()))
+                (EXCHANGE_NAME, datetime.now(timezone.utc).isoformat()))
         db2.commit()
         db2.close()
     except Exception:

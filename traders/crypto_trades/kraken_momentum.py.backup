@@ -24,7 +24,6 @@ import time
 import fcntl
 import ccxt
 from datetime import datetime, timezone, timedelta
-import pytz
 from dotenv import load_dotenv
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "extreme"))
 from db_prices import (
@@ -128,61 +127,14 @@ def load_ai_gates():
 DAILY_STRATEGY_PATH = os.path.join(ROOT_DIR, "daily_strategy.json")
 
 def load_daily_strategy():
-    """Load Market Architect's daily strategy file with normalization and validation."""
+    """Load the Market Architect's daily strategy file, if available."""
     try:
-        if not os.path.exists(DAILY_STRATEGY_PATH):
-            return None
-        with open(DAILY_STRATEGY_PATH) as f:
-            data = json.load(f)
-        
-        # H2: Staleness guard — allow previous day's strategy (Architect runs at 06:30)
-        date_str = data.get("date")
-        if date_str:
-            athens_tz = pytz.timezone('Europe/Athens')
-            today_athens = datetime.now(athens_tz).strftime('%Y-%m-%d')
-            # Allow yesterday (e.g. 00:00-06:30 before Architect updates)
-            if date_str < (datetime.now(athens_tz) - timedelta(days=1)).strftime('%Y-%m-%d'):
-                print(f"WARN: Daily strategy is stale (date={date_str}, today={today_athens})", file=sys.stderr)
-                return None
-        
-        # C1: Normalize focus_pairs and avoid_pairs
-        focus_pairs = data.get("focus_pairs", [])
-        avoid_pairs = data.get("avoid_pairs", [])
-        
-        # Strip /EUR suffix using base_symbol(), uppercase, filter to valid CRYPTO_PAIRS
-        normalized_focus = []
-        normalized_avoid = []
-        crypto_bases = {pair.split('/')[0] for pair in CRYPTO_PAIRS}
-        
-        for pair in focus_pairs:
-            if isinstance(pair, str):
-                base = base_symbol(pair).upper()
-                if base in crypto_bases:
-                    normalized_focus.append(base)
-        
-        for pair in avoid_pairs:
-            if isinstance(pair, str):
-                base = base_symbol(pair).upper()
-                if base in crypto_bases:
-                    normalized_avoid.append(base)
-        
-        # If normalized focus set ∩ pool is empty, ignore filter and log warning
-        if focus_pairs and not normalized_focus:
-            print(f"WARN: Daily strategy focus_pairs filter ignored - no valid pairs in {focus_pairs}", file=sys.stderr)
-        
-        data["focus_pairs"] = normalized_focus
-        data["avoid_pairs"] = normalized_avoid
-        
-        # H1: Log unknown adjustment values
-        momentum_adj = data.get("momentum_adjustment", "normal")
-        if momentum_adj not in ["normal", "cautious", "skip"]:
-            print(f"WARN: Unknown momentum_adjustment '{momentum_adj}', defaulting to 'normal'", file=sys.stderr)
-            data["momentum_adjustment"] = "normal"
-        
-        return data
+        if os.path.exists(DAILY_STRATEGY_PATH):
+            with open(DAILY_STRATEGY_PATH) as f:
+                return json.load(f)
     except (json.JSONDecodeError, IOError) as e:
         print(f"WARN: Could not load daily strategy: {e}", file=sys.stderr)
-        return None
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -321,14 +273,10 @@ def momentum_signal(daily, hourly):
 # Main cycle
 # ---------------------------------------------------------------------------
 def run_cycle():
-    # H3: Load strategy once per cycle and pass through
-    daily_strategy = load_daily_strategy()
-    
     report = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "status": "success",
         "strategy": "momentum-breakout",
-        "strategy_missing": daily_strategy is None,
         "positions_managed": [],
         "scanned_assets": [],
         "action_taken": "NONE",
@@ -348,28 +296,13 @@ def run_cycle():
         has_trade = action in ("BUY", "SELL")
         has_fail = action in ("BUY_FAILED", "SELL_FAILED")
 
+        last_str = notify_state.get("last_notify_time", "1970-01-01T00:00:00Z")
+        last_time = datetime.fromisoformat(last_str.replace("Z", "+00:00"))
+        now_utc = datetime.now(timezone.utc)
+        hourly = (now_utc - last_time).total_seconds() >= 3600.0
+
         if is_error:
             print(f"❌ Kraken momentum: {report.get('details', 'unknown error')}")
-        elif report.get("strategy_missing"):
-            # Throttled: only print once per hour to avoid 5-min spam
-            _throttle_file = os.path.join(ROOT_DIR, "logs/kraken_momentum_strategy_warn.txt")
-            _now = datetime.now(timezone.utc).timestamp()
-            _should_warn = True
-            try:
-                with open(_throttle_file) as _tf:
-                    _last_warn = float(_tf.read().strip())
-                    if _now - _last_warn < 3600:
-                        _should_warn = False
-            except (FileNotFoundError, ValueError):
-                pass
-            if _should_warn:
-                print(f"⚠️ **Kraken momentum**: Daily strategy missing or stale — running fallback config.")
-                try:
-                    with open(_throttle_file, "w") as _tf:
-                        _tf.write(str(_now))
-                except Exception:
-                    pass
-                should_notify = True
         elif has_trade:
             for line in msg_lines:
                 if line.startswith(("🛒", "🔄")):
@@ -381,7 +314,22 @@ def run_cycle():
             for line in msg_lines:
                 print(line)
             should_notify = True
-        # else: silent — heartbeat moved to hourly combined report
+        elif hourly:
+            pos_lines = []
+            this_value_eur = 0.0
+            for p in my_positions:
+                sym = p["symbol"]
+                ss = new_state.get(sym, {})
+                ent = ss.get("entry_price", p["current_price"])
+                cur_p = p["current_price"]
+                pl = (cur_p - ent) / ent * 100.0 if ent else 0.0
+                pos_lines.append(f"{base_symbol(sym)} {round(pl,1)}%")
+                this_value_eur += p["value_eur"]
+            pos_str = " | ".join(pos_lines) if pos_lines else "—"
+            print(f"💰 Kraken momentum: {round(cash_eur,2)}€ free · {round(this_value_eur,2)}€ in {len(my_positions)} pos · {pos_str}")
+            should_notify = True
+            notify_state["last_notify_time"] = now_utc.isoformat().replace("+00:00", "Z")
+        # else: silent
 
         db_save_notify_state(db_conn, EXCHANGE_NAME, notify_state)
         close_connection(db_conn)
@@ -396,36 +344,6 @@ def run_cycle():
         }
         insert_prices(db_conn, price_map)
         balance = exchange.fetch_balance()
-
-        # --- Open order reconciliation ---
-        try:
-            open_orders = exchange.fetch_open_orders()
-            now_ts = datetime.now(timezone.utc).timestamp()
-            for ord in open_orders:
-                if ord.get('status') == 'open':
-                    sym = ord.get('symbol', '')
-                    side = ord.get('side', '')
-                    ord_ts = ord.get('timestamp')
-                    if ord_ts and (now_ts - ord_ts / 1000) > 3600 and side == 'buy':
-                        exchange.cancel_order(ord['id'], sym)
-                        print(f"Reconciled stale order: {side} {sym}", file=sys.stderr)
-        except Exception:
-            pass
-
-        # --- Balance reconciliation ---
-        try:
-            for sym in CRYPTO_PAIRS:
-                coin = sym.split('/')[0]
-                qty = balance['total'].get(coin, 0.0)
-                if qty > 0 and coin not in [base_symbol(k) for k in state.keys()]:
-                    ticker = tickers.get(sym)
-                    if ticker and ticker.get('last'):
-                        state[sym] = {'peak_plpc': 0.0, 'quantity': float(qty)}
-                        print(f"Recovered orphan: {sym} ({qty})", file=sys.stderr)
-            if state:
-                save_trading_state(db_conn, EXCHANGE_NAME, state)
-        except Exception:
-            pass
     except Exception as e:
         report["status"] = "error"
         report["details"] = f"Failed to fetch market/account data: {e}"
@@ -588,69 +506,50 @@ def run_cycle():
     # ---------------------------------------------------------------
     # 4. Risk gates before any buy
     # ---------------------------------------------------------------
-    # First, process daily strategy adjustments so cautious/aggressive can
-    # influence the subsequent position/trade cap checks.
-    _aggressive_mode = False
-    _cautious_mode = False
-    _risk_mult = 1.0
-    _candidate_limit = 8  # default report limit
-
-    if daily_strategy:
-        adj = daily_strategy.get("momentum_adjustment", "normal")
-        btc_regime = daily_strategy.get("btc_regime", "neutral")
-        if adj == "normal" and btc_regime in ("below", "bearish"):
-            adj = "cautious"
-            print("INFO: btc_regime=below/bearish overrode momentum_adjustment to cautious", file=sys.stderr)
-        elif adj == "normal" and btc_regime in ("above", "bullish"):
-            adj = "aggressive"
-            print("INFO: btc_regime=above/bullish overrode momentum_adjustment to aggressive", file=sys.stderr)
-        if adj == "skip":
-            skip, skip_reason = True, "Market Architect: skip momentum entries today"
-            should_notify = True
-            msg_lines.append("📋 **Market Architect**: momentum entries skipped today")
-        elif adj == "cautious":
-            should_notify = True
-            msg_lines.append("📋 **Market Architect**: momentum entries — CAUTIOUS mode")
-            _cautious_mode = True
-            _risk_mult = 0.5
-            _candidate_limit = 3
-        elif adj == "aggressive":
-            _aggressive_mode = True
-            msg_lines.append("📋 **Market Architect**: momentum entries — AGGRESSIVE mode")
-            should_notify = True
-
-    # Now evaluate position/trade caps with mode adjustments applied
-    effective_max_momentum = MAX_OPEN_MOMENTUM
-    if _aggressive_mode:
-        effective_max_momentum += 1
     skip, skip_reason = False, ""
-    if not skip and len(all_positions) >= MAX_TOTAL_OPEN:
+    if len(all_positions) >= MAX_TOTAL_OPEN:
         skip, skip_reason = True, f"Global open-position cap reached ({MAX_TOTAL_OPEN})."
-    elif not skip and len(my_positions) >= effective_max_momentum and not can_rotate:
-        skip, skip_reason = True, f"Momentum position cap reached ({effective_max_momentum})."
-    elif not skip and cash_eur < MIN_TRADE_EUR and not can_rotate:
+    elif len(my_positions) >= MAX_OPEN_MOMENTUM and not can_rotate:
+        skip, skip_reason = True, f"Momentum position cap reached ({MAX_OPEN_MOMENTUM})."
+    elif cash_eur < MIN_TRADE_EUR and not can_rotate:
         skip, skip_reason = True, "No buying power."
-    elif not skip and trades_today(db_conn, exchange_name=EXCHANGE_NAME) >= MAX_TRADES_PER_DAY:
+    elif trades_today(db_conn, exchange_name=EXCHANGE_NAME) >= MAX_TRADES_PER_DAY:
         skip, skip_reason = True, f"Daily trade cap reached ({MAX_TRADES_PER_DAY})."
     else:
-        # Shared daily buy limit across all kraken strategies (with advisory lock)
-        # Only applies when Market Architect provides a daily strategy file
-        if daily_strategy and not skip:
+        # BTC regime filter — no entries if BTC trending down
+        with db_conn.cursor() as _cur:
+            _cur.execute(
+                "SELECT price FROM asset_prices WHERE exchange='kraken' AND symbol='BTC' "
+                "ORDER BY timestamp DESC LIMIT 72")
+            btc_rows = _cur.fetchall()
+        if btc_rows and len(btc_rows) >= 12:
+            btc_prices = [float(r[0]) for r in btc_rows]
+            btc_now = btc_prices[0]
+            btc_avg = sum(btc_prices) / len(btc_prices)
+            if btc_now < btc_avg:
+                skip, skip_reason = True, f"BTC trend DOWN ({btc_now:.0f} < 6h avg {btc_avg:.0f})"
+        # Shared daily buy limit across all kraken strategies
+        if not skip:
             with db_conn.cursor() as _cur:
-                # PostgreSQL advisory lock serializes the check-act across both processes
-                lock_key = 840271  # fixed shared key for max_daily_buys serialization
-                # NOTE: pg_advisory_xact_lock is txn-scoped. No COMMIT must occur between
-                # this lock acquisition and the BUY log insert, or mutual exclusion breaks.
-                _cur.execute("SELECT pg_advisory_xact_lock(%s)", (lock_key,))
                 _cur.execute(
                     "SELECT COUNT(*) FROM trade_log "
                     "WHERE exchange LIKE 'kraken%%' AND action='BUY' "
-                    "AND DATE(timestamp AT TIME ZONE 'UTC') = "
-                    "DATE(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')")
+                    "AND DATE(timestamp) = CURRENT_DATE")
                 shared_count = _cur.fetchone()
-            max_buys = int(daily_strategy.get("max_daily_buys", 1))
-            if shared_count and int(shared_count[0]) >= max_buys:
-                skip, skip_reason = True, f"Market Architect: max_daily_buys ({max_buys}) reached"
+            if shared_count and int(shared_count[0]) >= 1:
+                skip, skip_reason = True, "Shared daily buy limit (1/day all kraken bots)"
+        # Daily strategy gate (Market Architect)
+        if not skip:
+            ds = load_daily_strategy()
+            if ds:
+                adj = ds.get("momentum_adjustment", "normal")
+                if adj == "skip":
+                    skip, skip_reason = True, "Market Architect: skip momentum entries today"
+                    should_notify = True
+                    msg_lines.append("📋 **Market Architect**: momentum entries skipped today")
+                elif adj == "cautious":
+                    should_notify = True
+                    msg_lines.append("📋 **Market Architect**: momentum entries — CAUTIOUS mode")
         if not skip:
             rpnl = realized_pnl_today_pct(db_conn, exchange_name=EXCHANGE_NAME, round_trip_fee_pct=ROUND_TRIP_FEE_PCT)
             if rpnl <= DAILY_LOSS_BREAKER_PCT:
@@ -672,8 +571,9 @@ def run_cycle():
     now = datetime.now(timezone.utc)
     candidates = []
     # Daily strategy pair filter (Market Architect)
-    _focus_syms = set(daily_strategy.get("focus_pairs", [])) if daily_strategy else set()
-    _avoid_syms = set(daily_strategy.get("avoid_pairs", [])) if daily_strategy else set()
+    _ds_pairs = load_daily_strategy()
+    _focus_syms = set(_ds_pairs.get("focus_pairs", [])) if _ds_pairs else set()
+    _avoid_syms = set(_ds_pairs.get("avoid_pairs", [])) if _ds_pairs else set()
     for sym in CRYPTO_PAIRS:
         if sym in held:
             continue
@@ -711,11 +611,9 @@ def run_cycle():
                            "score": score})
 
     candidates.sort(key=lambda c: c["score"], reverse=True)
-    # Trim candidate list before selection (not just for reporting)
-    candidates = candidates[:_candidate_limit] if _candidate_limit < len(candidates) else candidates
     report["scanned_assets"] = [
         {k: (round(v, 3) if isinstance(v, float) else v) for k, v in c.items()}
-        for c in candidates[:_candidate_limit]
+        for c in candidates[:8]
     ]
 
     if not candidates:
@@ -764,11 +662,14 @@ def run_cycle():
             clear_pending_review()
             execute_approved = True  # skip re-submit, proceed to buy
         else:
-            # Approved coin no longer in candidates — re-submit same cycle, like pullback does
-            report["details"] = (f"AI approved {approved_symbol} but it's no longer "
-                                 f"a candidate — re-submitting {symbol}.")
+            # Approved coin no longer in candidates — can't buy
+            report["action_taken"] = "SKIP"
+            report["details"] = (f"AI approved {approved_symbol} but it no longer passes "
+                                 f"entry filters — re-submitting.")
             clear_pending_review()
             execute_approved = False
+            finalize()
+            return  # Prevent fall-through to buy execution
 
     elif pending.get("status") == "rejected" and pending.get("bot") == EXCHANGE_NAME:
         reason = pending.get("verdict_reason", "No reason given")
@@ -920,7 +821,7 @@ def run_cycle():
     order_size_eur = cash_eur * deploy_fraction * best["mult"]
 
     stop_pct = abs(STOP_LOSS_PCT)
-    risk_cap_eur = ((RISK_PER_TRADE_PCT * _risk_mult) / 100.0 * portfolio_value) / (stop_pct / 100.0)
+    risk_cap_eur = (RISK_PER_TRADE_PCT / 100.0 * portfolio_value) / (stop_pct / 100.0)
     if risk_cap_eur < order_size_eur:
         order_size_eur = risk_cap_eur
     order_size_eur = min(order_size_eur, cash_eur)

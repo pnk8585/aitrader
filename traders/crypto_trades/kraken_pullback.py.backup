@@ -26,7 +26,6 @@ import uuid
 import fcntl
 import ccxt
 from datetime import datetime, timezone, timedelta
-import pytz
 from dotenv import load_dotenv
 
 # db_prices lives in traders/extreme/ — add it to the import path so this
@@ -87,18 +86,18 @@ TREND_3H_MIN = 180         # minutes
 TREND_6H_MIN = 360         # price must also be > price 6h ago
 
 # --- Entry (buy the dip inside the uptrend, never the blow-off top) -------
-PULLBACK_MIN_PCT = 2.0# current price must be >=0.5% below the last-1h high
-BLOWOFF_GUARD_1H_PCT = 8.0# skip if 1h momentum > +4% (that's the top, it reverts)
+PULLBACK_MIN_PCT = 3.0# current price must be >=0.5% below the last-1h high
+BLOWOFF_GUARD_1H_PCT = 5.0# skip if 1h momentum > +4% (that's the top, it reverts)
 RR_MIN = 2.0               # require room-to-6h-high >= RR_MIN × stop distance (reward:risk gate)
 
 # --- Exits ----------------------------------------------------------------
-MIN_HARD_STOP_PCT = 4.0
+MIN_HARD_STOP_PCT = 1.5
 MAX_HARD_STOP_PCT = 8.0    # cap the vol-widened stop so a crazy range can't risk the account
-TRAIL_ARM_PCT = 2.5        # arm the trailing TP only after a real +2.5% peak
+TRAIL_ARM_PCT = 1.0# arm the trailing TP only after a real +2.5% peak
 TRAIL_GIVEBACK_FRAC = 0.40       # let winners run: give back 40% of the peak gain...
 TRAIL_GIVEBACK_MIN_PCT = 1.0     # ...but never trail tighter than this absolute floor
-HARD_TP_CAP_PCT = 3.0# absolute take-profit ceiling
-MAX_HOLD_HOURS = 4.0# only force-exit a *dead* (net-neg, trend-broken) bag
+HARD_TP_CAP_PCT = 6.0      # absolute take-profit ceiling
+MAX_HOLD_HOURS = 12.0      # only force-exit a *dead* (net-neg, trend-broken) bag
 STALE_HOLD_HOURS = 18.0    # free capital from a stalled, trend-broken, barely-green bag
 
 # --- Position sizing / risk -----------------------------------------------
@@ -141,61 +140,14 @@ def load_ai_gates():
 DAILY_STRATEGY_PATH = os.path.join(ROOT_DIR, "daily_strategy.json")
 
 def load_daily_strategy():
-    """Load Market Architect's daily strategy file with normalization and validation."""
+    """Load the Market Architect's daily strategy file, if available."""
     try:
-        if not os.path.exists(DAILY_STRATEGY_PATH):
-            return None
-        with open(DAILY_STRATEGY_PATH) as f:
-            data = json.load(f)
-        
-        # H2: Staleness guard — allow previous day's strategy (Architect runs at 06:30)
-        date_str = data.get("date")
-        if date_str:
-            athens_tz = pytz.timezone('Europe/Athens')
-            today_athens = datetime.now(athens_tz).strftime('%Y-%m-%d')
-            # Allow yesterday (e.g. 00:00-06:30 before Architect updates)
-            if date_str < (datetime.now(athens_tz) - timedelta(days=1)).strftime('%Y-%m-%d'):
-                print(f"WARN: Daily strategy is stale (date={date_str}, today={today_athens})", file=sys.stderr)
-                return None
-        
-        # C1: Normalize focus_pairs and avoid_pairs
-        focus_pairs = data.get("focus_pairs", [])
-        avoid_pairs = data.get("avoid_pairs", [])
-        
-        # Strip /EUR suffix using base_symbol(), uppercase, filter to valid CRYPTO_PAIRS
-        normalized_focus = []
-        normalized_avoid = []
-        crypto_bases = {pair.split('/')[0] for pair in CRYPTO_PAIRS}
-        
-        for pair in focus_pairs:
-            if isinstance(pair, str):
-                base = base_symbol(pair).upper()
-                if base in crypto_bases:
-                    normalized_focus.append(base)
-        
-        for pair in avoid_pairs:
-            if isinstance(pair, str):
-                base = base_symbol(pair).upper()
-                if base in crypto_bases:
-                    normalized_avoid.append(base)
-        
-        # If normalized focus set ∩ pool is empty, ignore filter and log warning
-        if focus_pairs and not normalized_focus:
-            print(f"WARN: Daily strategy focus_pairs filter ignored - no valid pairs in {focus_pairs}", file=sys.stderr)
-        
-        data["focus_pairs"] = normalized_focus
-        data["avoid_pairs"] = normalized_avoid
-        
-        # H1: Log unknown adjustment values
-        pullback_adj = data.get("pullback_adjustment", "normal")
-        if pullback_adj not in ["normal", "aggressive", "cautious", "skip"]:
-            print(f"WARN: Unknown pullback_adjustment '{pullback_adj}', defaulting to 'normal'", file=sys.stderr)
-            data["pullback_adjustment"] = "normal"
-        
-        return data
+        if os.path.exists(DAILY_STRATEGY_PATH):
+            with open(DAILY_STRATEGY_PATH) as f:
+                return json.load(f)
     except (json.JSONDecodeError, IOError) as e:
         print(f"WARN: Could not load daily strategy: {e}", file=sys.stderr)
-        return None
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -317,14 +269,10 @@ def extract_fill(res, fallback_price):
 # Main cycle
 # ---------------------------------------------------------------------------
 def run_cycle():
-    # H3: Load strategy once per cycle and pass through
-    daily_strategy = load_daily_strategy()
-    
     report = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "status": "success",
         "strategy": "pullback-in-uptrend",
-        "strategy_missing": daily_strategy is None,
         "positions_managed": [],
         "scanned_assets": [],
         "action_taken": "NONE",
@@ -345,28 +293,14 @@ def run_cycle():
         has_trade = action in ("BUY", "SELL")
         has_fail = action in ("BUY_FAILED", "SELL_FAILED")
 
+        # Hourly heartbeat timer
+        last_str = notify_state.get("last_notify_time", "1970-01-01T00:00:00Z")
+        last_time = datetime.fromisoformat(last_str.replace("Z", "+00:00"))
+        now_utc = datetime.now(timezone.utc)
+        hourly = (now_utc - last_time).total_seconds() >= 3600.0
+
         if is_error:
             print(f"❌ Kraken pullback: {report.get('details', 'unknown error')}")
-        elif report.get("strategy_missing"):
-            # Throttled: only print once per hour to avoid 5-min spam
-            _throttle_file = os.path.join(ROOT_DIR, "logs/kraken_pullback_strategy_warn.txt")
-            _now = datetime.now(timezone.utc).timestamp()
-            _should_warn = True
-            try:
-                with open(_throttle_file) as _tf:
-                    _last_warn = float(_tf.read().strip())
-                    if _now - _last_warn < 3600:
-                        _should_warn = False
-            except (FileNotFoundError, ValueError):
-                pass
-            if _should_warn:
-                print(f"⚠️ **Kraken pullback**: Daily strategy missing or stale — running fallback config.")
-                try:
-                    with open(_throttle_file, "w") as _tf:
-                        _tf.write(str(_now))
-                except Exception:
-                    pass
-                should_notify = True
         elif has_trade:
             # Just the one trade line
             for line in msg_lines:
@@ -379,7 +313,22 @@ def run_cycle():
             for line in msg_lines:
                 print(line)
             should_notify = True
-        # else: silent — heartbeat moved to hourly combined report
+        elif hourly:
+            pos_lines = []
+            this_value_eur = 0.0
+            for p in positions:
+                sym = p["symbol"]
+                ss = new_state.get(sym, {})
+                ent = ss.get("entry_price", p["current_price"])
+                cur_p = p["current_price"]
+                pl = (cur_p - ent) / ent * 100.0 if ent else 0.0
+                pos_lines.append(f"{base_symbol(sym)} {round(pl,1)}%")
+                this_value_eur += p["value_eur"]
+            pos_str = " | ".join(pos_lines) if pos_lines else "—"
+            print(f"💰 Kraken pullback: {round(cash_eur,2)}€ free · {round(this_value_eur,2)}€ in {len(positions)} pos · {pos_str}")
+            should_notify = True
+            notify_state["last_notify_time"] = now_utc.isoformat().replace("+00:00", "Z")
+        # else: silent — no action, no error, no hourly tick
 
         db_save_notify_state(db_conn, EXCHANGE_NAME, notify_state)
         close_connection(db_conn)
@@ -394,40 +343,6 @@ def run_cycle():
         }
         insert_prices(db_conn, price_map)
         balance = exchange.fetch_balance()
-
-        # --- Open order reconciliation ---
-        # Cancel stale open orders (older than 1h) that might be tying up EUR
-        # without a corresponding entry in trading_state.
-        try:
-            open_orders = exchange.fetch_open_orders()
-            now_ts = datetime.now(timezone.utc).timestamp()
-            for ord in open_orders:
-                if ord.get('status') == 'open':
-                    sym = ord.get('symbol', '')
-                    side = ord.get('side', '')
-                    ord_ts = ord.get('timestamp')
-                    if ord_ts and (now_ts - ord_ts / 1000) > 3600 and side == 'buy':
-                        exchange.cancel_order(ord['id'], sym)
-                        print(f"Reconciled stale order: {side} {sym}", file=sys.stderr)
-        except Exception:
-            pass  # non-fatal
-
-        # --- Balance reconciliation ---
-        # If we hold coins on the exchange that are NOT in our trading_state,
-        # add them so exit logic can manage them (orphaned from crash/restart).
-        try:
-            for sym in CRYPTO_PAIRS:
-                coin = sym.split('/')[0]
-                qty = balance['total'].get(coin, 0.0)
-                if qty > 0 and coin not in [base_symbol(s) for s in state.keys()]:
-                    ticker = tickers.get(sym)
-                    if ticker and ticker.get('last'):
-                        state[sym] = {'peak_plpc': 0.0, 'quantity': float(qty)}
-                        print(f"Recovered orphan: {sym} ({qty})", file=sys.stderr)
-            if state:
-                save_trading_state(db_conn, EXCHANGE_NAME, state)
-        except Exception:
-            pass
     except Exception as e:
         report["status"] = "error"
         report["details"] = f"Failed to fetch market/account data: {e}"
@@ -592,69 +507,49 @@ def run_cycle():
     # ---------------------------------------------------------------
     # 4. Risk gates before any buy
     # ---------------------------------------------------------------
-    # First, process daily strategy adjustments so cautious/aggressive can
-    # influence the subsequent position/trade cap checks.
-    _aggressive_mode = False
-    _cautious_mode = False
-    _risk_mult = 1.0
-    _stop_cap_mult = 1.0
-    _candidate_limit = 8  # default report limit
-
-    if daily_strategy:
-        adj = daily_strategy.get("pullback_adjustment", "normal")
-        btc_regime = daily_strategy.get("btc_regime", "neutral")
-        if adj == "normal" and btc_regime in ("below", "bearish"):
-            adj = "cautious"
-            print("INFO: btc_regime=below/bearish overrode pullback_adjustment to cautious", file=sys.stderr)
-        elif adj == "normal" and btc_regime in ("above", "bullish"):
-            adj = "aggressive"
-            print("INFO: btc_regime=above/bullish overrode pullback_adjustment to aggressive", file=sys.stderr)
-        if adj == "skip":
-            skip, skip_reason = True, "Market Architect: skip pullback entries today"
-            should_notify = True
-            msg_lines.append("📋 **Market Architect**: pullback entries skipped today")
-        elif adj == "cautious":
-            should_notify = True
-            msg_lines.append("📋 **Market Architect**: pullback entries — CAUTIOUS mode")
-            _cautious_mode = True
-            _risk_mult = 0.5
-            _stop_cap_mult = 0.5
-            _candidate_limit = 3
-        elif adj == "aggressive":
-            _aggressive_mode = True
-            msg_lines.append("📋 **Market Architect**: pullback entries — AGGRESSIVE mode")
-            should_notify = True
-
-    # Now evaluate position/trade caps with mode adjustments applied
     max_open = MAX_OPEN_LARGE if portfolio_value >= EQUITY_TWO_POS else MAX_OPEN_SMALL
-    if _aggressive_mode:
-        max_open += 1
     skip, skip_reason = False, ""
-    if not skip and len(positions) >= max_open:
+    if len(positions) >= max_open:
         skip, skip_reason = True, f"Max positions reached ({max_open})."
-    elif not skip and cash_eur < MIN_TRADE_EUR:
+    elif cash_eur < MIN_TRADE_EUR:
         skip, skip_reason = True, "No buying power."
-    elif not skip and trades_today(db_conn, exchange_name=EXCHANGE_NAME) >= MAX_TRADES_PER_DAY:
+    elif trades_today(db_conn, exchange_name=EXCHANGE_NAME) >= MAX_TRADES_PER_DAY:
         skip, skip_reason = True, f"Daily trade cap reached ({MAX_TRADES_PER_DAY})."
     else:
-        # Shared daily buy limit across all kraken strategies (with advisory lock)
-        # Only applies when Market Architect provides a daily strategy file
-        if daily_strategy and not skip:
+        # BTC regime filter — no entries if BTC trending down
+        with db_conn.cursor() as _cur:
+            _cur.execute(
+                "SELECT price FROM asset_prices WHERE exchange='kraken' AND symbol='BTC' "
+                "ORDER BY timestamp DESC LIMIT 72")
+            btc_rows = _cur.fetchall()
+        if btc_rows and len(btc_rows) >= 12:
+            btc_prices = [float(r[0]) for r in btc_rows]
+            btc_now = btc_prices[0]
+            btc_avg = sum(btc_prices) / len(btc_prices)
+            if btc_now < btc_avg:
+                skip, skip_reason = True, f"BTC trend DOWN ({btc_now:.0f} < 6h avg {btc_avg:.0f})"
+        # Shared daily buy limit across all kraken strategies
+        if not skip:
             with db_conn.cursor() as _cur:
-                # PostgreSQL advisory lock serializes the check-act across both processes
-                lock_key = 840271  # fixed shared key for max_daily_buys serialization
-                # NOTE: pg_advisory_xact_lock is txn-scoped. No COMMIT must occur between
-                # this lock acquisition and the BUY log insert, or mutual exclusion breaks.
-                _cur.execute("SELECT pg_advisory_xact_lock(%s)", (lock_key,))
                 _cur.execute(
                     "SELECT COUNT(*) FROM trade_log "
                     "WHERE exchange LIKE 'kraken%%' AND action='BUY' "
-                    "AND DATE(timestamp AT TIME ZONE 'UTC') = "
-                    "DATE(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')")
+                    "AND DATE(timestamp) = CURRENT_DATE")
                 shared_count = _cur.fetchone()
-            max_buys = int(daily_strategy.get("max_daily_buys", 1))
-            if shared_count and int(shared_count[0]) >= max_buys:
-                skip, skip_reason = True, f"Market Architect: max_daily_buys ({max_buys}) reached"
+            if shared_count and int(shared_count[0]) >= 1:
+                skip, skip_reason = True, "Shared daily buy limit (1/day all kraken bots)"
+        # Daily strategy gate (Market Architect)
+        if not skip:
+            ds = load_daily_strategy()
+            if ds:
+                adj = ds.get("pullback_adjustment", "normal")
+                if adj == "skip":
+                    skip, skip_reason = True, "Market Architect: skip pullback entries today"
+                    should_notify = True
+                    msg_lines.append("📋 **Market Architect**: pullback entries skipped today")
+                elif adj == "cautious":
+                    should_notify = True
+                    msg_lines.append("📋 **Market Architect**: pullback entries — CAUTIOUS mode")
         if not skip:
             rpnl = realized_pnl_today_pct(db_conn, exchange_name=EXCHANGE_NAME, round_trip_fee_pct=ROUND_TRIP_FEE_PCT)
             if rpnl <= DAILY_LOSS_BREAKER_PCT:
@@ -676,8 +571,9 @@ def run_cycle():
     now = datetime.now(timezone.utc)
     candidates = []
     # Daily strategy pair filter (Market Architect)
-    _focus_syms = set(daily_strategy.get("focus_pairs", [])) if daily_strategy else set()
-    _avoid_syms = set(daily_strategy.get("avoid_pairs", [])) if daily_strategy else set()
+    _ds_pairs = load_daily_strategy()
+    _focus_syms = set(_ds_pairs.get("focus_pairs", [])) if _ds_pairs else set()
+    _avoid_syms = set(_ds_pairs.get("avoid_pairs", [])) if _ds_pairs else set()
     for sym in CRYPTO_PAIRS:
         if sym in held:
             continue
@@ -746,11 +642,9 @@ def run_cycle():
                            "rng": rng, "pullback": pullback, "h1": h1, "score": score})
 
     candidates.sort(key=lambda c: c["score"], reverse=True)
-    # Trim candidate list before selection (not just for reporting)
-    candidates = candidates[:_candidate_limit] if _candidate_limit < len(candidates) else candidates
     report["scanned_assets"] = [
         {k: (round(v, 3) if isinstance(v, float) else v) for k, v in c.items()}
-        for c in candidates[:_candidate_limit]
+        for c in candidates[:8]
     ]
 
     if not candidates:
@@ -911,9 +805,9 @@ def run_cycle():
     order_size_eur = cash_eur * deploy_fraction
 
     rng_6h_best = get_range_pct(db_conn, symbol, 360, price_exchange=PRICE_EXCHANGE)
-    stop_pct = min(MAX_HARD_STOP_PCT * _stop_cap_mult,
+    stop_pct = min(MAX_HARD_STOP_PCT,
                    max(MIN_HARD_STOP_PCT, 0.5 * (rng_6h_best or MIN_HARD_STOP_PCT * 2)))
-    risk_cap_eur = ((RISK_PER_TRADE_PCT * _risk_mult) / 100.0 * portfolio_value) / (stop_pct / 100.0)
+    risk_cap_eur = (RISK_PER_TRADE_PCT / 100.0 * portfolio_value) / (stop_pct / 100.0)
     if risk_cap_eur < order_size_eur:
         order_size_eur = risk_cap_eur
     order_size_eur = min(order_size_eur, cash_eur)

@@ -1,0 +1,56 @@
+{
+  "date": "2026-06-11",
+  "generated_at": "2026-06-11T06:31:29+03:00",
+  "market_regime": "bearish",
+  "regime_explanation": "Bitcoin και Ethereum υποχωρούν για 2η συνεχόμενη ημέρα (BTC -2.3%, ETH -3.1%). Τα ETF outflows έσπασαν πρόσφατα το 13-ήμερο streak, αλλά η πίεση παραμένει. Οι μετοχές (S&P 500, Nasdaq) είναι ανθεκτικές μετά το rebound τεχνολογίας, αλλά το crypto market δείχνει αδυναμία. RSI 35 σε BTC υποδεικνύει oversold, αλλά η δομή EMA είναι bearish.",
+  "risk_level": "high",
+  "btc_regime": "below",
+  "max_daily_buys": 1,
+  "bias": {
+    "crypto": "bearish",
+    "stocks": "neutral"
+  },
+  "focus_pairs": [
+    "BTCUSDT",
+    "ETHUSDT"
+  ],
+  "avoid_pairs": [
+    "SOLUSDT",
+    "altcoin_perps"
+  ],
+  "key_levels": {
+    "BTC": {
+      "support": [
+        61000,
+        60000
+      ],
+      "resistance": [
+        61500,
+        62000,
+        66000
+      ]
+    },
+    "ETH": {
+      "support": [
+        1600,
+        1550
+      ],
+      "resistance": [
+        1650,
+        1700,
+        1800
+      ]
+    }
+  },
+  "geopolitical_risk": "medium",
+  "geopolitical_notes": "Ισραήλ-Ιράν: εύθραυστη κατάπαυση του πυρός μετά τον 12-ήμερο πόλεμο. Η ένταση στον Κόλπο παραμένει. Οι ΗΠΑ χτύπησαν ιρανικές πυρηνικές εγκαταστάσεις. Το πετρέλαιο παρέμεινε σταθερό. Οι εμπορικές εντάσεις ΗΠΑ-ΕΕ συνεχίζονται με απειλές δασμών.",
+  "macro_events_today": [
+    "US Initial Jobless Claims (weekly)",
+    "US Producer Price Index (PPI) Final Demand (May 2026)",
+    "30-Year Treasury Bond Auction"
+  ],
+  "strategy_notes": "Η αγορά crypto είναι σε bearish momentum μετά τα μαζικά ETF outflows ($4.4B σε 13 μέρες). Το BTC κάτω από 50-day EMA ($61,454) και 200-day EMA ($61,969). Το ETH κοντά σε June low ($1,618). Προσοχή σε νέα longs. Αν το BTC σπάσει τα $61,000, επόμενο support τα $60,000. Τα stocks είναι πιο ανθεκτικά — S&P 500 σε record highs. Η πληθωρισμός CPI ανέβηκε στο 4.2% (May), πάνω από τον στόχο της Fed. Οι αγορές περιμένουν FOMC guidance.",
+  "ai_overseer_adjustment": "reduce_risk",
+  "pullback_adjustment": "cautious",
+  "momentum_adjustment": "skip"
+}
