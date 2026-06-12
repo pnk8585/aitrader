@@ -87,18 +87,18 @@ TREND_3H_MIN = 180         # minutes
 TREND_6H_MIN = 360         # price must also be > price 6h ago
 
 # --- Entry (buy the dip inside the uptrend, never the blow-off top) -------
-PULLBACK_MIN_PCT = 2.0# current price must be >=0.5% below the last-1h high
-BLOWOFF_GUARD_1H_PCT = 8.0# skip if 1h momentum > +4% (that's the top, it reverts)
+PULLBACK_MIN_PCT = 1.5# current price must be >=0.5% below the last-1h high
+BLOWOFF_GUARD_1H_PCT = 5.0# skip if 1h momentum > +4% (that's the top, it reverts)
 RR_MIN = 2.0               # require room-to-6h-high >= RR_MIN × stop distance (reward:risk gate)
 
 # --- Exits ----------------------------------------------------------------
-MIN_HARD_STOP_PCT = 4.0
+MIN_HARD_STOP_PCT = 5.0
 MAX_HARD_STOP_PCT = 8.0    # cap the vol-widened stop so a crazy range can't risk the account
-TRAIL_ARM_PCT = 2.5        # arm the trailing TP only after a real +2.5% peak
+TRAIL_ARM_PCT = 2.0# arm the trailing TP only after a real +2.5% peak
 TRAIL_GIVEBACK_FRAC = 0.40       # let winners run: give back 40% of the peak gain...
 TRAIL_GIVEBACK_MIN_PCT = 1.0     # ...but never trail tighter than this absolute floor
 HARD_TP_CAP_PCT = 3.0# absolute take-profit ceiling
-MAX_HOLD_HOURS = 4.0# only force-exit a *dead* (net-neg, trend-broken) bag
+MAX_HOLD_HOURS = 6.0# only force-exit a *dead* (net-neg, trend-broken) bag
 STALE_HOLD_HOURS = 18.0    # free capital from a stalled, trend-broken, barely-green bag
 
 # --- Position sizing / risk -----------------------------------------------
