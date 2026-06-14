@@ -1,14 +1,14 @@
 {
-  "date": "2026-06-12",
-  "generated_at": "2026-06-12T06:31:17+03:00",
+  "date": "2026-06-14",
+  "generated_at": "2026-06-14T06:30:00+03:00",
   "market_regime": "mixed",
-  "regime_explanation": "Crypto shows mixed signals: BTC holds above $62.7K with mild 24h gains (+1-3%), but ETH is deeply bearish near $1,626-1,680, testing critical support at $1,600. Stock markets rebounded sharply (S&P 500 +1.8%, Nasdaq +2.5%) after recent tech selloff. Geopolitical ceasefire between Israel/Iran remains shaky with back-and-forth strikes testing stability.",
+  "regime_explanation": "BTC στο $55,804 με πολύ αργή ανάκαμψη +2.88% σε 72 ώρες από $54,243 — ξεπερνά οριακά τον 6ωρο ΜΟ ($55,797, +0.01%) αλλά η κίνηση είναι αναιμική. Ο χρυσός εκτοξεύθηκε +3.03% στα $4,238 σηματοδοτώντας risk-off rotation. SpaceX IPO απορροφά ρευστότητα. VIX έπεσε στο 17.68 (-9%) αλλά FOMC Δευτέρα-Τρίτη προσθέτει αβεβαιότητα. ETH ($1,454) και SOL ($59.60) κάτω από 6ωρο ΜΟ, επιβεβαιώνοντας αδυναμία. Αντιφατικά σήματα: αργή uptrend στο BTC, αλλά gold rush και επερχόμενη FOMC δημιουργούν ρίσκο.",
   "risk_level": "high",
   "btc_regime": "above",
   "max_daily_buys": 1,
   "bias": {
     "crypto": "neutral",
-    "stocks": "bullish"
+    "stocks": "neutral"
   },
   "focus_pairs": [
     "BTCUSDT",
@@ -21,37 +21,38 @@
   "key_levels": {
     "BTC": {
       "support": [
-        62000,
-        61000,
-        60000
+        54875,
+        54200,
+        54000
       ],
       "resistance": [
-        64500,
-        65000,
-        67000
+        55988,
+        56000,
+        57000
       ]
     },
     "ETH": {
       "support": [
-        1600,
-        1620,
-        1640
+        1437,
+        1431,
+        1400
       ],
       "resistance": [
-        1680,
-        1700,
-        1740
+        1462,
+        1500,
+        1550
       ]
     }
   },
-  "geopolitical_risk": "high",
-  "geopolitical_notes": "US-Iran ceasefire remains fragile. Back-and-forth strikes this week tested the shaky two-month truce. Pakistan-mediated nuclear talks suspended until Lebanon ceasefire holds. Strait of Hormuz navigation still at risk. Any escalation could spike oil and hurt risk assets.",
+  "geopolitical_risk": "medium",
+  "geopolitical_notes": "Trump ανακοίνωσε επικείμενη συμφωνία με Ιράν για επαναλειτουργία Hormuz (θετικό για risk assets). SpaceX IPO ολοκληρώθηκε στο Nasdaq με αποτίμηση $2.4 τρισ. — η μεγαλύτερη IPO στην ιστορία, απορροφώντας σημαντική ρευστότητα από αγορές. Νέος επικεφαλής Fed δημιουργεί αβεβαιότητα για τη νομισματική πολιτική.",
   "macro_events_today": [
-    "US-Iran ceasefire negotiations via Pakistan (suspended pending Lebanon truce)",
-    "Fed Chair Warsh first policy meeting in two weeks — rate hike debate ongoing",
-    "NY Fed President Williams comments on inflation outlook"
+    "Σάββατο — κανένα προγραμματισμένο macro event",
+    "Επόμενη εβδομάδα: FOMC meeting June 16-17 — το βασικό γεγονός ρίσκου",
+    "FOMC: συζήτηση για επιτόκια εντείνεται (66% πιθανότητα αύξησης έως τέλος έτους)",
+    "Bank of Japan και Bank of England συνεδριάσεις την ίδια εβδομάδα"
   ],
-  "strategy_notes": "BTC showing relative strength vs ETH. ETH is in a bearish impulse with extreme fear sentiment — avoid until $1,700 reclaim. SOL outperforming ETH with +3.5% 24h. Stock market rebound is positive for risk sentiment but crypto decoupled. High geopolitical risk warrants defensive positioning. Only 1 max daily buy. Prefer BTC and SOL on pullbacks to support. Skip ETH entirely.",
+  "strategy_notes": "BTC σε αργή αλλά σταθερή ανάκαμψη από τα χαμηλά 72 ωρών ($54,243 προς $55,804). Ωστόσο η κίνηση είναι αναιμική: 0.01% πάνω από 6ωρο ΜΟ, οριακά flat. Το ράλι χρυσού (+3%) και η φυγή ultra-wealthy σε cash δημιουργούν καθοδικούς κινδύνους. FOMC Δευτέρα-Τρίτη = major event risk. Μέγιστο 1 buy/ημέρα. Προτίμηση BTC/SOL σε deep pullbacks. Αποφυγή ETH που συνεχίζει να υποαποδίδει. Momentum trades περιορισμένα λόγω αδύναμης δυναμικής. Το κλείσιμο εβδομάδας σήμερα μπορεί να φέρει αυξημένη μεταβλητότητα.",
   "ai_overseer_adjustment": "reduce_risk",
   "pullback_adjustment": "cautious",
   "momentum_adjustment": "cautious"

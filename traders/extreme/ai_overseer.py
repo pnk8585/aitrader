@@ -72,7 +72,7 @@ ADJUSTMENT_BOUNDS = {
     "TRAIL_ARM_PCT": (0.5, 3.0),
     "HARD_TP_CAP_PCT": (3.0, 15.0),
     "MAX_HOLD_HOURS": (4.0, 48.0),
-    "DEPLOY_FRACTION": (0.1, 0.97),
+    "DEPLOY_FRACTION": (0.1, 0.60),
 }
 
 # --- Daily Strategy (Market Architect) ---------------------------------------

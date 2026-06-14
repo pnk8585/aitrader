@@ -163,6 +163,21 @@ def main():
     except Exception as e:
         report["database"]["heartbeat_error"] = str(e)
 
+    # ---- Derive per-strategy maps from heartbeats (were always {}) ----
+    STRATEGY_SECTION = {
+        "kraken-momentum": "kraken_strategies",
+        "kraken-pullback": "kraken_strategies",
+        "alpaca-stocks":   "alpaca_strategies",
+    }
+    hb = report["database"].get("heartbeats", {})
+    for name, section in STRATEGY_SECTION.items():
+        info = hb.get(name, {"ok": False, "since_s": None, "last": None})
+        report[section][name] = {
+            "ok": info["ok"],
+            "last_heartbeat_s": info["since_s"],
+            "last": info["last"],
+        }
+
     # ------------------------------------------------------------------
     # 3. Open positions from trading_state
     # ------------------------------------------------------------------
