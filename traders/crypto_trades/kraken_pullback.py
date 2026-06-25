@@ -80,21 +80,21 @@ CRYPTO_PAIRS = ["BTC/EUR", "ETH/EUR", "SOL/EUR", "AVAX/EUR", "LINK/EUR",
 ROUND_TRIP_FEE_PCT = 0.52
 
 # --- Universe / regime filters --------------------------------------------
-VOL_FLOOR_PCT = 6.0# require >=3.0% hi-lo range so a -2% stop sits below the noise
+VOL_FLOOR_PCT = 4.0# require >=3.0% hi-lo range so a -2% stop sits below the noise
 VOL_WINDOW_MIN = 360       # 6h volatility window
 TREND_3H_MIN_PCT = 1.0     # price must be >= +1.0% vs 3h ago (uptrend)
 TREND_3H_MIN = 180         # minutes
 TREND_6H_MIN = 360         # price must also be > price 6h ago
 
 # --- Entry (buy the dip inside the uptrend, never the blow-off top) -------
-PULLBACK_MIN_PCT = 2.0# current price must be >=0.5% below the last-1h high
-BLOWOFF_GUARD_1H_PCT = 3.0# skip if 1h momentum > +4% (that's the top, it reverts)
+PULLBACK_MIN_PCT = 1.5# current price must be >=0.5% below the last-1h high
+BLOWOFF_GUARD_1H_PCT = 4.0# skip if 1h momentum > +4% (that's the top, it reverts)
 RR_MIN = 2.0               # require room-to-6h-high >= RR_MIN × stop distance (reward:risk gate)
 
 # --- Exits ----------------------------------------------------------------
-MIN_HARD_STOP_PCT = 2.0
+MIN_HARD_STOP_PCT = 1.5
 MAX_HARD_STOP_PCT = 8.0    # cap the vol-widened stop so a crazy range can't risk the account
-TRAIL_ARM_PCT = 2.5# arm the trailing TP only after a real +2.5% peak
+TRAIL_ARM_PCT = 2.0# arm the trailing TP only after a real +2.5% peak
 TRAIL_GIVEBACK_FRAC = 0.40       # let winners run: give back 40% of the peak gain...
 TRAIL_GIVEBACK_MIN_PCT = 1.0     # ...but never trail tighter than this absolute floor
 HARD_TP_CAP_PCT = 5.0# absolute take-profit ceiling
@@ -102,7 +102,7 @@ MAX_HOLD_HOURS = 4.0# only force-exit a *dead* (net-neg, trend-broken) bag
 STALE_HOLD_HOURS = 18.0    # free capital from a stalled, trend-broken, barely-green bag
 
 # --- Position sizing / risk -----------------------------------------------
-DEPLOY_FRACTION = 0.60     # deploy ~60% of cash into the single best setup
+DEPLOY_FRACTION = 0.1# deploy ~60% of cash into the single best setup
 # Volatility-adjusted cap: never risk more than RISK_PER_TRADE_PCT of equity if
 # the stop is hit. size = riskEUR / (stop% / 100). Generous on purpose — it only
 # trims size on high-volatility coins whose stop sits far away; tight setups
@@ -601,7 +601,7 @@ def run_cycle():
     _candidate_limit = 8  # default report limit
 
     if daily_strategy:
-        adj = daily_strategy.get("pullback_adjustment", "normal")
+        adj = daily_strategy.get("pullback_adjustment", "aggressive")
         btc_regime = daily_strategy.get("btc_regime", "neutral")
         if adj == "normal" and btc_regime in ("below", "bearish"):
             adj = "cautious"
@@ -724,13 +724,19 @@ def run_cycle():
         # distance this setup would use. Rejects setups with little headroom
         # above where the stop sits (asymmetric risk).
         hi6h = get_recent_high(db_conn, sym, 360, price_exchange=PRICE_EXCHANGE)
-        stop_dist = min(MAX_HARD_STOP_PCT,
-                        max(MIN_HARD_STOP_PCT, 0.5 * (rng or MIN_HARD_STOP_PCT * 2)))
         if hi6h is None or hi6h <= 0:
             continue
         room_pct = (hi6h - price) / price * 100.0
-        if room_pct < RR_MIN * stop_dist:
-            continue
+        # R:R gate: in aggressive mode, just require price below 6h high
+        if _aggressive_mode:
+            if room_pct <= 0:
+                continue
+        else:
+            # Standard R:R check
+            stop_dist = min(MAX_HARD_STOP_PCT,
+                            max(MIN_HARD_STOP_PCT, 0.5 * (rng or MIN_HARD_STOP_PCT * 2)))
+            if room_pct < RR_MIN * stop_dist:
+                continue
 
         # bounce gate: require price to be bouncing off lows,
         # not still falling (rejects falling knives)
@@ -773,10 +779,15 @@ def run_cycle():
 
     # ---------------------------------------------------------------
     # AI PER-TRADE REVIEW — every buy must be AI-approved first
+    # (skipped in aggressive mode — buy directly)
     # ---------------------------------------------------------------
-    pending = load_pending_review()
     now_utc = datetime.now(timezone.utc)
-    execute_approved = False  # set True when AI approved a buy and we're executing
+    if _aggressive_mode:
+        execute_approved = True
+        pending = {}
+    else:
+        execute_approved = False  # set True when AI approved a buy and we're executing
+        pending = load_pending_review()
 
     # Process existing verdict for THIS bot
     if pending.get("status") == "approved" and pending.get("bot") == EXCHANGE_NAME:

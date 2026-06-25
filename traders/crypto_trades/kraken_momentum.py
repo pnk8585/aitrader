@@ -36,6 +36,7 @@ from db_prices import (
                        get_momentum_over, get_range_pct, last_exit_time,
                        trades_today, realized_pnl_today_pct)
 from file_lock import (with_file_lock, atomic_write_json, load_json_with_defaults)
+from ai_gate_utils import load_ai_gates, check_gate, signal_architect_rethink
 
 # ---------------------------------------------------------------------------
 # Config
@@ -102,26 +103,12 @@ MAX_TOTAL_OPEN = 5         # global cap across BOTH Kraken strategies (shared wa
 LOCK_FILE = os.path.join(ROOT_DIR, "logs/kraken_momentum.lock")
 
 # --- AI Gates ---------------------------------------------------------------
-AI_GATE_FILE = os.path.join(ROOT_DIR, "ai_overseer/ai_gate.json")
-
+# load_ai_gates() imported from ai_gate_utils
 COOLDOWN_MIN = 90          # per-coin cooldown after any exit
 MAX_TRADES_PER_DAY = 4     # hard overtrading cap
 DAILY_LOSS_BREAKER_PCT = -4.0
 CONSULT_DEPLOY_FRACTION = 0.5
 CONSULT_MIN_SCORE = 2.0
-
-
-def load_ai_gates():
-    """Read AI gate conditions set by ai_overseer. Returns dict with defaults."""
-    default = {"script_paused": False, "consult_on_entry": False, "reason": None}
-    if not os.path.exists(AI_GATE_FILE):
-        return default
-    try:
-        with open(AI_GATE_FILE) as f:
-            gates = json.load(f)
-        return {**default, **gates}
-    except (json.JSONDecodeError, IOError):
-        return default
 
 
 # --- Daily Strategy (Market Architect) ---------------------------------------
@@ -174,10 +161,10 @@ def load_daily_strategy():
         data["avoid_pairs"] = normalized_avoid
         
         # H1: Log unknown adjustment values
-        momentum_adj = data.get("momentum_adjustment", "normal")
-        if momentum_adj not in ["normal", "cautious", "skip"]:
-            print(f"WARN: Unknown momentum_adjustment '{momentum_adj}', defaulting to 'normal'", file=sys.stderr)
-            data["momentum_adjustment"] = "normal"
+        momentum_adj = data.get("momentum_adjustment", "aggressive")
+        if momentum_adj not in ["normal", "cautious", "skip", "aggressive"]:
+            print(f"WARN: Unknown momentum_adjustment '{momentum_adj}', defaulting to 'aggressive'", file=sys.stderr)
+            data["momentum_adjustment"] = "aggressive"
         
         return data
     except (json.JSONDecodeError, IOError) as e:
@@ -286,6 +273,31 @@ def extract_fill(res, fallback_price):
     return (price or fallback_price), qty
 
 
+def sellable_qty(symbol, recorded_qty):
+    """Get the actual sellable quantity for a symbol, clamped to free balance.
+
+    Re-fetches the live balance right before selling so we never use a stale
+    'total' snapshot that includes funds locked by the other Kraken strategy
+    (shared-wallet pattern).  Returns the quantity to pass to
+    create_market_sell_order, or 0.0 if nothing is available to sell.
+    """
+    try:
+        bal = exchange.fetch_balance()
+        coin = symbol.split('/')[0]
+        free = float((bal.get('free') or {}).get(coin, 0.0))
+        if free <= 0.0:
+            return 0.0
+        exchange.load_markets()
+        safe = min(recorded_qty, free)
+        precised = exchange.amount_to_precision(symbol, safe)
+        return float(precised)
+    except Exception:
+        # If the live check itself fails, fall back to the recorded qty
+        # (same behaviour as before, not worse than crashing).
+        exchange.load_markets()
+        return float(exchange.amount_to_precision(symbol, recorded_qty))
+
+
 def momentum_signal(daily, hourly):
     """Return (signal_strength, sizing_mult) for a candidate, or (None, 0.0).
 
@@ -388,18 +400,23 @@ def run_cycle():
 
     # 1. Fetch tickers + balances. Persist prices FIRST (shared price writer).
     try:
-        tickers = exchange.fetch_tickers(CRYPTO_PAIRS)
+        raw_tickers = exchange.fetch_tickers(CRYPTO_PAIRS)
+        tickers = raw_tickers or {}
         price_map = {
             base_symbol(sym): tickers[sym]['last']
             for sym in CRYPTO_PAIRS
             if tickers.get(sym) and tickers[sym].get('last') is not None
         }
         insert_prices(db_conn, price_map)
-        balance = exchange.fetch_balance()
+        raw_balance = exchange.fetch_balance()
+        balance = raw_balance or {}
+        # Guard: balance['total'] can be None in CCXT edge cases
+        balance_total = balance.get('total') or {}
 
         # --- Open order reconciliation ---
         try:
-            open_orders = exchange.fetch_open_orders()
+            raw_orders = exchange.fetch_open_orders()
+            open_orders = raw_orders or []
             now_ts = datetime.now(timezone.utc).timestamp()
             for ord in open_orders:
                 if ord.get('status') == 'open':
@@ -416,7 +433,7 @@ def run_cycle():
         try:
             for sym in CRYPTO_PAIRS:
                 coin = sym.split('/')[0]
-                qty = balance['total'].get(coin, 0.0)
+                qty = balance_total.get(coin, 0.0)
                 if qty > 0 and coin not in [base_symbol(k) for k in state.keys()]:
                     ticker = tickers.get(sym)
                     if ticker and ticker.get('last'):
@@ -433,12 +450,12 @@ def run_cycle():
         close_connection(db_conn)
         return
 
-    cash_eur = balance['total'].get('EUR', 0.0)
+    cash_eur = balance_total.get('EUR', 0.0)
     portfolio_value = cash_eur
     all_positions = []  # every coin held in the shared wallet
     for sym in CRYPTO_PAIRS:
         coin = sym.split('/')[0]
-        qty = balance['total'].get(coin, 0.0)
+        qty = balance_total.get(coin, 0.0)
         ticker = tickers.get(sym)
         if not ticker:
             continue
@@ -533,9 +550,16 @@ def run_cycle():
 
         if sell:
             try:
-                exchange.load_markets()
-                fqty = float(exchange.amount_to_precision(symbol, qty))
+                fqty = sellable_qty(symbol, qty)
+                if fqty <= 0.0:
+                    pos_report["action"] = "SKIP_ZERO_BALANCE"
+                    pos_report["reason"] = (f"No free {symbol.split('/')[0]} balance to sell "
+                                            f"— already gone or locked by other strategy.")
+                    report["positions_managed"].append(pos_report)
+                    new_state.pop(symbol, None)
+                    continue
                 res = exchange.create_market_sell_order(symbol, fqty)
+                _order_res = res or {}
                 pos_report["action"] = "SELL"
                 managed_any = True
                 should_notify = True
@@ -544,7 +568,7 @@ def run_cycle():
                           signal_strength="EXIT", momentum_pct=0.0,
                           entry_price=entry_price, current_price=current_price,
                           unrealized_plpc=unrealized_plpc / 100.0,
-                          order_id=res.get("id"), quantity=qty,
+                          order_id=_order_res.get("id"), quantity=qty,
                           estimated_value_eur=qty * current_price,
                           position_size_pct=0.0, portfolio_equity=portfolio_value,
                           reason=reason)
@@ -565,21 +589,28 @@ def run_cycle():
     if managed_any:
         try:
             balance = exchange.fetch_balance()
-            cash_eur = balance['total'].get('EUR', 0.0)
+            _bal_total = (balance or {}).get('total') or {}
+            cash_eur = _bal_total.get('EUR', 0.0)
         except Exception:
             pass
 
     # ---------------------------------------------------------------
-    # 3. AI Gate FIRST — exits above always run; entries gated here.
+    # 3. AI Gate FIRST — with condition-based auto-resume.
+    #    Exits above always run regardless; only entries are gated.
     # ---------------------------------------------------------------
-    gates = load_ai_gates()
-    if gates.get("script_paused"):
-        reason = gates.get("reason") or "no reason given"
-        print(f"AI GATE: script paused — {reason}", file=sys.stderr)
+    paused, gate_msg = check_gate(db_conn, daily_strategy)
+    if paused:
+        print(f"AI GATE: script paused — {gate_msg}", file=sys.stderr)
         report["action_taken"] = "SKIP"
-        report["details"] = f"AI gate paused: {reason}"
+        report["details"] = f"AI gate paused: {gate_msg}"
         finalize()
         return
+    elif gate_msg:
+        # Gate auto-resumed this cycle — log and notify
+        print(f"AI GATE auto-resumed: {gate_msg}", file=sys.stderr)
+        msg_lines.append(f"✅ **AI Gate**: {gate_msg}")
+        should_notify = True
+    gates = load_ai_gates()
     consulting = bool(gates.get("consult_on_entry"))
     if consulting:
         print(f"AI GATE: consult on entry active — throttling size & conviction "
@@ -596,7 +627,7 @@ def run_cycle():
     _candidate_limit = 8  # default report limit
 
     if daily_strategy:
-        adj = daily_strategy.get("momentum_adjustment", "normal")
+        adj = daily_strategy.get("momentum_adjustment", "aggressive")
         btc_regime = daily_strategy.get("btc_regime", "neutral")
         if adj == "normal" and btc_regime in ("below", "bearish"):
             adj = "cautious"
@@ -648,7 +679,7 @@ def run_cycle():
                     "AND DATE(timestamp AT TIME ZONE 'UTC') = "
                     "DATE(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')")
                 shared_count = _cur.fetchone()
-            max_buys = int(daily_strategy.get("max_daily_buys", 1))
+            max_buys = int(daily_strategy.get("max_daily_buys", 3))
             if shared_count and int(shared_count[0]) >= max_buys:
                 skip, skip_reason = True, f"Market Architect: max_daily_buys ({max_buys}) reached"
         if not skip:
@@ -737,10 +768,15 @@ def run_cycle():
 
     # ---------------------------------------------------------------
     # AI PER-TRADE REVIEW — every buy must be AI-approved first
+    # (skipped in aggressive mode — buy directly)
     # ---------------------------------------------------------------
-    pending = load_pending_review()
     now_utc = datetime.now(timezone.utc)
-    execute_approved = False  # set True when AI approved a buy and we're executing
+    if _aggressive_mode:
+        execute_approved = True
+        pending = {}
+    else:
+        execute_approved = False  # set True when AI approved a buy and we're executing
+        pending = load_pending_review()
 
     # Process existing verdict for THIS bot
     if pending.get("status") == "approved" and pending.get("bot") == EXCHANGE_NAME:
@@ -885,9 +921,16 @@ def run_cycle():
             return
         # Sell the stale position first to free capital/slot.
         try:
-            exchange.load_markets()
-            fqty = float(exchange.amount_to_precision(stale["symbol"], stale["qty"]))
+            fqty = sellable_qty(stale["symbol"], stale["qty"])
+            if fqty <= 0.0:
+                report["action_taken"] = "ROTATION_CANCELLED"
+                report["details"] = (f"Cannot rotate {stale['symbol']} — "
+                                     "no free balance (already gone/locked).")
+                print(f"Rotation cancelled: {report['details']}", file=sys.stderr)
+                finalize()
+                return
             res = exchange.create_market_sell_order(stale["symbol"], fqty)
+            _rot_res = res or {}
             should_notify = True
             msg_lines.append(f"🔄 **Περιστροφή (Kraken momentum)**: Πωλήθηκε στάσιμο "
                              f"**{stale['symbol']}** (+{round(stale['unrealized_plpc'],2)}% "
@@ -896,7 +939,7 @@ def run_cycle():
                       signal_strength="ROTATION", momentum_pct=0.0,
                       entry_price=stale["entry_price"], current_price=stale["current_price"],
                       unrealized_plpc=stale["unrealized_plpc"] / 100.0,
-                      order_id=res.get("id"), quantity=stale["qty"],
+                      order_id=_rot_res.get("id"), quantity=stale["qty"],
                       estimated_value_eur=stale["qty"] * stale["current_price"],
                       position_size_pct=0.0, portfolio_equity=portfolio_value,
                       reason=f"Stale rotation — freeing capital for hot {symbol}.")
@@ -906,7 +949,8 @@ def run_cycle():
             save_trading_state(db_conn, EXCHANGE_NAME, new_state)
             time.sleep(1.5)
             balance = exchange.fetch_balance()
-            cash_eur = balance['total'].get('EUR', 0.0)
+            _bal_total = (balance or {}).get('total') or {}
+            cash_eur = _bal_total.get('EUR', 0.0)
         except Exception as e:
             report["action_taken"] = "SELL_FAILED"
             report["details"] = f"Failed to rotate stale {stale['symbol']}: {e}"
@@ -951,7 +995,8 @@ def run_cycle():
         exchange.load_markets()
         fqty = float(exchange.amount_to_precision(symbol, qty))
         res = exchange.create_market_buy_order(symbol, fqty)
-        fill_price, fill_qty = extract_fill(res, current_price)
+        _buy_res = res or {}
+        fill_price, fill_qty = extract_fill(_buy_res, current_price)
         if fill_qty is None:
             fill_qty = fqty
         actual_value = fill_qty * fill_price
@@ -974,7 +1019,7 @@ def run_cycle():
                   signal_strength=best["signal"],
                   momentum_pct=best["score"], entry_price=fill_price,
                   current_price=fill_price, unrealized_plpc=0.0,
-                  order_id=res.get("id"), quantity=fill_qty,
+                  order_id=_buy_res.get("id"), quantity=fill_qty,
                   estimated_value_eur=actual_value,
                   position_size_pct=actual_value / portfolio_value * 100.0,
                   portfolio_equity=portfolio_value,

@@ -61,9 +61,10 @@ EXCHANGE_NAME = "kraken"
 
 # --- Safety limits ---------------------------------------------------------
 GATES_FILE = os.path.join(PROJECT_DIR, "ai_overseer/ai_gate.json")
-MAX_TRADE_SIZE_EUR = 30.0         # max EUR per AI-triggered trade
+MAX_TRADE_SIZE_EUR = 15.0         # max EUR per AI-triggered trade (reduced from 30)
 MAX_POSITIONS_AI = 1               # max positions opened by AI
 PAUSE_AUTO_EXPIRE_HOURS = 6       # auto-resume pause after N hours if BTC not down
+BTC_DEVIATION_PAUSE = 0.01       # 1% — only pause when BTC is this far below 6h avg
 ADJUSTMENT_BOUNDS = {
     "VOL_FLOOR_PCT": (1.5, 8.0),
     "PULLBACK_MIN_PCT": (0.2, 3.0),
@@ -195,7 +196,7 @@ def get_btc_trend_up():
     prices = [float(r[0]) for r in rows]
     current = prices[0]
     avg_6h = sum(prices) / len(prices)
-    return current >= avg_6h
+    return current >= avg_6h * (1 - BTC_DEVIATION_PAUSE)  # only "down" if >1% below avg
 
 
 def get_recent_trades(limit=15):
@@ -484,7 +485,8 @@ def write_gates(gates, log):
     is_paused = gates.get("script_paused", False)
     paused_since = prev.get("paused_since")
     if is_paused and not was_paused:
-        paused_since = now  # new pause event
+        paused_since = now  # new pause event — reset recovery count
+        gates["recovery_count"] = 0
     elif not is_paused:
         paused_since = None  # clear on resume
     payload = {
@@ -492,6 +494,10 @@ def write_gates(gates, log):
         "consult_on_entry": gates.get("consult_on_entry", False),
         "reason": gates.get("reason"),
         "paused_since": paused_since,
+        "trigger": gates.get("trigger") if is_paused else None,
+        "recovery_count": gates.get("recovery_count", prev.get("recovery_count", 0)),
+        "recovery_threshold": gates.get("recovery_threshold",
+                                          prev.get("recovery_threshold", 3)),
         "updated_at": now,
     }
     atomic_write_text(GATES_FILE, json.dumps(payload, indent=2))
@@ -612,7 +618,7 @@ Return strict JSON — no comments, no trailing commas:
   "gates": {{ "script_paused": false, "consult_on_entry": false, "reason": null }},
   "script_improvements": ["..."]
 }}}}
-IMPORTANT: You CANNOT submit BUY signals — BUY is disabled. You can only SELL losing positions. If you hold a position (< -2%) for 2+ hours with negative 3h momentum, you MUST SELL it — do not hold and hope.
+IMPORTANT: BUY signals are now enabled for small positions (€10-15 max). Prefer setups with strong 3h+ momentum and confirmed trend. SELL immediately if a position drops below -2% for 2+ hours with negative 3h momentum — do not hold and hope.
 """
     return prompt
 
@@ -712,6 +718,7 @@ def main():
     market = get_market_snapshot()
     config = read_v2_config()
     # Get available EUR balance — separate from trailing stop, used only for AI prompt/review
+    balance = None
     try:
         balance = exchange.fetch_balance()
         available_eur = float(balance["EUR"]["free"])
@@ -722,6 +729,42 @@ def main():
     log.append(f"Portfolio: ~€{portfolio or '?'}")
     log.append(f"Open positions: {len(positions)}")
     log.append(f"Recent trades: {len(trades)}")
+
+    # ---------------------------------------------------------------
+    # 1a. Reconcile trading_state vs actual Kraken balances.
+    #     Remove any position whose coin balance is ≈0 on Kraken
+    #     (<€1 dust threshold). These are ghost entries left behind
+    #     when another bot (e.g. kraken-pullback) sold the position
+    #     under a different exchange label.
+    # ---------------------------------------------------------------
+    if balance is not None:
+        reconciled = []
+        for p in positions:
+            ex, sym, entry, etime, peak_plpc_v, pos_qty_v = p
+            base = sym.split("/")[0]
+            coin_free = float(balance.get(base, {}).get("free", 0.0) or 0.0)
+            coin_total = float(balance.get(base, {}).get("total", 0.0) or 0.0)
+            ticker = None
+            for m in market:
+                if m["symbol"] == sym:
+                    ticker = m
+                    break
+            coin_value = coin_total * (ticker["price"] if ticker else 1.0)
+            if coin_value < 1.0 and coin_total < 0.01:
+                log.append(f"🧹 Reconcile: {sym} balance={coin_total} (€{coin_value:.2f}) on Kraken but in trading_state (exchange={ex}). Removing ghost entry.")
+                try:
+                    db_recon = get_db()
+                    with db_recon.cursor() as cur:
+                        cur.execute(
+                            "DELETE FROM trading_state WHERE exchange=%s AND symbol=%s",
+                            (ex, sym))
+                    db_recon.commit()
+                    db_recon.close()
+                except Exception as e2:
+                    log.append(f"  WARN: could not remove ghost {sym}: {e2}")
+            else:
+                reconciled.append(p)
+        positions = reconciled
     # ---------------------------------------------------------------
     # 1b. Trailing stop — auto-exit positions that dropped too far
     #     from their peak, before the AI call (no hallucinations, no delay).
@@ -1088,7 +1131,7 @@ def main():
         ok, msg = apply_parameter_change(param, value)
         log.append(f"{'OK' if ok else 'FAIL'} param: {msg} — {reason}")
 
-    # 5. Execute trade signals (SELL only — BUY disabled)
+    # 5. Execute trade signals (BUY + SELL, smaller sizes)
     for sig in decision.get("trade_signals", []):
         action = sig.get("action", "").upper()
         symbol = sig.get("symbol", "")
@@ -1096,9 +1139,6 @@ def main():
         reason = sig.get("reason", "")
         if action not in ("BUY", "SELL"):
             log.append(f"SKIP trade: invalid action {action}")
-            continue
-        if action == "BUY":
-            log.append(f"SKIP BUY {symbol}: BUY disabled — SELL only mode")
             continue
         ok, msg = execute_trade(action, symbol, size_eur, reason)
         log.append(f"{'OK' if ok else 'FAIL'} trade: {msg} — {reason}")
@@ -1109,6 +1149,23 @@ def main():
         gates["script_paused"] = True
         gates["consult_on_entry"] = False
         gates["reason"] = "BTC trend down — market-wide caution (override)"
+        # Attach trigger snapshot so condition-based auto-resume can check later
+        try:
+            rows = query_all(
+                "SELECT price FROM asset_prices "
+                "WHERE exchange='kraken' AND symbol='BTC' "
+                "ORDER BY timestamp DESC LIMIT 72")
+            if rows and len(rows) >= 12:
+                prices = [float(r[0]) for r in rows]
+                btc_price, avg_6h = prices[0], sum(prices) / len(prices)
+                gates["trigger"] = {
+                    "type": "btc_below_avg",
+                    "btc_price": round(btc_price, 2),
+                    "avg_6h": round(avg_6h, 2),
+                    "deviation_pct": round((btc_price - avg_6h) / avg_6h * 100, 2),
+                }
+        except Exception as e:
+            log.append(f"trigger metadata capture failed: {e}")
     write_gates(gates, log)
 
     # 5.6. Auto-re-arm: if paused and BTC recovered (or expired), un-pause

@@ -593,7 +593,9 @@ def run_cycle():
             report["action_taken"] = "SKIP"
             report["details"] = "No momentum signals found."
 
-    if daily_strategy:
+    # Only print strategy line when we have a trade, error, or important event
+    # (not every 5-minute cycle — that would spam Telegram)
+    if daily_strategy and (has_trade := report.get("action_taken") in ("BUY", "SELL")):
         print(f"📊 Strategy: {daily_strategy.get('market_regime', 'unknown')} regime, "
               f"risk={daily_strategy.get('risk_level', 'unknown')}")
 
