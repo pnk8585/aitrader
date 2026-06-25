@@ -600,9 +600,9 @@ YOUR JOB (respond with ONLY valid JSON — no markdown, no backticks, no explana
 1. ANALYSIS: 1-2 sentence summary.
 2. PARAMETER_ADJUSTMENTS: If the script is tuned wrong, suggest new values. Bounds:
    {json.dumps(ADJUSTMENT_BOUNDS, indent=2)}
-3. TRADE_SIGNALS: **You can ONLY submit SELL signals — BUY is disabled.** Available EUR is €{available_eur:.2f}.
+3. TRADE_SIGNALS: Submit BUY (€10-15 small positions) or SELL signals. Available EUR is €{available_eur:.2f}.
    **CUT LOSSES:** If you hold a position that is in loss (current PL < -2%) for 2+ hours with no recovery (3h momentum still negative), SELL it. Do not wait for recovery when the whole market is red.
-   **ROTATION:** Not available — you can only SELL, not BUY. If a position is weak, SELL it to free capital for the bot scripts to re-enter.
+   **TAKE PROFITS:** If a position is in profit and momentum weakens, consider selling to lock gains.
 4. GATES: Set conditions for the 5-min script. Use these sparingly — only when market regime demands it:
    Recent trades shown above are context, NOT a reason to stay paused. Only set script_paused=true if market conditions are bad RIGHT NOW. Do not pause out of caution over past losses.
    - script_paused: true/false
@@ -614,11 +614,17 @@ Return strict JSON — no comments, no trailing commas:
 {{{{
   "analysis": "...",
   "parameter_adjustments": [{{"param": "PARAM_NAME", "value": number, "reason": "..."}}],
-  "trade_signals": [{{"action": "SELL", "symbol": "NEAR/EUR", "size_eur": {MAX_TRADE_SIZE_EUR}, "reason": "..."}}],
+  "trade_signals": [{{"action": "BUY", "symbol": "AVAX/EUR", "size_eur": 12.0, "reason": "..."}}],
   "gates": {{ "script_paused": false, "consult_on_entry": false, "reason": null }},
   "script_improvements": ["..."]
 }}}}
-IMPORTANT: BUY signals are now enabled for small positions (€10-15 max). Prefer setups with strong 3h+ momentum and confirmed trend. SELL immediately if a position drops below -2% for 2+ hours with negative 3h momentum — do not hold and hope.
+IMPORTANT: You MAY submit BUY signals for small positions (€10-15 max). Prefer setups with strong 3h+ momentum and confirmed trend. You may also SELL to cut losses or take profits. SELL immediately if a position drops below -2% for 2+ hours with negative 3h momentum — do not hold and hope.
+
+OVERSEER ADJUSTMENT (from Market Architect): {_ds_raw.get('ai_overseer_adjustment', 'normal') if _ds_raw else 'normal'}
+- "aggressive_sell": Prioritize selling. Take profits quickly at +1.5% or higher. Don't wait for max peak. Cut losses faster.
+- "reduce_risk": Tighten stops. Prefer selling over holding. Reduce position count.
+- "normal": Standard trailing stop + hard stop rules. Balanced approach.
+- "hold": Hold positions. Only sell on hard stop-loss triggers.
 """
     return prompt
 

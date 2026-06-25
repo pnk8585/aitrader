@@ -34,7 +34,8 @@ from db_prices import (
                        load_notify_state, save_notify_state as db_save_notify_state,
                        log_trade as db_log_trade,
                        get_momentum_over, get_range_pct, last_exit_time,
-                       trades_today, realized_pnl_today_pct)
+                       trades_today, realized_pnl_today_pct,
+                       coins_held_by_other_bots)
 from file_lock import (with_file_lock, atomic_write_json, load_json_with_defaults)
 from ai_gate_utils import load_ai_gates, check_gate, signal_architect_rethink
 
@@ -431,10 +432,11 @@ def run_cycle():
 
         # --- Balance reconciliation ---
         try:
+            others = coins_held_by_other_bots(db_conn, EXCHANGE_NAME)
             for sym in CRYPTO_PAIRS:
                 coin = sym.split('/')[0]
                 qty = balance_total.get(coin, 0.0)
-                if qty > 0 and coin not in [base_symbol(k) for k in state.keys()]:
+                if qty > 0 and coin not in [base_symbol(k) for k in state.keys()] and coin.upper() not in others:
                     ticker = tickers.get(sym)
                     if ticker and ticker.get('last'):
                         state[sym] = {'peak_plpc': 0.0, 'quantity': float(qty)}

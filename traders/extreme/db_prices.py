@@ -641,3 +641,30 @@ def log_trade(conn, exchange, **kwargs):
             conn.rollback()
         except Exception:
             pass
+
+
+def coins_held_by_other_bots(conn, my_exchange):
+    """Return set of base-symbols owned by OTHER kraken bots (not us).
+
+    Prevents reconciliation from creating ghost duplicate positions when
+    the AI Overseer (exchange='kraken') already owns a coin that the
+    pullback/momentum bot sees in the shared wallet.
+
+    Args:
+        conn: psycopg2 connection
+        my_exchange: this bot's exchange name (e.g. 'kraken-pullback')
+
+    Returns:
+        set of uppercase base symbols (e.g. {'AVAX', 'NEAR'})
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT DISTINCT symbol FROM trading_state
+                   WHERE exchange LIKE %s
+                     AND exchange <> %s
+                     AND quantity > 0""",
+                ('kraken%', my_exchange))
+            return {base_symbol(r[0]) for r in cur.fetchall()}
+    except Exception:
+        return set()

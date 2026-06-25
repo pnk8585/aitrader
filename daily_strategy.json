@@ -1,59 +1,21 @@
 {
-  "date": "2026-06-14",
-  "generated_at": "2026-06-14T06:30:00+03:00",
-  "market_regime": "mixed",
-  "regime_explanation": "BTC στο $55,804 με πολύ αργή ανάκαμψη +2.88% σε 72 ώρες από $54,243 — ξεπερνά οριακά τον 6ωρο ΜΟ ($55,797, +0.01%) αλλά η κίνηση είναι αναιμική. Ο χρυσός εκτοξεύθηκε +3.03% στα $4,238 σηματοδοτώντας risk-off rotation. SpaceX IPO απορροφά ρευστότητα. VIX έπεσε στο 17.68 (-9%) αλλά FOMC Δευτέρα-Τρίτη προσθέτει αβεβαιότητα. ETH ($1,454) και SOL ($59.60) κάτω από 6ωρο ΜΟ, επιβεβαιώνοντας αδυναμία. Αντιφατικά σήματα: αργή uptrend στο BTC, αλλά gold rush και επερχόμενη FOMC δημιουργούν ρίσκο.",
-  "risk_level": "high",
-  "btc_regime": "above",
-  "max_daily_buys": 1,
+  "market_regime": "neutral",
+  "regime_explanation": "System recovery: strategy validation fixed. Architect will reassess at 06:30.",
+  "risk_level": "medium",
+  "btc_regime": "neutral",
+  "max_daily_buys": 2,
   "bias": {
     "crypto": "neutral",
     "stocks": "neutral"
   },
-  "focus_pairs": [
-    "BTCUSDT",
-    "SOLUSDT"
-  ],
-  "avoid_pairs": [
-    "ETHUSDT",
-    "altcoins_high_beta"
-  ],
-  "key_levels": {
-    "BTC": {
-      "support": [
-        54875,
-        54200,
-        54000
-      ],
-      "resistance": [
-        55988,
-        56000,
-        57000
-      ]
-    },
-    "ETH": {
-      "support": [
-        1437,
-        1431,
-        1400
-      ],
-      "resistance": [
-        1462,
-        1500,
-        1550
-      ]
-    }
-  },
-  "geopolitical_risk": "medium",
-  "geopolitical_notes": "Trump ανακοίνωσε επικείμενη συμφωνία με Ιράν για επαναλειτουργία Hormuz (θετικό για risk assets). SpaceX IPO ολοκληρώθηκε στο Nasdaq με αποτίμηση $2.4 τρισ. — η μεγαλύτερη IPO στην ιστορία, απορροφώντας σημαντική ρευστότητα από αγορές. Νέος επικεφαλής Fed δημιουργεί αβεβαιότητα για τη νομισματική πολιτική.",
-  "macro_events_today": [
-    "Σάββατο — κανένα προγραμματισμένο macro event",
-    "Επόμενη εβδομάδα: FOMC meeting June 16-17 — το βασικό γεγονός ρίσκου",
-    "FOMC: συζήτηση για επιτόκια εντείνεται (66% πιθανότητα αύξησης έως τέλος έτους)",
-    "Bank of Japan και Bank of England συνεδριάσεις την ίδια εβδομάδα"
-  ],
-  "strategy_notes": "BTC σε αργή αλλά σταθερή ανάκαμψη από τα χαμηλά 72 ωρών ($54,243 προς $55,804). Ωστόσο η κίνηση είναι αναιμική: 0.01% πάνω από 6ωρο ΜΟ, οριακά flat. Το ράλι χρυσού (+3%) και η φυγή ultra-wealthy σε cash δημιουργούν καθοδικούς κινδύνους. FOMC Δευτέρα-Τρίτη = major event risk. Μέγιστο 1 buy/ημέρα. Προτίμηση BTC/SOL σε deep pullbacks. Αποφυγή ETH που συνεχίζει να υποαποδίδει. Momentum trades περιορισμένα λόγω αδύναμης δυναμικής. Το κλείσιμο εβδομάδας σήμερα μπορεί να φέρει αυξημένη μεταβλητότητα.",
-  "ai_overseer_adjustment": "reduce_risk",
-  "pullback_adjustment": "cautious",
-  "momentum_adjustment": "cautious"
+  "focus_pairs": [],
+  "avoid_pairs": [],
+  "key_levels": {},
+  "geopolitical_risk": "low",
+  "strategy_notes": "Recovery strategy. Normal operations. Wait for Market Architect at 06:30.",
+  "ai_overseer_adjustment": "normal",
+  "pullback_adjustment": "normal",
+  "momentum_adjustment": "normal",
+  "date": "2026-06-25",
+  "generated_at": "2026-06-25T00:41:41.180751+00:00"
 }
