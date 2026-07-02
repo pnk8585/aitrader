@@ -629,7 +629,7 @@ OVERSEER ADJUSTMENT (from Market Architect): {_ds_raw.get('ai_overseer_adjustmen
     return prompt
 
 
-def _build_review_prompt(pending, ctx, portfolio, available_eur, num_positions, recent_pnl):
+def _build_review_prompt(pending, ctx, portfolio, available_eur, num_positions, recent_pnl, daily_strategy=None):
     """Build a focused prompt to evaluate ONE candidate trade setup via self-debate."""
     sym = pending.get("symbol", "?")
     bot = pending.get("bot", "?")
@@ -652,6 +652,25 @@ def _build_review_prompt(pending, ctx, portfolio, available_eur, num_positions, 
     pnl_block = chr(10).join(pnl_lines) if pnl_lines else "  (no recent sells)"
     track = f"{wins}W/{losses}L last {wins + losses}" if (wins + losses) else "no recent history"
 
+    # Daily strategy context
+    mom_adj = daily_strategy.get("momentum_adjustment", "normal") if daily_strategy else "normal"
+    max_buys = daily_strategy.get("max_daily_buys", 3) if daily_strategy else 3
+    regime = daily_strategy.get("market_regime", "unknown") if daily_strategy else "unknown"
+    
+    # Adjust bias based on momentum_adjustment
+    if mom_adj == "skip":
+        bias_note = "Momentum entries are DISABLED by Market Architect — you MUST REJECT."
+        default_verdict = "REJECT"
+    elif mom_adj == "cautious":
+        bias_note = "Cautious mode: allow entries but prefer higher-quality setups (score ≥ 4.0 preferred). Do NOT auto-reject based on small EUR balance alone — the bot sizes positions automatically (€10-15)."
+        default_verdict = "use judgment"
+    elif mom_adj == "aggressive":
+        bias_note = "Aggressive mode: favor entries. Only reject if setup is clearly broken (negative momentum, extreme overextension). Small track record losses are expected in aggressive mode."
+        default_verdict = "APPROVE"
+    else:  # normal
+        bias_note = "Normal mode: balanced judgment. Approve viable setups, reject only clearly bad ones."
+        default_verdict = "use judgment"
+
     prompt = f"""You are a disciplined crypto risk officer deciding whether to BUY {sym} on Kraken RIGHT NOW.
 
 CANDIDATE
@@ -663,6 +682,10 @@ CANDIDATE
 MARKET ({sym})
   6h range: {ctx.get('rng6h_pct', 'N/A')}%   3h momentum: {ctx.get('mom3h_pct', 'N/A')}%
 
+MARKET ARCHITECT STRATEGY
+  Market regime: {regime}   Momentum adjustment: {mom_adj}   Max daily buys: {max_buys}
+  Guidance: {bias_note}
+
 PORTFOLIO
   Equity ~€{portfolio or '?'}  Available EUR: €{available_eur:.2f}  Open positions: {num_positions}
 
@@ -670,10 +693,10 @@ THIS BOT'S RECENT TRACK RECORD ({track}):
 {pnl_block}
 
 Debate this internally before answering. Do NOT show the debate.
-1. BULL CASE: What supports buying NOW? Momentum direction, setup quality ({score}), trend structure, room to run in the 6h range.
-2. BEAR CASE: What argues against? Recent losses in the track record, choppy/overextended price, weak score, thin macro, too little EUR (€{available_eur:.2f}) for a meaningful size.
-3. RISK ASSESSMENT: Weigh both sides. Is reward worth the downside? If the bot is bleeding ({track}), demand a stronger edge. If EUR can't fund a real position, lean REJECT.
-4. DECISION: Pick the side with stronger evidence.
+1. BULL CASE: What supports buying NOW? Momentum direction, setup quality ({score}), trend structure, room to run.
+2. BEAR CASE: What argues against? Choppy/overextended price, weak score, negative hourly momentum.
+3. RISK ASSESSMENT: Weigh both sides. The {mom_adj} adjustment from Market Architect sets the tone: {bias_note}
+4. DECISION: Pick the side with stronger evidence. Default to {default_verdict} when evidence is balanced.
 
 Then respond with VALID JSON only:
 {{
@@ -971,8 +994,10 @@ def main():
                 "ORDER BY timestamp DESC LIMIT 20",
                 (f"{bot}%",))
 
+            # Load daily strategy for review context
+            _ds = load_daily_strategy()
             review_prompt = _build_review_prompt(pending, ctx, portfolio, available_eur,
-                                                  len(positions), recent_pnl)
+                                                  len(positions), recent_pnl, _ds)
             reply = None  # Initialize to avoid NameError if AI call fails
             try:
                 reply = call_ai(review_prompt)
@@ -1141,7 +1166,8 @@ def main():
     for sig in decision.get("trade_signals", []):
         action = sig.get("action", "").upper()
         symbol = sig.get("symbol", "")
-        size_eur = min(float(sig.get("size_eur", 10)), MAX_TRADE_SIZE_EUR)
+        size_eur_raw = sig.get("size_eur") or 10
+        size_eur = min(float(size_eur_raw), MAX_TRADE_SIZE_EUR)
         reason = sig.get("reason", "")
         if action not in ("BUY", "SELL"):
             log.append(f"SKIP trade: invalid action {action}")
