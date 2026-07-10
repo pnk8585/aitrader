@@ -18,9 +18,12 @@ import ccxt
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from openai import OpenAI
+
+from traders.common import bootstrap  # noqa: F401
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "crypto_trades"))
 from file_lock import (with_file_lock, atomic_write_text, atomic_write_json,
                        load_json_with_defaults)
+from traders.common.strategy import load_daily_strategy as _load_daily_strategy
 
 # --- Paths -----------------------------------------------------------------
 PROJECT_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "../.."))
@@ -77,64 +80,16 @@ ADJUSTMENT_BOUNDS = {
 }
 
 # --- Daily Strategy (Market Architect) ---------------------------------------
-DAILY_STRATEGY_PATH = os.path.join(PROJECT_DIR, "daily_strategy.json")
+CRYPTO_BASES = {"BTC", "ETH", "SOL", "AVAX", "LINK", "XRP", "DOGE", "SUI", "NEAR", "RENDER", "ADA", "DOT"}
+
 
 def load_daily_strategy():
-    """Load Market Architect's daily strategy file with normalization and validation."""
-    try:
-        if not os.path.exists(DAILY_STRATEGY_PATH):
-            return None
-        with open(DAILY_STRATEGY_PATH) as f:
-            data = json.load(f)
-        
-        # H2: Staleness guard - check date against Athens timezone
-        date_str = data.get("date")
-        if date_str:
-            athens_tz = pytz.timezone('Europe/Athens')
-            today_athens = datetime.now(athens_tz).strftime('%Y-%m-%d')
-            yesterday_athens = (datetime.now(athens_tz) - timedelta(days=1)).strftime('%Y-%m-%d')
-            if date_str != today_athens and date_str != yesterday_athens:
-                print(f"WARN: Daily strategy is stale (date={date_str}, today={today_athens})", file=sys.stderr)
-                return None
-        
-        # C1: Normalize focus_pairs and avoid_pairs
-        focus_pairs = data.get("focus_pairs", [])
-        avoid_pairs = data.get("avoid_pairs", [])
-        
-        # Strip /EUR suffix, uppercase, filter to valid CRYPTO_PAIRS
-        normalized_focus = []
-        normalized_avoid = []
-        crypto_bases = {"BTC", "ETH", "SOL", "AVAX", "LINK", "XRP", "DOGE", "SUI", "NEAR", "RENDER", "ADA", "DOT"}
-        
-        for pair in focus_pairs:
-            if isinstance(pair, str):
-                base = pair.replace('/EUR', '').upper()
-                if base in crypto_bases:
-                    normalized_focus.append(base)
-        
-        for pair in avoid_pairs:
-            if isinstance(pair, str):
-                base = pair.replace('/EUR', '').upper()
-                if base in crypto_bases:
-                    normalized_avoid.append(base)
-        
-        # If normalized focus set ∩ pool is empty, ignore filter and log warning
-        if focus_pairs and not normalized_focus:
-            print(f"WARN: Daily strategy focus_pairs filter ignored - no valid pairs in {focus_pairs}", file=sys.stderr)
-        
-        data["focus_pairs"] = normalized_focus
-        data["avoid_pairs"] = normalized_avoid
-        
-        # H1: Log unknown adjustment values
-        ai_adj = data.get("ai_overseer_adjustment", "normal")
-        if ai_adj not in ["hold", "aggressive_sell", "normal", "reduce_risk"]:
-            print(f"WARN: Unknown ai_overseer_adjustment '{ai_adj}', defaulting to 'normal'", file=sys.stderr)
-            data["ai_overseer_adjustment"] = "normal"
-        
-        return data
-    except (json.JSONDecodeError, IOError) as e:
-        print(f"WARN: Could not load daily strategy: {e}", file=sys.stderr)
-        return None
+    return _load_daily_strategy(
+        pool_bases=CRYPTO_BASES,
+        adjustment_key="ai_overseer_adjustment",
+        valid_adjustments=("hold", "aggressive_sell", "normal", "reduce_risk"),
+        default_adjustment="normal",
+    )
 
 
 # ---------------------------------------------------------------------------

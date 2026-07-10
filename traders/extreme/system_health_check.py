@@ -28,9 +28,9 @@ def connect_db():
     return psycopg2.connect(
         host=os.getenv("DB_HOST", "localhost"),
         port=int(os.getenv("DB_PORT", "5432")),
-        user=os.getenv("DB_USER", "pank"),
+        user=os.getenv("DB_USER"),
         password=os.getenv("DB_PASSWORD", ""),
-        dbname=os.getenv("DB_NAME", "trading"),
+        dbname=os.getenv("DB_NAME", "aitrader"),
         connect_timeout=DB_TIMEOUT_S,
     )
 

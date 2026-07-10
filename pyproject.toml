@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aitrader"
+version = "0.2.0"
+description = "Multi-strategy crypto + stock automated trading system"
+readme = "HERMES.md"
+requires-python = ">=3.10"
+dependencies = [
+    "psycopg2-binary>=2.9.9,<3",
+    "ccxt>=4.2.0,<5",
+    "requests>=2.31.0,<3",
+    "python-dotenv>=1.0.0,<2",
+    "openai>=1.30.0,<2",
+    "pytz>=2024.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0,<9",
+    "pytest-cov>=5.0.0,<6",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["traders*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

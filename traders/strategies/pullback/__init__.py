@@ -1,0 +1,1 @@
+"""Kraken pullback-in-uptrend strategy components."""

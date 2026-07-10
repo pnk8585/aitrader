@@ -24,11 +24,11 @@ import time
 import fcntl
 import ccxt
 from datetime import datetime, timezone, timedelta
-import pytz
-from dotenv import load_dotenv
+
+from traders.common import bootstrap  # noqa: F401
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "extreme"))
 from db_prices import (
-                       DEBUG,get_connection, insert_prices, get_one_hour_momentum,
+                       DEBUG, get_connection, insert_prices, get_one_hour_momentum,
                        close_connection, base_symbol,
                        load_trading_state, save_trading_state,
                        load_notify_state, save_notify_state as db_save_notify_state,
@@ -36,187 +36,73 @@ from db_prices import (
                        get_momentum_over, get_range_pct, last_exit_time,
                        trades_today, realized_pnl_today_pct,
                        coins_held_by_other_bots)
-from file_lock import (with_file_lock, atomic_write_json, load_json_with_defaults)
-from ai_gate_utils import load_ai_gates, check_gate, signal_architect_rethink
+from traders.common.config import ROOT_DIR, ensure_log_dir
+from traders.common.exchange import extract_fill, market_buy, market_sell, spread_ok
+from traders.common.gates import check_gate, load_ai_gates, signal_architect_rethink
+from traders.common.pending_review import (
+    load_pending_review, submit_candidate as _submit_candidate, write_pending_review,
+)
+from traders.common.strategy import load_daily_strategy as _load_daily_strategy
+from traders.strategies.momentum import config as MO
+from traders.strategies.momentum.exits import is_stale_rotation_candidate, should_exit_momentum
 
 # ---------------------------------------------------------------------------
-# Config
+# Config (from strategies.momentum.config)
 # ---------------------------------------------------------------------------
-ROOT_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "../.."))
-env_path = os.path.join(ROOT_DIR, ".env")
-load_dotenv(dotenv_path=env_path)
+ensure_log_dir()
 
 KRAKEN_API_KEY = os.getenv("KRAKEN_API_KEY")
 KRAKEN_SECRET = os.getenv("KRAKEN_SECRET")
-
 if not KRAKEN_API_KEY or not KRAKEN_SECRET:
     print("Error: Missing Kraken credentials in .env", file=sys.stderr)
     sys.exit(1)
 
 exchange = ccxt.kraken({
-    'apiKey': KRAKEN_API_KEY,
-    'secret': KRAKEN_SECRET,
-    'enableRateLimit': True,
+    "apiKey": KRAKEN_API_KEY,
+    "secret": KRAKEN_SECRET,
+    "enableRateLimit": True,
 })
-EXCHANGE_NAME = "kraken-momentum"
-PRICE_EXCHANGE = "kraken"  # shared price feed (insert_prices writes under 'kraken')
-LOG_DIR = os.path.join(ROOT_DIR, "logs")
-os.makedirs(LOG_DIR, exist_ok=True)
 
-# Same candidate pool as the pullback strategy.
-CRYPTO_PAIRS = ["BTC/EUR", "ETH/EUR", "SOL/EUR", "AVAX/EUR", "LINK/EUR",
-                "XRP/EUR", "DOGE/EUR", "SUI/EUR", "NEAR/EUR", "RENDER/EUR",
-                "ADA/EUR", "DOT/EUR"]
-
-# --- Fees -----------------------------------------------------------------
-# Kraken taker ~0.26%/side => 0.52% round-trip.
-ROUND_TRIP_FEE_PCT = 0.52
-
-# --- Entry (momentum breakout) --------------------------------------------
-DAILY_ENTRY_PCT = 2.0      # daily change >= 2.0% qualifies
-HOURLY_ENTRY_PCT = 1.5     # OR hourly change >= 1.5% qualifies
-DAILY_WINDOW_MIN = 1440    # 24h lookback for "daily" change from the price DB
-# Rotation needs a stronger fresh signal than a plain entry.
-ROT_DAILY_PCT = 2.5
-ROT_HOURLY_PCT = 2.0
-
-# --- Exits ----------------------------------------------------------------
-TTP_PEAK_PCT = 3.0          # trailing take-profit arms after +3.0% peak
-TTP_GIVEBACK_PCT = 1.0      # ...sell if we give back 1.0% from peak
-PLOCK_PEAK_PCT = 5.0        # profit-lock arms after +5.0% peak
-PLOCK_FLOOR_PCT = 3.0       # ...sell if we drop below +3.0%
-STOP_LOSS_PCT = -2.5        # hard stop-loss
-BREAKEVEN_PEAK_PCT = 2.0    # breakeven protection: peak armed >= +2.0%...
-# ...exits at the fee floor (ROUND_TRIP_FEE_PCT) so we never round-trip a loss.
-STALE_FLAT_HOURS = 0.75     # held >45min and still flat (<+1.0%) => rotation candidate
-STALE_FLAT_PLPC = 1.0
-STALE_MAX_HOURS = 1.5       # held >1.5h => rotation candidate regardless
-MAX_HOLD_HOURS = 12.0       # hard time-stop
-
-# --- Position sizing / risk -----------------------------------------------
-DEPLOY_FRACTION = 0.60     # base fraction of cash to deploy on the best setup
-RISK_PER_TRADE_PCT = 4.0   # volatility cap: never risk more than this if stopped
-MIN_TRADE_EUR = 0.45       # Kraken minimum
-MAX_OPEN_MOMENTUM = 2      # max positions this strategy holds at once
-MAX_TOTAL_OPEN = 5         # global cap across BOTH Kraken strategies (shared wallet)
-
-# --- Concurrency guard ------------------------------------------------------
-LOCK_FILE = os.path.join(ROOT_DIR, "logs/kraken_momentum.lock")
-
-# --- AI Gates ---------------------------------------------------------------
-# load_ai_gates() imported from ai_gate_utils
-COOLDOWN_MIN = 90          # per-coin cooldown after any exit
-MAX_TRADES_PER_DAY = 4     # hard overtrading cap
-DAILY_LOSS_BREAKER_PCT = -4.0
-CONSULT_DEPLOY_FRACTION = 0.5
-CONSULT_MIN_SCORE = 2.0
-
-
-# --- Daily Strategy (Market Architect) ---------------------------------------
-DAILY_STRATEGY_PATH = os.path.join(ROOT_DIR, "daily_strategy.json")
-
-def load_daily_strategy():
-    """Load Market Architect's daily strategy file with normalization and validation."""
-    try:
-        if not os.path.exists(DAILY_STRATEGY_PATH):
-            return None
-        with open(DAILY_STRATEGY_PATH) as f:
-            data = json.load(f)
-        
-        # H2: Staleness guard — allow previous day's strategy (Architect runs at 06:30)
-        date_str = data.get("date")
-        if date_str:
-            athens_tz = pytz.timezone('Europe/Athens')
-            today_athens = datetime.now(athens_tz).strftime('%Y-%m-%d')
-            # Allow yesterday (e.g. 00:00-06:30 before Architect updates)
-            if date_str < (datetime.now(athens_tz) - timedelta(days=1)).strftime('%Y-%m-%d'):
-                print(f"WARN: Daily strategy is stale (date={date_str}, today={today_athens})", file=sys.stderr)
-                return None
-        
-        # C1: Normalize focus_pairs and avoid_pairs
-        focus_pairs = data.get("focus_pairs", [])
-        avoid_pairs = data.get("avoid_pairs", [])
-        
-        # Strip /EUR suffix using base_symbol(), uppercase, filter to valid CRYPTO_PAIRS
-        normalized_focus = []
-        normalized_avoid = []
-        crypto_bases = {pair.split('/')[0] for pair in CRYPTO_PAIRS}
-        
-        for pair in focus_pairs:
-            if isinstance(pair, str):
-                base = base_symbol(pair).upper()
-                if base in crypto_bases:
-                    normalized_focus.append(base)
-        
-        for pair in avoid_pairs:
-            if isinstance(pair, str):
-                base = base_symbol(pair).upper()
-                if base in crypto_bases:
-                    normalized_avoid.append(base)
-        
-        # If normalized focus set ∩ pool is empty, ignore filter and log warning
-        if focus_pairs and not normalized_focus:
-            print(f"WARN: Daily strategy focus_pairs filter ignored - no valid pairs in {focus_pairs}", file=sys.stderr)
-        
-        data["focus_pairs"] = normalized_focus
-        data["avoid_pairs"] = normalized_avoid
-        
-        # H1: Log unknown adjustment values
-        momentum_adj = data.get("momentum_adjustment", "aggressive")
-        if momentum_adj not in ["normal", "cautious", "skip", "aggressive"]:
-            print(f"WARN: Unknown momentum_adjustment '{momentum_adj}', defaulting to 'aggressive'", file=sys.stderr)
-            data["momentum_adjustment"] = "aggressive"
-        
-        return data
-    except (json.JSONDecodeError, IOError) as e:
-        print(f"WARN: Could not load daily strategy: {e}", file=sys.stderr)
-        return None
-
-
-# ---------------------------------------------------------------------------
-# Pending AI review — bot finds candidates, AI approves before buying
-# ---------------------------------------------------------------------------
-PENDING_REVIEW_FILE = os.path.join(ROOT_DIR, "ai_overseer/pending_review.json")
-PENDING_LOCK_FILE = os.path.join(ROOT_DIR, "ai_overseer/.pending_review.lock")
+EXCHANGE_NAME = MO.EXCHANGE_NAME
+PRICE_EXCHANGE = MO.PRICE_EXCHANGE
+CRYPTO_PAIRS = MO.CRYPTO_PAIRS
+ROUND_TRIP_FEE_PCT = MO.ROUND_TRIP_FEE_PCT
+DAILY_ENTRY_PCT = MO.DAILY_ENTRY_PCT
+HOURLY_ENTRY_PCT = MO.HOURLY_ENTRY_PCT
+DAILY_WINDOW_MIN = MO.DAILY_WINDOW_MIN
+ROT_DAILY_PCT = MO.ROT_DAILY_PCT
+ROT_HOURLY_PCT = MO.ROT_HOURLY_PCT
+TTP_PEAK_PCT = MO.TTP_PEAK_PCT
+TTP_GIVEBACK_PCT = MO.TTP_GIVEBACK_PCT
+PLOCK_PEAK_PCT = MO.PLOCK_PEAK_PCT
+PLOCK_FLOOR_PCT = MO.PLOCK_FLOOR_PCT
+STOP_LOSS_PCT = MO.STOP_LOSS_PCT
+BREAKEVEN_PEAK_PCT = MO.BREAKEVEN_PEAK_PCT
+STALE_FLAT_HOURS = MO.STALE_FLAT_HOURS
+STALE_FLAT_PLPC = MO.STALE_FLAT_PLPC
+STALE_MAX_HOURS = MO.STALE_MAX_HOURS
+MAX_HOLD_HOURS = MO.MAX_HOLD_HOURS
+DEPLOY_FRACTION = MO.DEPLOY_FRACTION
+RISK_PER_TRADE_PCT = MO.RISK_PER_TRADE_PCT
+MIN_TRADE_EUR = MO.MIN_TRADE_EUR
+MAX_OPEN_MOMENTUM = MO.MAX_OPEN_MOMENTUM
+MAX_TOTAL_OPEN = MO.MAX_TOTAL_OPEN
+LOCK_FILE = MO.LOCK_FILE
+COOLDOWN_MIN = MO.COOLDOWN_MIN
+MAX_TRADES_PER_DAY = MO.MAX_TRADES_PER_DAY
+DAILY_LOSS_BREAKER_PCT = MO.DAILY_LOSS_BREAKER_PCT
+CONSULT_DEPLOY_FRACTION = MO.CONSULT_DEPLOY_FRACTION
+CONSULT_MIN_SCORE = MO.CONSULT_MIN_SCORE
 PENDING_REVIEW_TIMEOUT_MIN = 120
 
 
-def load_pending_review():
-    """Read the pending review file. Returns dict with defaults if absent."""
-    defaults = {"status": None, "bot": None, "symbol": None,
-                "verdict": None, "verdict_reason": None,
-                "created_at": None, "reviewed_at": None}
-    return load_json_with_defaults(PENDING_REVIEW_FILE, defaults)
-
-
-def write_pending_review(data):
-    """Atomically write pending review data."""
-    atomic_write_json(PENDING_REVIEW_FILE, data, indent=2)
-
-
-def clear_pending_review():
-    """Remove the pending review file."""
-    if os.path.exists(PENDING_REVIEW_FILE):
-        os.remove(PENDING_REVIEW_FILE)
-
-
-def _submit_candidate(pending_data):
-    """Submit candidate under lock — re-checks that no other bot got there first."""
-    def _do():
-        if os.path.exists(PENDING_REVIEW_FILE):
-            try:
-                with open(PENDING_REVIEW_FILE) as f:
-                    existing = json.load(f)
-                if existing.get("status") == "pending":
-                    return False
-            except (json.JSONDecodeError, IOError):
-                pass
-        write_pending_review(pending_data)
-        return True
-    return with_file_lock(PENDING_LOCK_FILE, _do)
-
-
-COOLDOWN_MIN = 90          # per-coin cooldown after any exit
+def load_daily_strategy():
+    return _load_daily_strategy(
+        pool_bases=MO.POOL_BASES,
+        adjustment_key="momentum_adjustment",
+        valid_adjustments=("normal", "cautious", "skip", "aggressive"),
+        default_adjustment="aggressive",
+    )
 # (DB market-read helpers moved to db_prices.py — imported above)
 
 
@@ -254,24 +140,6 @@ def get_entry_price_and_time(symbol, current_price):
     except Exception as e:
         print(f"Error fetching trades for {symbol}: {e}", file=sys.stderr)
     return current_price, datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-def extract_fill(res, fallback_price):
-    """Recover the actual average fill price and filled qty from a CCXT order."""
-    price, qty = None, None
-    if isinstance(res, dict):
-        for k in ("average", "price"):
-            v = res.get(k)
-            if v:
-                price = float(v)
-                break
-        filled = res.get("filled")
-        cost = res.get("cost")
-        if filled:
-            qty = float(filled)
-        if price is None and cost and filled:
-            price = float(cost) / float(filled)
-    return (price or fallback_price), qty
 
 
 def sellable_qty(symbol, recorded_qty):
@@ -516,24 +384,11 @@ def run_cycle():
         sell = False
         reason = ""
 
-        # Trailing take-profit
-        if peak_plpc >= TTP_PEAK_PCT and unrealized_plpc <= (peak_plpc - TTP_GIVEBACK_PCT):
-            sell, reason = True, (f"Trailing TP (peak +{round(peak_plpc,2)}% -> "
-                                  f"+{round(unrealized_plpc,2)}%)")
-        # Profit lock
-        elif peak_plpc >= PLOCK_PEAK_PCT and unrealized_plpc < PLOCK_FLOOR_PCT:
-            sell, reason = True, (f"Profit lock (peak +{round(peak_plpc,2)}% -> "
-                                  f"+{round(unrealized_plpc,2)}%)")
-        # Stop-loss
-        elif unrealized_plpc <= STOP_LOSS_PCT:
-            sell, reason = True, f"Stop-loss ({round(unrealized_plpc,2)}% <= {STOP_LOSS_PCT}%)"
-        # Breakeven protection: armed a small gain, now back at the fee floor
-        elif peak_plpc >= BREAKEVEN_PEAK_PCT and unrealized_plpc <= ROUND_TRIP_FEE_PCT:
-            sell, reason = True, (f"Breakeven protection (peak +{round(peak_plpc,2)}% -> "
-                                  f"+{round(unrealized_plpc,2)}%, fee floor +{ROUND_TRIP_FEE_PCT}%)")
-        # Hard max-hold time-stop
-        elif age_hours >= MAX_HOLD_HOURS:
-            sell, reason = True, f"Max-hold time-stop ({round(age_hours,1)}h)"
+        sell, reason = should_exit_momentum(
+            unrealized_plpc=unrealized_plpc,
+            peak_plpc=peak_plpc,
+            age_hours=age_hours,
+        )
 
         pos_report = {"symbol": symbol, "unrealized_plpc": round(unrealized_plpc, 2),
                       "age_hours": round(age_hours, 2),
@@ -541,8 +396,7 @@ def run_cycle():
 
         # Stale-rotation flag: held >45min and flat, OR held >1.5h — only one,
         # and only if not already being sold for a hard reason.
-        is_stale = ((age_hours >= STALE_FLAT_HOURS and unrealized_plpc < STALE_FLAT_PLPC)
-                    or age_hours >= STALE_MAX_HOURS)
+        is_stale = is_stale_rotation_candidate(unrealized_plpc, age_hours)
         if is_stale and not sell and not can_rotate:
             can_rotate = True
             stale = {"symbol": symbol, "qty": qty, "entry_price": entry_price,
@@ -560,7 +414,7 @@ def run_cycle():
                     report["positions_managed"].append(pos_report)
                     new_state.pop(symbol, None)
                     continue
-                res = exchange.create_market_sell_order(symbol, fqty)
+                res = market_sell(exchange, symbol, fqty, current_price)
                 _order_res = res or {}
                 pos_report["action"] = "SELL"
                 managed_any = True
@@ -993,10 +847,17 @@ def run_cycle():
         momentum_desc = f"{best['signal']} (+{round(best['hourly'],2)}% 1h)"
     else:
         momentum_desc = f"{best['signal']} (+{round(best['daily'],2)}% daily)"
+    ok_spread, sp = spread_ok(exchange, symbol, MO.MAX_SPREAD_PCT)
+    if not ok_spread:
+        report["action_taken"] = "SKIP"
+        report["details"] = f"Spread too wide ({round(sp, 3)}% > {MO.MAX_SPREAD_PCT}%)."
+        finalize()
+        return
+
     try:
         exchange.load_markets()
         fqty = float(exchange.amount_to_precision(symbol, qty))
-        res = exchange.create_market_buy_order(symbol, fqty)
+        res = market_buy(exchange, symbol, fqty, current_price)
         _buy_res = res or {}
         fill_price, fill_qty = extract_fill(_buy_res, current_price)
         if fill_qty is None:

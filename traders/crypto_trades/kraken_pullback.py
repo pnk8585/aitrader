@@ -26,14 +26,11 @@ import uuid
 import fcntl
 import ccxt
 from datetime import datetime, timezone, timedelta
-import pytz
-from dotenv import load_dotenv
 
-# db_prices lives in traders/extreme/ — add it to the import path so this
-# script works when invoked from traders/crypto_trades/.
+from traders.common import bootstrap  # noqa: F401 — adds repo root to sys.path
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "extreme"))
 from db_prices import (
-                       DEBUG,get_connection, insert_prices, get_one_hour_momentum,
+                       DEBUG, get_connection, insert_prices, get_one_hour_momentum,
                        close_connection, base_symbol,
                        load_trading_state, save_trading_state,
                        load_notify_state, save_notify_state as db_save_notify_state,
@@ -41,212 +38,75 @@ from db_prices import (
                        get_momentum_over, get_range_pct, get_recent_high, get_recent_low,
                        last_exit_time, trades_today, realized_pnl_today_pct,
                        coins_held_by_other_bots)
-from file_lock import (with_file_lock, atomic_write_json, load_json_with_defaults)
+from traders.common.config import DRY_RUN, ROOT_DIR, ensure_log_dir
+from traders.common.exchange import extract_fill, market_buy, market_sell, spread_ok
+from traders.common.gates import check_gate, load_ai_gates
+from traders.common.pending_review import (
+    load_pending_review, submit_candidate as _submit_candidate, write_pending_review,
+)
+from traders.common.strategy import load_daily_strategy as _load_daily_strategy
+from traders.strategies.pullback import config as PB
+from traders.strategies.pullback.exits import compute_effective_stop, should_exit_pullback
+from traders.strategies.pullback.signals import scan_pullback_candidates
 
 # ---------------------------------------------------------------------------
-# Config
+# Config (from strategies.pullback.config)
 # ---------------------------------------------------------------------------
-ROOT_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "../.."))
-env_path = os.path.join(ROOT_DIR, ".env")
-load_dotenv(dotenv_path=env_path)
+ensure_log_dir()
 
 KRAKEN_API_KEY = os.getenv("KRAKEN_API_KEY")
 KRAKEN_SECRET = os.getenv("KRAKEN_SECRET")
-
 if not KRAKEN_API_KEY or not KRAKEN_SECRET:
     print("Error: Missing Kraken credentials in .env", file=sys.stderr)
     sys.exit(1)
 
 exchange = ccxt.kraken({
-    'apiKey': KRAKEN_API_KEY,
-    'secret': KRAKEN_SECRET,
-    'enableRateLimit': True,
+    "apiKey": KRAKEN_API_KEY,
+    "secret": KRAKEN_SECRET,
+    "enableRateLimit": True,
 })
 
-EXCHANGE_NAME = "kraken-pullback"
-# DB prices are always written under exchange='kraken' (hardcoded in db_prices.insert_prices).
-PRICE_EXCHANGE = "kraken"
-LOG_DIR = os.path.join(ROOT_DIR, "logs")
-os.makedirs(LOG_DIR, exist_ok=True)
+EXCHANGE_NAME = PB.EXCHANGE_NAME
+PRICE_EXCHANGE = PB.PRICE_EXCHANGE
+CRYPTO_PAIRS = PB.CRYPTO_PAIRS
+ROUND_TRIP_FEE_PCT = PB.ROUND_TRIP_FEE_PCT
+VOL_FLOOR_PCT = PB.VOL_FLOOR_PCT
+VOL_WINDOW_MIN = PB.VOL_WINDOW_MIN
+TREND_3H_MIN = PB.TREND_3H_MIN
+TREND_3H_MIN_PCT = PB.TREND_3H_MIN_PCT
+PULLBACK_MIN_PCT = PB.PULLBACK_MIN_PCT
+BLOWOFF_GUARD_1H_PCT = PB.BLOWOFF_GUARD_1H_PCT
+RR_MIN = PB.RR_MIN
+MIN_HARD_STOP_PCT = PB.MIN_HARD_STOP_PCT
+MAX_HARD_STOP_PCT = PB.MAX_HARD_STOP_PCT
+TRAIL_ARM_PCT = PB.TRAIL_ARM_PCT
+TRAIL_GIVEBACK_FRAC = PB.TRAIL_GIVEBACK_FRAC
+TRAIL_GIVEBACK_MIN_PCT = PB.TRAIL_GIVEBACK_MIN_PCT
+HARD_TP_CAP_PCT = PB.HARD_TP_CAP_PCT
+MAX_HOLD_HOURS = PB.MAX_HOLD_HOURS
+STALE_HOLD_HOURS = PB.STALE_HOLD_HOURS
+DEPLOY_FRACTION = PB.DEPLOY_FRACTION
+RISK_PER_TRADE_PCT = PB.RISK_PER_TRADE_PCT
+CONSULT_DEPLOY_FRACTION = PB.CONSULT_DEPLOY_FRACTION
+CONSULT_MIN_SCORE = PB.CONSULT_MIN_SCORE
+MIN_TRADE_EUR = PB.MIN_TRADE_EUR
+MAX_OPEN_SMALL = PB.MAX_OPEN_SMALL
+MAX_OPEN_LARGE = PB.MAX_OPEN_LARGE
+EQUITY_TWO_POS = PB.EQUITY_TWO_POS
+LOCK_FILE = PB.LOCK_FILE
+COOLDOWN_MIN = PB.COOLDOWN_MIN
+MAX_TRADES_PER_DAY = PB.MAX_TRADES_PER_DAY
+DAILY_LOSS_BREAKER_PCT = PB.DAILY_LOSS_BREAKER_PCT
+PENDING_REVIEW_TIMEOUT_MIN = 120
 
-# Full candidate pool. The volatility filter below decides which are tradeable
-# on any given cycle, so quiet majors (BTC/ETH/XRP/...) self-exclude most days.
-CRYPTO_PAIRS = ["BTC/EUR", "ETH/EUR", "SOL/EUR", "AVAX/EUR", "LINK/EUR",
-                "XRP/EUR", "DOGE/EUR", "SUI/EUR", "NEAR/EUR", "RENDER/EUR",
-                "ADA/EUR", "DOT/EUR"]
-
-# --- Fees -----------------------------------------------------------------
-# Kraken taker ~0.26%/side => 0.52% round-trip. Everything below is sized so
-# the expected winner is several multiples of this number.
-ROUND_TRIP_FEE_PCT = 0.52
-
-# --- Universe / regime filters --------------------------------------------
-VOL_FLOOR_PCT = 4.0# require >=3.0% hi-lo range so a -2% stop sits below the noise
-VOL_WINDOW_MIN = 360       # 6h volatility window
-TREND_3H_MIN_PCT = 1.0     # price must be >= +1.0% vs 3h ago (uptrend)
-TREND_3H_MIN = 180         # minutes
-TREND_6H_MIN = 360         # price must also be > price 6h ago
-
-# --- Entry (buy the dip inside the uptrend, never the blow-off top) -------
-PULLBACK_MIN_PCT = 1.5# current price must be >=0.5% below the last-1h high
-BLOWOFF_GUARD_1H_PCT = 4.0# skip if 1h momentum > +4% (that's the top, it reverts)
-RR_MIN = 2.0               # require room-to-6h-high >= RR_MIN × stop distance (reward:risk gate)
-
-# --- Exits ----------------------------------------------------------------
-MIN_HARD_STOP_PCT = 1.5
-MAX_HARD_STOP_PCT = 8.0    # cap the vol-widened stop so a crazy range can't risk the account
-TRAIL_ARM_PCT = 2.0# arm the trailing TP only after a real +2.5% peak
-TRAIL_GIVEBACK_FRAC = 0.40       # let winners run: give back 40% of the peak gain...
-TRAIL_GIVEBACK_MIN_PCT = 1.0     # ...but never trail tighter than this absolute floor
-HARD_TP_CAP_PCT = 5.0# absolute take-profit ceiling
-MAX_HOLD_HOURS = 4.0# only force-exit a *dead* (net-neg, trend-broken) bag
-STALE_HOLD_HOURS = 18.0    # free capital from a stalled, trend-broken, barely-green bag
-
-# --- Position sizing / risk -----------------------------------------------
-DEPLOY_FRACTION = 0.1# deploy ~60% of cash into the single best setup
-# Volatility-adjusted cap: never risk more than RISK_PER_TRADE_PCT of equity if
-# the stop is hit. size = riskEUR / (stop% / 100). Generous on purpose — it only
-# trims size on high-volatility coins whose stop sits far away; tight setups
-# still deploy the full DEPLOY_FRACTION.
-RISK_PER_TRADE_PCT = 4.0
-CONSULT_DEPLOY_FRACTION = 0.5  # when AI consult_on_entry is set, halve exposure
-CONSULT_MIN_SCORE = 3.0        # ...and only take higher-conviction setups
-MIN_TRADE_EUR = 0.45       # Kraken minimum
-MAX_OPEN_SMALL = 1         # one position at a time for a small account
-MAX_OPEN_LARGE = 2         # allow 2 only above EQUITY_TWO_POS
-EQUITY_TWO_POS = 400.0
-
-# --- Concurrency guard ------------------------------------------------------
-# Two */5 cron jobs (or an overrun) running this script at once would double the
-# orders and race on trading_state. A single flock makes overlapping runs exit.
-LOCK_FILE = os.path.join(ROOT_DIR, "logs/kraken_pullback.lock")
-
-# --- AI Gates ---------------------------------------------------------------
-AI_GATE_FILE = os.path.join(ROOT_DIR, "ai_overseer/ai_gate.json")
-
-
-def load_ai_gates():
-    """Read AI gate conditions set by ai_overseer. Returns dict with defaults."""
-    default = {"script_paused": False, "consult_on_entry": False, "reason": None}
-    if not os.path.exists(AI_GATE_FILE):
-        return default
-    try:
-        with open(AI_GATE_FILE) as f:
-            gates = json.load(f)
-        return {**default, **gates}
-    except (json.JSONDecodeError, IOError):
-        return default
-
-
-# --- Daily Strategy (Market Architect) ---------------------------------------
-DAILY_STRATEGY_PATH = os.path.join(ROOT_DIR, "daily_strategy.json")
 
 def load_daily_strategy():
-    """Load Market Architect's daily strategy file with normalization and validation."""
-    try:
-        if not os.path.exists(DAILY_STRATEGY_PATH):
-            return None
-        with open(DAILY_STRATEGY_PATH) as f:
-            data = json.load(f)
-        
-        # H2: Staleness guard — allow previous day's strategy (Architect runs at 06:30)
-        date_str = data.get("date")
-        if date_str:
-            athens_tz = pytz.timezone('Europe/Athens')
-            today_athens = datetime.now(athens_tz).strftime('%Y-%m-%d')
-            # Allow yesterday (e.g. 00:00-06:30 before Architect updates)
-            if date_str < (datetime.now(athens_tz) - timedelta(days=1)).strftime('%Y-%m-%d'):
-                print(f"WARN: Daily strategy is stale (date={date_str}, today={today_athens})", file=sys.stderr)
-                return None
-        
-        # C1: Normalize focus_pairs and avoid_pairs
-        focus_pairs = data.get("focus_pairs", [])
-        avoid_pairs = data.get("avoid_pairs", [])
-        
-        # Strip /EUR suffix using base_symbol(), uppercase, filter to valid CRYPTO_PAIRS
-        normalized_focus = []
-        normalized_avoid = []
-        crypto_bases = {pair.split('/')[0] for pair in CRYPTO_PAIRS}
-        
-        for pair in focus_pairs:
-            if isinstance(pair, str):
-                base = base_symbol(pair).upper()
-                if base in crypto_bases:
-                    normalized_focus.append(base)
-        
-        for pair in avoid_pairs:
-            if isinstance(pair, str):
-                base = base_symbol(pair).upper()
-                if base in crypto_bases:
-                    normalized_avoid.append(base)
-        
-        # If normalized focus set ∩ pool is empty, ignore filter and log warning
-        if focus_pairs and not normalized_focus:
-            print(f"WARN: Daily strategy focus_pairs filter ignored - no valid pairs in {focus_pairs}", file=sys.stderr)
-        
-        data["focus_pairs"] = normalized_focus
-        data["avoid_pairs"] = normalized_avoid
-        
-        # H1: Log unknown adjustment values
-        pullback_adj = data.get("pullback_adjustment", "normal")
-        if pullback_adj not in ["normal", "aggressive", "cautious", "skip"]:
-            print(f"WARN: Unknown pullback_adjustment '{pullback_adj}', defaulting to 'normal'", file=sys.stderr)
-            data["pullback_adjustment"] = "normal"
-        
-        return data
-    except (json.JSONDecodeError, IOError) as e:
-        print(f"WARN: Could not load daily strategy: {e}", file=sys.stderr)
-        return None
-
-
-# ---------------------------------------------------------------------------
-# Pending AI review — bot finds candidates, AI approves before buying
-# ---------------------------------------------------------------------------
-PENDING_REVIEW_FILE = os.path.join(ROOT_DIR, "ai_overseer/pending_review.json")
-PENDING_LOCK_FILE = os.path.join(ROOT_DIR, "ai_overseer/.pending_review.lock")
-PENDING_REVIEW_TIMEOUT_MIN = 120  # drop stale pending after this many minutes
-
-
-def load_pending_review():
-    """Read the pending review file. Returns dict with defaults if absent."""
-    defaults = {"status": None, "bot": None, "symbol": None,
-                "verdict": None, "verdict_reason": None,
-                "created_at": None, "reviewed_at": None}
-    return load_json_with_defaults(PENDING_REVIEW_FILE, defaults)
-
-
-def write_pending_review(data):
-    """Atomically write pending review data (locked against concurrent bots)."""
-    atomic_write_json(PENDING_REVIEW_FILE, data, indent=2)
-
-
-def clear_pending_review():
-    """Remove the pending review file."""
-    if os.path.exists(PENDING_REVIEW_FILE):
-        os.remove(PENDING_REVIEW_FILE)
-
-
-def _submit_candidate(pending_data):
-    """Submit candidate under lock — re-checks that no other bot got there first."""
-    def _do():
-        # Re-check under exclusive lock: another bot might have just submitted
-        if os.path.exists(PENDING_REVIEW_FILE):
-            try:
-                with open(PENDING_REVIEW_FILE) as f:
-                    existing = json.load(f)
-                if existing.get("status") == "pending":
-                    # Another bot already submitted — don't overwrite
-                    return False
-            except (json.JSONDecodeError, IOError):
-                pass
-        write_pending_review(pending_data)
-        return True
-    return with_file_lock(PENDING_LOCK_FILE, _do)
-
-
-COOLDOWN_MIN = 90          # per-coin cooldown after any exit (kills churn)
-MAX_TRADES_PER_DAY = 4     # hard overtrading cap
-DAILY_LOSS_BREAKER_PCT = -4.0  # stop trading for the UTC day past this realized loss
+    return _load_daily_strategy(
+        pool_bases=PB.POOL_BASES,
+        adjustment_key="pullback_adjustment",
+        valid_adjustments=("normal", "aggressive", "cautious", "skip"),
+        default_adjustment="normal",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -289,29 +149,6 @@ def get_entry_price_and_time(symbol, current_price):
     except Exception as e:
         print(f"Error fetching trades for {symbol}: {e}", file=sys.stderr)
     return current_price, datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-def extract_fill(res, fallback_price):
-    """Recover the actual average fill price and filled qty from a CCXT order.
-
-    Kraken market orders slip, so the ticker price used to size the order is NOT
-    the real entry. Prefer the order's reported average; fall back through
-    price, cost/filled, and finally the pre-trade ticker price.
-    """
-    price, qty = None, None
-    if isinstance(res, dict):
-        for k in ("average", "price"):
-            v = res.get(k)
-            if v:
-                price = float(v)
-                break
-        filled = res.get("filled")
-        cost = res.get("cost")
-        if filled:
-            qty = float(filled)
-        if price is None and cost and filled:
-            price = float(cost) / float(filled)
-    return (price or fallback_price), qty
 
 
 # ---------------------------------------------------------------------------
@@ -497,43 +334,20 @@ def run_cycle():
         sell = False
         reason = ""
 
-        # dynamic stop: at least MIN_HARD_STOP_PCT, wider for volatile coins, but
-        # capped at MAX_HARD_STOP_PCT so an extreme 6h range can't risk the account.
         rng_6h = get_range_pct(db_conn, symbol, 360, price_exchange=PRICE_EXCHANGE)
-        # Tighten the stop to 60% of its distance when the day is already bleeding
-        # (realized <= -2.0%): protect remaining capital instead of giving losers room.
-        rpnl_today = realized_pnl_today_pct(db_conn, exchange_name=EXCHANGE_NAME, round_trip_fee_pct=ROUND_TRIP_FEE_PCT)
-        stop_tighten = 0.6 if rpnl_today <= -2.0 else 1.0
-        effective_stop = -min(MAX_HARD_STOP_PCT,
-                              max(MIN_HARD_STOP_PCT, 0.5 * (rng_6h or MIN_HARD_STOP_PCT * 2))) * stop_tighten
-
-        if unrealized_plpc <= effective_stop:
-            sell, reason = True, f"Hard stop ({round(unrealized_plpc,2)}% <= {round(effective_stop,2)}%, rng6h={round(rng_6h or 0,2)}%)"
-        elif unrealized_plpc >= HARD_TP_CAP_PCT:
-            sell, reason = True, f"Take-profit cap (+{round(unrealized_plpc,2)}% >= +{HARD_TP_CAP_PCT}%)"
-        elif peak_plpc >= TRAIL_ARM_PCT and unrealized_plpc <= (
-                peak_plpc - max(TRAIL_GIVEBACK_MIN_PCT, peak_plpc * TRAIL_GIVEBACK_FRAC)):
-            giveback = max(TRAIL_GIVEBACK_MIN_PCT, peak_plpc * TRAIL_GIVEBACK_FRAC)
-            sell, reason = True, (f"Trailing TP (peak +{round(peak_plpc,2)}% -> "
-                                  f"+{round(unrealized_plpc,2)}%, giveback {round(giveback,2)}%, "
-                                  f"net +{round(unrealized_plpc-ROUND_TRIP_FEE_PCT,2)}%)")
-        elif age_hours >= MAX_HOLD_HOURS and unrealized_plpc < 0:
-            # Only time-stop a DEAD bag: net-negative AND trend broken. Never a winner.
-            trend_3h = get_momentum_over(db_conn, symbol, TREND_3H_MIN, price_exchange=PRICE_EXCHANGE)
-            if trend_3h is not None and trend_3h < 0:
-                sell, reason = True, (f"Max-hold dead-bag exit ({round(age_hours,1)}h, "
-                                      f"{round(unrealized_plpc,2)}%, 3h trend {round(trend_3h,2)}%)")
-        elif (age_hours >= STALE_HOLD_HOURS
-              and ROUND_TRIP_FEE_PCT < unrealized_plpc < TRAIL_ARM_PCT):
-            # Opportunity-cost exit: a stalled, trend-broken bag that is barely
-            # green (net-positive after fees but never armed the trailing TP).
-            # Free the capital for a fresh setup — but only bank a *net win*, so
-            # this never becomes the flat/fee-loss churn that killed v1.
-            trend_3h = get_momentum_over(db_conn, symbol, TREND_3H_MIN, price_exchange=PRICE_EXCHANGE)
-            if trend_3h is not None and trend_3h < 0:
-                sell, reason = True, (f"Stale-winner exit ({round(age_hours,1)}h, "
-                                      f"net +{round(unrealized_plpc-ROUND_TRIP_FEE_PCT,2)}%, "
-                                      f"3h trend {round(trend_3h,2)}%)")
+        rpnl_today = realized_pnl_today_pct(
+            db_conn, exchange_name=EXCHANGE_NAME, round_trip_fee_pct=ROUND_TRIP_FEE_PCT)
+        effective_stop = compute_effective_stop(rng_6h, rpnl_today)
+        trend_3h = get_momentum_over(db_conn, symbol, TREND_3H_MIN, price_exchange=PRICE_EXCHANGE)
+        sell, reason = should_exit_pullback(
+            unrealized_plpc=unrealized_plpc,
+            peak_plpc=peak_plpc,
+            age_hours=age_hours,
+            effective_stop=effective_stop,
+            trend_3h=trend_3h,
+        )
+        if sell and "Hard stop" in reason and rng_6h is not None:
+            reason = f"{reason}, rng6h={round(rng_6h, 2)}%"
 
         pos_report = {"symbol": symbol, "unrealized_plpc": round(unrealized_plpc, 2),
                       "age_hours": round(age_hours, 2),
@@ -543,7 +357,7 @@ def run_cycle():
             try:
                 exchange.load_markets()
                 fqty = float(exchange.amount_to_precision(symbol, qty))
-                res = exchange.create_market_sell_order(symbol, fqty)
+                res = market_sell(exchange, symbol, fqty, current_price)
                 pos_report["action"] = "SELL"
                 managed_any = True
                 should_notify = True
@@ -578,14 +392,18 @@ def run_cycle():
     #    any further DB queries on risk gates / the entry scan. (Exits in step 2
     #    always run regardless, so a paused script can still cut losers.)
     # ---------------------------------------------------------------
-    gates = load_ai_gates()
-    if gates.get("script_paused"):
-        reason = gates.get("reason") or "no reason given"
-        print(f"AI GATE: script paused — {reason}", file=sys.stderr)
+    paused, gate_msg = check_gate(db_conn, daily_strategy)
+    if paused:
+        print(f"AI GATE: script paused — {gate_msg}", file=sys.stderr)
         report["action_taken"] = "SKIP"
-        report["details"] = f"AI gate paused: {reason}"
+        report["details"] = f"AI gate paused: {gate_msg}"
         finalize()
         return
+    elif gate_msg:
+        print(f"AI GATE auto-resumed: {gate_msg}", file=sys.stderr)
+        msg_lines.append(f"✅ **AI Gate**: {gate_msg}")
+        should_notify = True
+    gates = load_ai_gates()
     consulting = bool(gates.get("consult_on_entry"))
     if consulting:
         print(f"AI GATE: consult on entry active — throttling size & conviction "
@@ -676,10 +494,9 @@ def run_cycle():
     # ---------------------------------------------------------------
     held = {p["symbol"] for p in positions}
     now = datetime.now(timezone.utc)
-    candidates = []
-    # Daily strategy pair filter (Market Architect)
     _focus_syms = set(daily_strategy.get("focus_pairs", [])) if daily_strategy else set()
     _avoid_syms = set(daily_strategy.get("avoid_pairs", [])) if daily_strategy else set()
+    scan_pairs = []
     for sym in CRYPTO_PAIRS:
         if sym in held:
             continue
@@ -688,72 +505,23 @@ def run_cycle():
             continue
         if _focus_syms and _base not in _focus_syms:
             continue
-        ticker = tickers.get(sym)
-        if not ticker or ticker.get('last') is None:
-            continue
-        price = ticker['last']
-
-        # cooldown
         lx = last_exit_time(db_conn, sym, exchange_name=EXCHANGE_NAME)
         if lx is not None and (now - lx) < timedelta(minutes=COOLDOWN_MIN):
             continue
+        scan_pairs.append(sym)
 
-        # volatility floor — moves must be able to clear the fee
-        rng = get_range_pct(db_conn, sym, VOL_WINDOW_MIN, price_exchange=PRICE_EXCHANGE)
-        if rng is None or rng < VOL_FLOOR_PCT:
-            continue
-
-        # higher-timeframe uptrend
-        t3 = get_momentum_over(db_conn, sym, TREND_3H_MIN, price_exchange=PRICE_EXCHANGE)
-        t6 = get_momentum_over(db_conn, sym, TREND_6H_MIN, price_exchange=PRICE_EXCHANGE)
-        if t3 is None or t6 is None or t3 < TREND_3H_MIN_PCT or t6 <= 0:
-            continue
-
-        # anti blow-off top guard
-        h1 = get_one_hour_momentum(db_conn, sym)
-        if h1 is not None and h1 > BLOWOFF_GUARD_1H_PCT:
-            continue
-
-        # pullback: price must be at least PULLBACK_MIN_PCT below the 1h high
-        hi1h = get_recent_high(db_conn, sym, 60, price_exchange=PRICE_EXCHANGE)
-        if hi1h is None or hi1h <= 0:
-            continue
-        pullback = (hi1h - price) / hi1h * 100.0
-        if pullback < PULLBACK_MIN_PCT:
-            continue
-
-        # R:R gate: upside room to the 6h high must be >= RR_MIN × the stop
-        # distance this setup would use. Rejects setups with little headroom
-        # above where the stop sits (asymmetric risk).
-        hi6h = get_recent_high(db_conn, sym, 360, price_exchange=PRICE_EXCHANGE)
-        if hi6h is None or hi6h <= 0:
-            continue
-        room_pct = (hi6h - price) / price * 100.0
-        # R:R gate: in aggressive mode, just require price below 6h high
-        if _aggressive_mode:
-            if room_pct <= 0:
-                continue
-        else:
-            # Standard R:R check
-            stop_dist = min(MAX_HARD_STOP_PCT,
-                            max(MIN_HARD_STOP_PCT, 0.5 * (rng or MIN_HARD_STOP_PCT * 2)))
-            if room_pct < RR_MIN * stop_dist:
-                continue
-
-        # bounce gate: require price to be bouncing off lows,
-        # not still falling (rejects falling knives)
-        price_5m = get_momentum_over(db_conn, sym, 5, price_exchange=PRICE_EXCHANGE)
-        low15m = get_recent_low(db_conn, sym, 15, price_exchange=PRICE_EXCHANGE)
-        if (price_5m is not None and price_5m <= 0
-                and low15m is not None and float(price) <= low15m * 1.001):  # type: ignore[operator]
-            continue
-
-        # quality score: strong trend, deep-ish pullback, healthy vol — but not a blow-off
-        score = t3 + 0.5 * rng + pullback - max(0.0, (h1 or 0.0) - BLOWOFF_GUARD_1H_PCT)
-        candidates.append({"symbol": sym, "price": price, "t3": t3, "t6": t6,
-                           "rng": rng, "pullback": pullback, "h1": h1, "score": score})
-
-    candidates.sort(key=lambda c: c["score"], reverse=True)
+    candidates = scan_pullback_candidates(
+        db_conn,
+        scan_pairs,
+        tickers,
+        aggressive_mode=_aggressive_mode,
+        price_exchange=PRICE_EXCHANGE,
+        get_range_pct=get_range_pct,
+        get_momentum_over=get_momentum_over,
+        get_one_hour_momentum=get_one_hour_momentum,
+        get_recent_high=get_recent_high,
+        get_recent_low=get_recent_low,
+    )
     # Trim candidate list before selection (not just for reporting)
     candidates = candidates[:_candidate_limit] if _candidate_limit < len(candidates) else candidates
     report["scanned_assets"] = [
@@ -949,9 +717,16 @@ def run_cycle():
         return
     momentum_desc = (f"PULLBACK_IN_UPTREND (3h +{round(best['t3'],2)}%, "
                      f"dip -{round(best['pullback'],2)}%, vol {round(best['rng'],2)}%)")
+    ok_spread, sp = spread_ok(exchange, symbol, PB.MAX_SPREAD_PCT)
+    if not ok_spread:
+        report["action_taken"] = "SKIP"
+        report["details"] = f"Spread too wide ({round(sp, 3)}% > {PB.MAX_SPREAD_PCT}%)."
+        finalize()
+        return
+
     try:
         fqty = float(exchange.amount_to_precision(symbol, qty))
-        res = exchange.create_market_buy_order(symbol, fqty)
+        res = market_buy(exchange, symbol, fqty, current_price)
         # Use the ACTUAL average fill price/qty — market orders slip, and the
         # ticker price would otherwise corrupt every downstream PnL/stop calc.
         fill_price, fill_qty = extract_fill(res, current_price)

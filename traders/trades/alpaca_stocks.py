@@ -16,52 +16,24 @@ import json
 import fcntl
 import requests
 from datetime import datetime, timezone, timedelta
-from dotenv import load_dotenv
 
-# db_prices lives in traders/extreme/ — add it to the import path so this
-# script works when invoked from traders/trades/.
+from traders.common import bootstrap  # noqa: F401
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "extreme"))
 from db_prices import (
-                       DEBUG,get_connection, close_connection,
+                       DEBUG, get_connection, close_connection,
                        load_trading_state, save_trading_state,
                        load_notify_state, save_notify_state as db_save_notify_state,
                        log_trade as db_log_trade)
+from traders.common.config import (
+    ALPACA_BASE_URL, ALPACA_DATA_URL, DRY_RUN, ROOT_DIR, ensure_log_dir,
+)
+from traders.common.gates import check_gate, load_ai_gates
+from traders.common.strategy import load_daily_strategy as _load_daily_strategy
 
-# Load environment variables
-ROOT_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "../.."))
-env_path = os.path.join(ROOT_DIR, ".env")
-load_dotenv(dotenv_path=env_path)
-
-# --- Daily Strategy Integration ---
-DAILY_STRATEGY_PATH = os.path.join(ROOT_DIR, "daily_strategy.json")
-
-def load_daily_strategy():
-    """Load Market Architect's daily strategy, or None if unavailable/stale."""
-    try:
-        if os.path.exists(DAILY_STRATEGY_PATH):
-            with open(DAILY_STRATEGY_PATH) as f:
-                data = json.load(f)
-            # Check staleness (allow yesterday for 00:00-06:30 window)
-            try:
-                import pytz
-                athens_tz = pytz.timezone('Europe/Athens')
-                today = datetime.now(athens_tz).strftime('%Y-%m-%d')
-                yesterday = (datetime.now(athens_tz) - timedelta(days=1)).strftime('%Y-%m-%d')
-                date_str = data.get("date", "")
-                if date_str not in (today, yesterday):
-                    print(f"⚠️ Daily strategy stale (date={date_str}), ignoring", file=sys.stderr)
-                    return None
-            except ImportError:
-                pass  # pytz not available, accept strategy as-is
-            return data
-    except (json.JSONDecodeError, IOError) as e:
-        print(f"⚠️ Could not load daily strategy: {e}", file=sys.stderr)
-    return None
+ensure_log_dir()
 
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
-ALPACA_BASE_URL = "https://api.alpaca.markets"
-ALPACA_DATA_URL = "https://data.alpaca.markets"
 
 for _k in ["ALPACA_API_KEY", "ALPACA_SECRET_KEY"]:
     if not os.environ.get(_k):
@@ -77,6 +49,14 @@ headers = {
 
 # US stock universe
 STOCK_SYMBOLS = ["NVDA", "PLTR", "TSLA", "AMD", "GOOGL", "META", "AAPL", "MSFT", "AMZN", "AVGO"]
+POOL_BASES = set(STOCK_SYMBOLS)
+
+
+def load_daily_strategy():
+    return _load_daily_strategy(
+        pool_bases=POOL_BASES,
+        pair_suffix="",
+    )
 
 # Stock commissions are effectively ~0.005% per side (mostly $0 + tiny SEC/TAF
 # fees) => ~0.01% round-trip. Stocks do NOT carry the ~0.5% crypto fee.
@@ -108,20 +88,6 @@ EXCHANGE_NAME = "alpaca-stocks"
 # Overlapping crons would double entries and race trading_state. A single flock
 # makes any second concurrent run exit.
 LOCK_FILE = os.path.join(ROOT_DIR, "logs/alpaca_stocks.lock")
-
-# --- AI Gates ---------------------------------------------------------------
-AI_GATE_PATH = os.path.join(ROOT_DIR, "ai_overseer/ai_gate.json")
-
-
-def load_ai_gates():
-    """Read AI gate conditions set by ai_overseer. Returns dict with defaults."""
-    default = {"script_paused": False, "reason": None}
-    try:
-        with open(AI_GATE_PATH) as f:
-            return {**default, **json.load(f)}
-    except Exception:
-        return default
-
 
 def log_trade(db_conn, action, ticker, signal_strength, momentum_pct, entry_price,
               current_price, unrealized_plpc, order_id, client_order_id, quantity,
@@ -309,8 +275,15 @@ def run_cycle():
             # Stock orders can only fill while the market is open.
             if market_open:
                 close_url = f"{ALPACA_BASE_URL}/v2/positions/{symbol}"
-                close_res = requests.delete(close_url, headers=headers, timeout=10)
-                if close_res.status_code in [200, 201, 204]:
+                if DRY_RUN:
+                    print(f"DRY_RUN: SELL {symbol}", file=sys.stderr)
+                    close_status = 204
+                    close_body = {}
+                else:
+                    close_res = requests.delete(close_url, headers=headers, timeout=10)
+                    close_status = close_res.status_code
+                    close_body = close_res.json() if close_res.text else {}
+                if close_status in [200, 201, 204]:
                     pos_report["action"] = "SELL"
                     pos_report["reason"] = sell_reason
                     managed_any = True
@@ -324,7 +297,7 @@ def run_cycle():
                         entry_price=entry_price,
                         current_price=current_price,
                         unrealized_plpc=float(pos["unrealized_plpc"]),
-                        order_id=close_res.json().get("id") if close_res.text else None,
+                        order_id=close_body.get("id") if close_body else None,
                         client_order_id=None,
                         quantity=qty,
                         estimated_value_usd=qty * current_price,
@@ -361,13 +334,17 @@ def run_cycle():
     # AI gate FIRST — if the overseer paused entries, skip them. Exits in step 4
     # always run regardless, so a paused script can still cut losers.
     skip_buying = False
-    gates = load_ai_gates()
-    if gates.get("script_paused"):
-        reason = gates.get("reason") or "no reason given"
-        print(f"AI GATE: script paused — {reason}", file=sys.stderr)
+    daily_strategy = load_daily_strategy()
+    paused, gate_msg = check_gate(db_conn, daily_strategy)
+    if paused:
+        print(f"AI GATE: script paused — {gate_msg}", file=sys.stderr)
         report["action_taken"] = "SKIP"
-        report["details"] = f"AI gate paused: {reason}"
+        report["details"] = f"AI gate paused: {gate_msg}"
         skip_buying = True
+    elif gate_msg:
+        print(f"AI GATE auto-resumed: {gate_msg}", file=sys.stderr)
+        msg_lines.append(f"✅ **AI Gate**: {gate_msg}")
+        should_notify = True
     elif not market_open:
         report["action_taken"] = "SKIP"
         report["details"] = "Market closed — entries only fire during market hours."
@@ -384,9 +361,6 @@ def run_cycle():
         report["action_taken"] = "SKIP"
         report["details"] = f"Daily entry cap reached ({MAX_TRADES_PER_DAY}/day)."
         skip_buying = True
-
-    # Load daily strategy (used for filters and logging)
-    daily_strategy = load_daily_strategy()
 
     if not skip_buying:
         # Daily strategy filters
@@ -542,9 +516,16 @@ def run_cycle():
                 }
 
                 order_url = f"{ALPACA_BASE_URL}/v2/orders"
-                order_res = requests.post(order_url, headers=headers, json=order_data, timeout=10)
+                if DRY_RUN:
+                    print(f"DRY_RUN: BUY {symbol} ${round(order_size_usd, 2)}", file=sys.stderr)
+                    order = {"id": f"dry-run-{client_order_id}", "status": "filled"}
+                    order_res_status = 201
+                else:
+                    order_res = requests.post(order_url, headers=headers, json=order_data, timeout=10)
+                    order_res_status = order_res.status_code
+                    order = order_res.json() if order_res_status in (200, 201) else {}
 
-                if order_res.status_code in [200, 201]:
+                if order_res_status in [200, 201]:
                     order = order_res.json()
                     report["action_taken"] = "BUY"
                     report["details"] = f"Successfully placed buy order for {symbol} of amount ${round(order_size_usd, 2)}."
@@ -585,7 +566,8 @@ def run_cycle():
                     )
                 else:
                     report["action_taken"] = "BUY_FAILED"
-                    report["details"] = f"Failed to place buy order for {symbol}: {order_res.text}"
+                    err = order_res.text if not DRY_RUN else "dry-run failed"
+                    report["details"] = f"Failed to place buy order for {symbol}: {err}"
             else:
                 report["action_taken"] = "SKIP"
                 report["details"] = "Order size too small."
