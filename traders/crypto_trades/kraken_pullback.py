@@ -21,13 +21,17 @@ Kraken plumbing, same "Kraken is the sole price writer" responsibility.
 
 import os
 import sys
+
+# Cron runs with arbitrary cwd — repo root must be on sys.path before traders imports.
+_REPO_ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "../.."))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import json
 import uuid
 import fcntl
 import ccxt
 from datetime import datetime, timezone, timedelta
-
-from traders.common import bootstrap  # noqa: F401 — adds repo root to sys.path
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "extreme"))
 from db_prices import (
                        DEBUG, get_connection, insert_prices, get_one_hour_momentum,

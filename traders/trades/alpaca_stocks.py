@@ -12,12 +12,15 @@ Adapted from the crypto momentum script (execute_cycle.py):
 
 import os
 import sys
+
+_REPO_ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "../.."))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import json
 import fcntl
 import requests
 from datetime import datetime, timezone, timedelta
-
-from traders.common import bootstrap  # noqa: F401
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "extreme"))
 from db_prices import (
                        DEBUG, get_connection, close_connection,

@@ -8,6 +8,11 @@ Runs alongside the 5-min execute_kraken_cycle_v2.py cycle.
 """
 import os
 import sys
+
+_REPO_ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "../.."))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import json
 import re
 import ast
@@ -18,8 +23,6 @@ import ccxt
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from openai import OpenAI
-
-from traders.common import bootstrap  # noqa: F401
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "crypto_trades"))
 from file_lock import (with_file_lock, atomic_write_text, atomic_write_json,
                        load_json_with_defaults)

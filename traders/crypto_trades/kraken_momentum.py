@@ -18,14 +18,17 @@ Each strategy has its own lock file so a */5 cron overlap can't double-fire.
 
 import os
 import sys
+
+_REPO_ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "../.."))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import json
 import uuid
 import time
 import fcntl
 import ccxt
 from datetime import datetime, timezone, timedelta
-
-from traders.common import bootstrap  # noqa: F401
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "extreme"))
 from db_prices import (
                        DEBUG, get_connection, insert_prices, get_one_hour_momentum,
