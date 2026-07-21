@@ -45,10 +45,6 @@ from db_prices import (
 from traders.common.config import DRY_RUN, ROOT_DIR, ensure_log_dir
 from traders.common.exchange import extract_fill, market_buy, market_sell, spread_ok
 from traders.common.gates import check_gate, load_ai_gates
-from traders.common.pending_review import (
-    load_pending_review, submit_candidate as _submit_candidate, write_pending_review,
-)
-from traders.common.strategy import load_daily_strategy as _load_daily_strategy
 from traders.strategies.pullback import config as PB
 from traders.strategies.pullback.exits import compute_effective_stop, should_exit_pullback
 from traders.strategies.pullback.signals import scan_pullback_candidates
@@ -71,6 +67,10 @@ exchange = ccxt.kraken({
 })
 
 EXCHANGE_NAME = PB.EXCHANGE_NAME
+
+# Paper mode: prefix exchange name so paper trades are recorded separately
+if os.environ.get("AITRADER_MODE") == "paper":
+    EXCHANGE_NAME = f"paper-{EXCHANGE_NAME}"
 PRICE_EXCHANGE = PB.PRICE_EXCHANGE
 CRYPTO_PAIRS = PB.CRYPTO_PAIRS
 ROUND_TRIP_FEE_PCT = PB.ROUND_TRIP_FEE_PCT
@@ -87,9 +87,8 @@ TRAIL_ARM_PCT = PB.TRAIL_ARM_PCT
 TRAIL_GIVEBACK_FRAC = PB.TRAIL_GIVEBACK_FRAC
 TRAIL_GIVEBACK_MIN_PCT = PB.TRAIL_GIVEBACK_MIN_PCT
 HARD_TP_CAP_PCT = PB.HARD_TP_CAP_PCT
-MAX_HOLD_HOURS = PB.MAX_HOLD_HOURS
 STALE_HOLD_HOURS = PB.STALE_HOLD_HOURS
-DEPLOY_FRACTION = PB.DEPLOY_FRACTION
+DEPLOY_FRACTION = 0.12
 RISK_PER_TRADE_PCT = PB.RISK_PER_TRADE_PCT
 CONSULT_DEPLOY_FRACTION = PB.CONSULT_DEPLOY_FRACTION
 CONSULT_MIN_SCORE = PB.CONSULT_MIN_SCORE
@@ -101,16 +100,6 @@ LOCK_FILE = PB.LOCK_FILE
 COOLDOWN_MIN = PB.COOLDOWN_MIN
 MAX_TRADES_PER_DAY = PB.MAX_TRADES_PER_DAY
 DAILY_LOSS_BREAKER_PCT = PB.DAILY_LOSS_BREAKER_PCT
-PENDING_REVIEW_TIMEOUT_MIN = 120
-
-
-def load_daily_strategy():
-    return _load_daily_strategy(
-        pool_bases=PB.POOL_BASES,
-        adjustment_key="pullback_adjustment",
-        valid_adjustments=("normal", "aggressive", "cautious", "skip"),
-        default_adjustment="normal",
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -159,14 +148,10 @@ def get_entry_price_and_time(symbol, current_price):
 # Main cycle
 # ---------------------------------------------------------------------------
 def run_cycle():
-    # H3: Load strategy once per cycle and pass through
-    daily_strategy = load_daily_strategy()
-    
     report = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "status": "success",
         "strategy": "pullback-in-uptrend",
-        "strategy_missing": daily_strategy is None,
         "positions_managed": [],
         "scanned_assets": [],
         "action_taken": "NONE",
@@ -189,26 +174,6 @@ def run_cycle():
 
         if is_error:
             print(f"❌ Kraken pullback: {report.get('details', 'unknown error')}")
-        elif report.get("strategy_missing"):
-            # Throttled: only print once per hour to avoid 5-min spam
-            _throttle_file = os.path.join(ROOT_DIR, "logs/kraken_pullback_strategy_warn.txt")
-            _now = datetime.now(timezone.utc).timestamp()
-            _should_warn = True
-            try:
-                with open(_throttle_file) as _tf:
-                    _last_warn = float(_tf.read().strip())
-                    if _now - _last_warn < 3600:
-                        _should_warn = False
-            except (FileNotFoundError, ValueError):
-                pass
-            if _should_warn:
-                print(f"⚠️ **Kraken pullback**: Daily strategy missing or stale — running fallback config.")
-                try:
-                    with open(_throttle_file, "w") as _tf:
-                        _tf.write(str(_now))
-                except Exception:
-                    pass
-                should_notify = True
         elif has_trade:
             # Just the one trade line
             for line in msg_lines:
@@ -396,7 +361,7 @@ def run_cycle():
     #    any further DB queries on risk gates / the entry scan. (Exits in step 2
     #    always run regardless, so a paused script can still cut losers.)
     # ---------------------------------------------------------------
-    paused, gate_msg = check_gate(db_conn, daily_strategy)
+    paused, gate_msg = check_gate(db_conn)
     if paused:
         print(f"AI GATE: script paused — {gate_msg}", file=sys.stderr)
         report["action_taken"] = "SKIP"
@@ -416,38 +381,20 @@ def run_cycle():
     # ---------------------------------------------------------------
     # 4. Risk gates before any buy
     # ---------------------------------------------------------------
-    # First, process daily strategy adjustments so cautious/aggressive can
-    # influence the subsequent position/trade cap checks.
     _aggressive_mode = False
-    _cautious_mode = False
     _risk_mult = 1.0
     _stop_cap_mult = 1.0
     _candidate_limit = 8  # default report limit
 
-    if daily_strategy:
-        adj = daily_strategy.get("pullback_adjustment", "aggressive")
-        btc_regime = daily_strategy.get("btc_regime", "neutral")
-        if adj == "normal" and btc_regime in ("below", "bearish"):
-            adj = "cautious"
-            print("INFO: btc_regime=below/bearish overrode pullback_adjustment to cautious", file=sys.stderr)
-        elif adj == "normal" and btc_regime in ("above", "bullish"):
-            adj = "aggressive"
-            print("INFO: btc_regime=above/bullish overrode pullback_adjustment to aggressive", file=sys.stderr)
-        if adj == "skip":
-            skip, skip_reason = True, "Market Architect: skip pullback entries today"
-            should_notify = True
-            msg_lines.append("📋 **Market Architect**: pullback entries skipped today")
-        elif adj == "cautious":
-            should_notify = True
-            msg_lines.append("📋 **Market Architect**: pullback entries — CAUTIOUS mode")
-            _cautious_mode = True
-            _risk_mult = 0.5
-            _stop_cap_mult = 0.5
-            _candidate_limit = 3
-        elif adj == "aggressive":
+    # If AI Overseer is not live (paper/paused), skip AI per-trade review.
+    # Pullback buys directly instead of waiting up to 60 min for approval.
+    try:
+        import aitrader_registry as _orch_reg
+        _ov_mode = _orch_reg.get_mode("ai-overseer")
+        if _ov_mode != "live":
             _aggressive_mode = True
-            msg_lines.append("📋 **Market Architect**: pullback entries — AGGRESSIVE mode")
-            should_notify = True
+    except Exception:
+        pass  # registry not available, use strategy mode as-is
 
     # Now evaluate position/trade caps with mode adjustments applied
     max_open = MAX_OPEN_LARGE if portfolio_value >= EQUITY_TWO_POS else MAX_OPEN_SMALL
@@ -461,31 +408,12 @@ def run_cycle():
     elif not skip and trades_today(db_conn, exchange_name=EXCHANGE_NAME) >= MAX_TRADES_PER_DAY:
         skip, skip_reason = True, f"Daily trade cap reached ({MAX_TRADES_PER_DAY})."
     else:
-        # Shared daily buy limit across all kraken strategies (with advisory lock)
-        # Only applies when Market Architect provides a daily strategy file
-        if daily_strategy and not skip:
-            with db_conn.cursor() as _cur:
-                # PostgreSQL advisory lock serializes the check-act across both processes
-                lock_key = 840271  # fixed shared key for max_daily_buys serialization
-                # NOTE: pg_advisory_xact_lock is txn-scoped. No COMMIT must occur between
-                # this lock acquisition and the BUY log insert, or mutual exclusion breaks.
-                _cur.execute("SELECT pg_advisory_xact_lock(%s)", (lock_key,))
-                _cur.execute(
-                    "SELECT COUNT(*) FROM trade_log "
-                    "WHERE exchange LIKE 'kraken%%' AND action='BUY' "
-                    "AND DATE(timestamp AT TIME ZONE 'UTC') = "
-                    "DATE(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')")
-                shared_count = _cur.fetchone()
-            max_buys = int(daily_strategy.get("max_daily_buys", 1))
-            if shared_count and int(shared_count[0]) >= max_buys:
-                skip, skip_reason = True, f"Market Architect: max_daily_buys ({max_buys}) reached"
-        if not skip:
-            rpnl = realized_pnl_today_pct(db_conn, exchange_name=EXCHANGE_NAME, round_trip_fee_pct=ROUND_TRIP_FEE_PCT)
-            if rpnl <= DAILY_LOSS_BREAKER_PCT:
-                skip, skip_reason = True, f"Daily loss breaker tripped ({round(rpnl,2)}% <= {DAILY_LOSS_BREAKER_PCT}%)."
-                should_notify = True
-                msg_lines.append(f"🚨 **Kraken pullback daily loss breaker**: {round(rpnl,2)}% "
-                                 f"today — entries halted until 00:00 UTC.")
+        rpnl = realized_pnl_today_pct(db_conn, exchange_name=EXCHANGE_NAME, round_trip_fee_pct=ROUND_TRIP_FEE_PCT)
+        if rpnl <= DAILY_LOSS_BREAKER_PCT:
+            skip, skip_reason = True, f"Daily loss breaker tripped ({round(rpnl,2)}% <= {DAILY_LOSS_BREAKER_PCT}%)."
+            should_notify = True
+            msg_lines.append(f"🚨 **Kraken pullback daily loss breaker**: {round(rpnl,2)}% "
+                             f"today — entries halted until 00:00 UTC.")
 
     if skip:
         report["action_taken"] = "SKIP"
@@ -498,16 +426,9 @@ def run_cycle():
     # ---------------------------------------------------------------
     held = {p["symbol"] for p in positions}
     now = datetime.now(timezone.utc)
-    _focus_syms = set(daily_strategy.get("focus_pairs", [])) if daily_strategy else set()
-    _avoid_syms = set(daily_strategy.get("avoid_pairs", [])) if daily_strategy else set()
     scan_pairs = []
     for sym in CRYPTO_PAIRS:
         if sym in held:
-            continue
-        _base = base_symbol(sym)
-        if _avoid_syms and _base in _avoid_syms:
-            continue
-        if _focus_syms and _base not in _focus_syms:
             continue
         lx = last_exit_time(db_conn, sym, exchange_name=EXCHANGE_NAME)
         if lx is not None and (now - lx) < timedelta(minutes=COOLDOWN_MIN):
@@ -552,141 +473,52 @@ def run_cycle():
         return
 
     # ---------------------------------------------------------------
-    # AI PER-TRADE REVIEW — every buy must be AI-approved first
+    # AI PER-TRADE REVIEW — synchronous LLM call, no Overseer needed
     # (skipped in aggressive mode — buy directly)
     # ---------------------------------------------------------------
-    now_utc = datetime.now(timezone.utc)
     if _aggressive_mode:
         execute_approved = True
-        pending = {}
     else:
-        execute_approved = False  # set True when AI approved a buy and we're executing
-        pending = load_pending_review()
+        from traders.common.llm_review import review_trade
 
-    # Process existing verdict for THIS bot
-    if pending.get("status") == "approved" and pending.get("bot") == EXCHANGE_NAME:
-        # AI approved our pending candidate — execute the buy on this tick
-        approved_symbol = pending["symbol"]
-        # Check that the symbol is still valid
-        if approved_symbol not in [c["symbol"] for c in candidates]:
-            report["details"] = (f"AI approved {approved_symbol} but it's no longer "
-                                 f"a candidate — re-submitting {symbol}.")
-            clear_pending_review()
-            execute_approved = False
-        else:
-            symbol = approved_symbol
-            best = next(c for c in candidates if c["symbol"] == approved_symbol)
-            current_price = best["price"]
-            # Price deviation guard
-            recorded = pending.get("price")
-            ai_price = float(recorded) if recorded is not None and float(recorded) > 0 else current_price
-            deviation = abs(current_price - ai_price) / ai_price * 100 if ai_price > 0 else 0.0
-            if deviation > 2.0:
-                clear_pending_review()
-                report["details"] = (f"AI approved {approved_symbol} at €{ai_price:.2f} but "
-                                     f"price moved {deviation:.1f}% (now €{current_price:.2f}) — skipping.")
-                finalize()
-                return
-            clear_pending_review()
-            execute_approved = True  # skip re-submit, proceed to buy
-
-    elif pending.get("status") == "rejected" and pending.get("bot") == EXCHANGE_NAME:
-        # AI said no — clear and report
-        reason = pending.get("verdict_reason", "No reason given")
-        clear_pending_review()
-        report["action_taken"] = "SKIP"
-        report["details"] = f"AI rejected {pending['symbol']}: {reason}"
-        msg_lines.append(f"❌ AI απέρριψε {pending['symbol']}: {reason}")
-        should_notify = True
-        finalize()
-        return
-
-    elif pending.get("status") == "pending" and pending.get("bot") != EXCHANGE_NAME:
-        # Another bot has a pending review — skip this tick
-        # But if it's stale (>120min), clear it so we can proceed
-        stale = False
-        if pending.get("created_at"):
-            created = datetime.fromisoformat(pending["created_at"].replace("Z", "+00:00"))
-            age = (now_utc - created).total_seconds() / 60.0
-            if age > PENDING_REVIEW_TIMEOUT_MIN:
-                print(f"Other bot's pending review stale ({round(age)} min) — clearing.",
-                      file=sys.stderr)
-                clear_pending_review()
-                stale = True
-        if not stale:
-            report["action_taken"] = "SKIP"
-            report["details"] = (f"Other bot ({pending.get('bot')}) has a pending review — "
-                                 f"will re-check next tick.")
-            finalize()
-            return
-
-    elif pending.get("status") == "pending" and pending.get("bot") == EXCHANGE_NAME:
-        # Our own review is in progress — still waiting for AI
-        # Drop stale pending (AI might have crashed / never reviewed)
-        if pending.get("created_at"):
-            created = datetime.fromisoformat(pending["created_at"].replace("Z", "+00:00"))
-            age = (now_utc - created).total_seconds() / 60.0
-            if age > PENDING_REVIEW_TIMEOUT_MIN:
-                print(f"Stale pending review ({round(age)} min) — clearing.", file=sys.stderr)
-                clear_pending_review()
-            else:
-                report["action_taken"] = "SKIP"
-                report["details"] = (f"Waiting for AI review of {pending['symbol']} "
-                                     f"({round(age)} min old)")
-                finalize()
-                return
-        else:
-            report["action_taken"] = "SKIP"
-            report["details"] = f"Pending review active for {pending.get('symbol', '?')} — waiting"
-            finalize()
-            return
-
-    # No pending review for this bot — submit the best candidate to AI
-    # (unless the AI already approved a buy — skip to sizing/execution)
-    if not execute_approved:
-        pending = load_pending_review()  # reload in case we cleared stale above
-        if pending.get("status") is not None or pending.get("bot") is not None:
-            # Another bot's verdict or stale state exists — don't overwrite
-            report["action_taken"] = "SKIP"
-            report["details"] = (f"Pending state exists ({pending.get('status', '?')} "
-                                 f"bot={pending.get('bot', '?')}) — not overwriting.")
-            finalize()
-            return
-        pending_data = {
-            "bot": EXCHANGE_NAME,
-            "symbol": symbol,
-            "price": current_price,
-            "score": round(best["score"], 4),
-            "signals": {
-                "t3": round(best["t3"], 4) if best.get("t3") is not None else None,
-                "t6": round(best["t6"], 4) if best.get("t6") is not None else None,
-                "rng": round(best["rng"], 4) if best.get("rng") is not None else None,
-                "pullback": round(best["pullback"], 4) if best.get("pullback") is not None else None,
-                "h1": round(best["h1"], 4) if best.get("h1") is not None else None,
-            },
-            "momentum_desc": (f"3h +{round(best['t3'],2) if best.get('t3') else 0}%, "
-                              f"pullback -{round(best['pullback'],2) if best.get('pullback') else 0}%"),
-            "created_at": now_utc.isoformat(),
-            "candidate_id": str(uuid.uuid4()),
-            "status": "pending",
-            "verdict": None,
-            "verdict_reason": None,
-            "reviewed_at": None,
+        _sig = {
+            "t3": round(best.get("t3", 0) or 0, 3),
+            "t6": round(best.get("t6", 0) or 0, 3),
+            "rng": round(best.get("rng", 0) or 0, 3),
+            "pullback": round(best.get("pullback", 0) or 0, 3),
+            "h1": round(best.get("h1", 0) or 0, 3),
+            "score": round(best.get("score", 0) or 0, 3),
         }
-        submitted = _submit_candidate(pending_data)
-        if submitted:
-            report["action_taken"] = "PENDING_AI_REVIEW"
-            report["details"] = (f"Candidate {symbol} (score {round(best['score'],2)}) "
-                                 f"submitted for AI review.")
-            msg_lines.append(f"🤔 **{symbol} (Kraken pullback)** σε αναμονή AI αξιολόγησης "
-                             f"(score {round(best['score'],1)})")
+        try:
+            result = review_trade(
+                symbol=symbol,
+                strategy="pullback",
+                signals=_sig,
+                price=current_price,
+                score=best.get("score", 0) or 0,
+                portfolio_euro=portfolio_value,
+                available_euro=cash_eur,
+                open_positions=len(positions),
+                db_conn=db_conn,
+            )
+        except Exception as e:
+            # LLM unavailable — fall back to aggressive (buy directly)
+            print(f"LLM review failed: {e} — buying directly", file=sys.stderr)
+            result = {"verdict": "APPROVE", "reason": f"LLM unavailable: {e}", "confidence": 0}
+
+        if result["verdict"] == "APPROVE":
+            execute_approved = True
             should_notify = True
+            msg_lines.append(
+                f"✅ LLM ενέκρινε {symbol} (conf {result['confidence']}/10): {result['reason']}"
+            )
         else:
             report["action_taken"] = "SKIP"
-            report["details"] = (f"Other bot submitted first — "
-                                 f"will check again next cycle.")
-        finalize()
-        return
+            report["details"] = f"LLM rejected {symbol}: {result['reason']}"
+            msg_lines.append(f"❌ LLM απέρριψε {symbol}: {result['reason']}")
+            should_notify = True
+            finalize()
+            return
 
     # Sizing: one concentrated, well-chosen trade. Start from ~97% of cash
     # (halved when the AI asked us to consult), then apply a volatility-adjusted
@@ -770,6 +602,11 @@ def run_cycle():
 
 
 def main():
+    # ── Orchestrator integration ──────────────────────────────────────
+    import aitrader_registry as orch
+    orch.mark_started(EXCHANGE_NAME.replace("paper-", "").replace("kraken-pullback", "kraken-pullback"))
+    # ──────────────────────────────────────────────────────────────────
+
     # Single-instance lock: a second */5 job (or a slow overrun) that overlaps
     # this run would double orders and race trading_state. Bail out if held.
     lock_fp = open(LOCK_FILE, "w")
@@ -794,6 +631,12 @@ def main():
             lock_fp.close()
         except Exception:
             pass
+
+    # ── Orchestrator: schedule next run ──────────────────────────────
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    _ath = _tz(_td(hours=3))
+    _next = (_dt.now(_ath) + _td(minutes=5)).isoformat()
+    orch.mark_done("kraken-pullback", _next)
 
 
 if __name__ == "__main__":

@@ -1,78 +1,107 @@
 # AITrader
 
-Multi-strategy automated trading system for Kraken crypto and Alpaca US stocks, with an AI overseer layer for risk gating and daily regime guidance.
+Multi-strategy automated trading system — **Kraken crypto** + **Alpaca US stocks**, with LLM-evaluated entries and exits.
+
+## Architecture
+
+```
+aitrader_orchestrator.py         ← cron every 1m, reads JSON registry
+├─ kraken_pullback.py            LIVE   every 5m   ← pullback entries
+├─ kraken_momentum.py            PAPER  every 5m   ← momentum entries
+├─ position_monitor.py           LIVE   every 2h   ← sells stale positions
+└─ alpaca_stocks.py              LIVE   every 5m   ← stock momentum
+```
+
+Every buy/sell is evaluated by a local LLM (`traders/common/llm_review.py`) that gets:
+- **Price context**: 1h/6h/24h change, BTC price, 24h range (from `asset_prices` DB)
+- **News headlines**: 3 latest headlines from DuckDuckGo (4s timeout)
+- **Signal scores**: strategy-specific scoring from candidate analysis
+
+All decisions logged to `llm_review_log` table for retrospective accuracy analysis.
 
 ## Quick start
 
 ```bash
-cp .env.example .env   # fill in credentials
-pip install -e ".[dev]"
-make test
+cd /home/pank/projects/aitrader
+source .venv/bin/activate
+
+# Check status
+python3 -c "import json; d=json.load(open('aitrader_orchestrator.json')); [print(f'{k:20s} {v[\"mode\"]:6s} {v[\"status\"]}') for k,v in d['scripts'].items()]"
+
+# Run orchestrator manually
+python3 aitrader_orchestrator.py
+
+# Test LLM review
+python3 traders/common/llm_review.py --symbol AVAX/EUR --strategy pullback --score 4.5 --price 5.82
 ```
 
-## Trading bots
+## Script modes
 
-| Script | Exchange | Schedule (typical) |
-|--------|----------|-------------------|
-| `traders/crypto_trades/kraken_pullback.py` | Kraken | Every 5 min |
-| `traders/crypto_trades/kraken_momentum.py` | Kraken | Every 5 min |
-| `traders/trades/alpaca_stocks.py` | Alpaca | Every 5 min (market hours) |
-| `traders/extreme/ai_overseer.py` | Kraken + AI | Hourly |
+| Mode | Orders | DB logging |
+|------|--------|-----------|
+| `live` | Real exchange API | Real trades |
+| `paper` | Simulated fills | `paper-` prefix |
+| `paused` | Skipped entirely | — |
 
-Both Kraken bots share one EUR wallet. Each uses its own lock file and `trading_state` namespace.
+Edit `aitrader_orchestrator.json` to change modes.
 
-## Safety modes
+## Database tables
 
-| Env var | Effect |
-|---------|--------|
-| `DRY_RUN=true` | Log orders, do not submit to exchanges |
-| `ALPACA_PAPER=true` | Route Alpaca API to paper trading |
-| `DEBUG=true` | Propagate exceptions instead of swallowing |
-
-## Operations
-
-```bash
-make health          # DB + exchange heartbeat check
-make pnl             # P&L attribution from trade_log
-python3 traders/extreme/system_health_check.py
-```
-
-### Cron example
-
-```cron
-*/5 * * * * cd /path/to/aitrader && python3 traders/crypto_trades/kraken_pullback.py
-*/5 * * * * cd /path/to/aitrader && python3 traders/crypto_trades/kraken_momentum.py
-*/5 * * * * cd /path/to/aitrader && python3 traders/trades/alpaca_stocks.py
-0 * * * *   cd /path/to/aitrader && python3 traders/extreme/ai_overseer.py
-```
-
-### Kill switch
-
-Pause all entries by writing `ai_overseer/ai_gate.json`:
-
-```json
-{"script_paused": true, "reason": "manual halt", "consult_on_entry": false}
-```
-
-Exits still run. Resume by setting `script_paused` to `false` or letting auto-resume clear a BTC-recovery pause.
+| Table | Purpose |
+|-------|---------|
+| `trade_log` | Every executed trade |
+| `llm_review_log` | Every LLM evaluation (APPROVE/REJECT/SELL/HOLD) |
+| `trading_state` | Open position tracking |
+| `asset_prices` | 5-min price snapshots (Kraken) |
 
 ## Project layout
 
 ```
-traders/
-  common/           # Shared gates, locks, strategy loader, exchange helpers
-  strategies/     # Config, signals, exits per strategy
-  crypto_trades/  # Kraken bot runners
-  trades/         # Alpaca bot runner
-  extreme/        # AI overseer, db_prices, health check
-research/archive/ # Historical backtest scratch files
-tests/            # pytest suite
+aitrader/
+├── aitrader_orchestrator.py     # Main daemon
+├── aitrader_orchestrator.json   # Script registry
+├── aitrader_registry.py         # Atomic JSON state
+├── position_monitor.py          # Position sell/hold monitor
+│
+├── traders/
+│   ├── common/
+│   │   ├── llm_review.py        # Sync LLM evaluation
+│   │   ├── exchange.py          # Order routing (live/paper)
+│   │   ├── gates.py             # Safety gates (BTC drawdown)
+
+│   ├── crypto_trades/
+│   │   ├── kraken_pullback.py   # Pullback entries
+│   │   └── kraken_momentum.py   # Momentum entries
+│   ├── trades/
+│   │   └── alpaca_stocks.py     # Stock momentum
+│   ├── strategies/
+│   │   ├── pullback/            # Config, signals, exits
+│   │   └── momentum/            # Config, exits
+│   └── extreme/
+│       └── db_prices.py         # Price data queries
+│
+└── tests/
 ```
 
-## Research
+## Operations
 
 ```bash
-make backtest      # Pullback filter simulation with fee/slippage model
+# View recent LLM rejections
+python3 -c "
+import os; from dotenv import load_dotenv; load_dotenv()
+import psycopg2
+conn = psycopg2.connect(host=os.environ['DB_HOST'], port=int(os.environ['DB_PORT']),
+    dbname=os.environ['DB_NAME'], user=os.environ['DB_USER'], password=os.environ['DB_PASSWORD'])
+cur = conn.cursor()
+cur.execute(\"\"\"SELECT created_at, strategy, symbol, verdict, reason FROM llm_review_log WHERE verdict='REJECT' ORDER BY created_at DESC LIMIT 10\"\"\")
+for r in cur.fetchall(): print(f\"{r[0].strftime('%m-%d %H:%M')} {r[1]:15s} {r[2]:10s} {r[3]:8s} | {r[4][:80]}\")
+"
 ```
 
-See `.ai/` for strategy postmortems and design notes. `HERMES.md` is the agent entry point.
+## Kill switch
+
+Pause all entries by creating `ai_overseer/ai_gate.json`:
+```json
+{"script_paused": true, "reason": "manual halt"}
+```
+Exits still run. Resume by deleting the file or setting `script_paused: false`.

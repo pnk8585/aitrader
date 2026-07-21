@@ -25,7 +25,7 @@ def should_exit_momentum(
             f"Breakeven protection (peak +{round(peak_plpc, 2)}% -> "
             f"+{round(unrealized_plpc, 2)}%, fee floor +{C.ROUND_TRIP_FEE_PCT}%)"
         )
-    if age_hours >= C.MAX_HOLD_HOURS:
+    if age_hours >= C.MAX_HOLD_HOURS and unrealized_plpc <= C.ROUND_TRIP_FEE_PCT:
         return True, f"Max-hold time-stop ({round(age_hours, 1)}h)"
     return False, ""
 

@@ -1,9 +1,12 @@
-"""Exchange helpers: fill extraction, spread guard, dry-run order wrappers."""
+"""Exchange helpers: fill extraction, spread guard, dry-run / paper order wrappers."""
 
+import os
 import sys
 import uuid
 
 from traders.common.config import DRY_RUN
+
+_PAPER_MODE = os.environ.get("AITRADER_MODE") == "paper"
 
 
 def extract_fill(res, fallback_price):
@@ -66,13 +69,36 @@ def _dry_order(side: str, symbol: str, qty: float, price_hint: float) -> dict:
     }
 
 
+def _paper_order(side: str, symbol: str, qty: float, price_hint: float) -> dict:
+    """Simulate an order for paper mode — no real money moves."""
+    oid = f"paper-{uuid.uuid4().hex[:12]}"
+    print(f"PAPER: {side} {qty} {symbol} @ ~{price_hint}", file=sys.stderr)
+    return {
+        "id": oid,
+        "clientOrderId": oid,
+        "average": price_hint,
+        "price": price_hint,
+        "filled": qty,
+        "remaining": 0.0,
+        "cost": qty * price_hint,
+        "side": side,
+        "symbol": symbol,
+        "status": "closed",
+        "info": {"paper": True},
+    }
+
+
 def market_buy(exchange, symbol: str, qty: float, price_hint: float):
     if DRY_RUN:
         return _dry_order("buy", symbol, qty, price_hint)
+    if _PAPER_MODE:
+        return _paper_order("buy", symbol, qty, price_hint)
     return exchange.create_market_buy_order(symbol, qty)
 
 
 def market_sell(exchange, symbol: str, qty: float, price_hint: float):
     if DRY_RUN:
         return _dry_order("sell", symbol, qty, price_hint)
+    if _PAPER_MODE:
+        return _paper_order("sell", symbol, qty, price_hint)
     return exchange.create_market_sell_order(symbol, qty)

@@ -10,9 +10,6 @@ ROOT_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file_
 ENV_PATH = os.path.join(ROOT_DIR, ".env")
 LOG_DIR = os.path.join(ROOT_DIR, "logs")
 AI_GATE_FILE = os.path.join(ROOT_DIR, "ai_overseer", "ai_gate.json")
-DAILY_STRATEGY_PATH = os.path.join(ROOT_DIR, "daily_strategy.json")
-PENDING_REVIEW_FILE = os.path.join(ROOT_DIR, "ai_overseer", "pending_review.json")
-PENDING_LOCK_FILE = os.path.join(ROOT_DIR, "ai_overseer", ".pending_review.lock")
 ARCHITECT_TRIGGER_FILE = os.path.join(ROOT_DIR, ".trigger_architect_rethink")
 
 load_dotenv(dotenv_path=ENV_PATH)

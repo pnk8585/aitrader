@@ -31,7 +31,6 @@ from traders.common.config import (
     ALPACA_BASE_URL, ALPACA_DATA_URL, DRY_RUN, ROOT_DIR, ensure_log_dir,
 )
 from traders.common.gates import check_gate, load_ai_gates
-from traders.common.strategy import load_daily_strategy as _load_daily_strategy
 
 ensure_log_dir()
 
@@ -52,14 +51,7 @@ headers = {
 
 # US stock universe
 STOCK_SYMBOLS = ["NVDA", "PLTR", "TSLA", "AMD", "GOOGL", "META", "AAPL", "MSFT", "AMZN", "AVGO"]
-POOL_BASES = set(STOCK_SYMBOLS)
 
-
-def load_daily_strategy():
-    return _load_daily_strategy(
-        pool_bases=POOL_BASES,
-        pair_suffix="",
-    )
 
 # Stock commissions are effectively ~0.005% per side (mostly $0 + tiny SEC/TAF
 # fees) => ~0.01% round-trip. Stocks do NOT carry the ~0.5% crypto fee.
@@ -70,13 +62,13 @@ TTP_PEAK_PCT = 3.0          # Trailing-Take-Profit: activate after +3.0% peak
 TTP_GIVEBACK_PCT = 1.0      # Sell if we give back 1.0% from peak
 PLOCK_PEAK_PCT = 5.0        # Profit-Lock: activate after +5.0% peak
 PLOCK_FLOOR_PCT = 3.0       # Sell if we drop below +3.0% after hitting +5.0%
-STOP_LOSS_PCT = -3.0        # Hard stop-loss
+STOP_LOSS_PCT = -2.0        # Hard stop-loss
 BREAKEVEN_PEAK_PCT = 1.0    # Breakeven protection arms after +1.0% peak
-MAX_HOLD_HOURS = 12.0       # Hard time-stop (stocks mostly held intraday)
+MAX_HOLD_HOURS = 8.0        # Hard time-stop (stocks mostly held intraday)
 
 # --- Entry ----------------------------------------------------------------
-DAILY_ENTRY_PCT = 1.5       # daily change (vs prev close) >= 1.5% qualifies
-INTRADAY_ENTRY_PCT = 1.0    # OR intraday change (vs open) >= 1.0% qualifies
+DAILY_ENTRY_PCT = 2.0       # daily change (vs prev close) >= 2.0% qualifies
+INTRADAY_ENTRY_PCT = 1.5    # OR intraday change (vs open) >= 1.5% qualifies
 
 # --- Caps -----------------------------------------------------------------
 MAX_TRADES_PER_DAY = 3      # hard cap on entries per UTC day (PDT protection)
@@ -86,6 +78,11 @@ LOG_DIR = os.path.join(ROOT_DIR, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
 EXCHANGE_NAME = "alpaca-stocks"
+
+# Paper mode: prefix + skip real API calls
+_ALPACA_PAPER = os.environ.get("AITRADER_MODE") == "paper"
+if _ALPACA_PAPER:
+    EXCHANGE_NAME = "paper-alpaca-stocks"
 
 # --- Concurrency guard ------------------------------------------------------
 # Overlapping crons would double entries and race trading_state. A single flock
@@ -262,7 +259,7 @@ def run_cycle():
             sell_triggered = True
             sell_reason = f"Breakeven protection (Peak was +{round(peak_plpc, 2)}% | Current: +{round(unrealized_plpc, 2)}% | fee floor +{ROUND_TRIP_FEE_PCT}%)"
         # Hard max-hold time-stop
-        elif age_hours >= MAX_HOLD_HOURS:
+        elif age_hours >= MAX_HOLD_HOURS and unrealized_plpc <= ROUND_TRIP_FEE_PCT:
             sell_triggered = True
             sell_reason = f"Max-hold time-stop ({round(age_hours, 1)}h)"
 
@@ -280,6 +277,10 @@ def run_cycle():
                 close_url = f"{ALPACA_BASE_URL}/v2/positions/{symbol}"
                 if DRY_RUN:
                     print(f"DRY_RUN: SELL {symbol}", file=sys.stderr)
+                    close_status = 204
+                    close_body = {}
+                elif _ALPACA_PAPER:
+                    print(f"PAPER: SELL {symbol}", file=sys.stderr)
                     close_status = 204
                     close_body = {}
                 else:
@@ -337,8 +338,7 @@ def run_cycle():
     # AI gate FIRST — if the overseer paused entries, skip them. Exits in step 4
     # always run regardless, so a paused script can still cut losers.
     skip_buying = False
-    daily_strategy = load_daily_strategy()
-    paused, gate_msg = check_gate(db_conn, daily_strategy)
+    paused, gate_msg = check_gate(db_conn)
     if paused:
         print(f"AI GATE: script paused — {gate_msg}", file=sys.stderr)
         report["action_taken"] = "SKIP"
@@ -366,22 +366,6 @@ def run_cycle():
         skip_buying = True
 
     if not skip_buying:
-        # Daily strategy filters
-        focus_pairs = []
-        avoid_pairs = []
-        btc_regime_filter = False
-        focus_pairs = []
-        avoid_pairs = []
-        btc_regime_filter = False
-        if daily_strategy:
-            focus_pairs = [s.upper() for s in daily_strategy.get("focus_pairs", [])]
-            avoid_pairs = [s.upper() for s in daily_strategy.get("avoid_pairs", [])]
-            btc_regime = daily_strategy.get("btc_regime", "")
-            if btc_regime in ("below", "bearish"):
-                btc_regime_filter = True
-                print("📊 BTC regime: bearish — Alpaca entries may be restricted", file=sys.stderr)
-            print(f"📊 Daily strategy loaded: {len(focus_pairs)} focus, {len(avoid_pairs)} avoid pairs", file=sys.stderr)
-
         # --- STOCK MOMENTUM SCAN ---
         candidates = []
 
@@ -395,12 +379,6 @@ def run_cycle():
                     continue
                 if any(p["symbol"] == symbol for p in positions):
                     continue
-
-                # Daily strategy filters
-                if focus_pairs and symbol not in focus_pairs:
-                    continue  # Only trade focus pairs today
-                if avoid_pairs and symbol in avoid_pairs:
-                    continue  # Skip avoid pairs today
 
                 daily = snap.get("dailyBar") or {}
                 prev_daily = snap.get("prevDailyBar") or {}
@@ -505,6 +483,44 @@ def run_cycle():
                 order_size_usd = buying_power
 
             if order_size_usd >= 1.0:
+                # ── LLM evaluation before buy ─────────────────────────────
+                from traders.common.llm_review import review_trade
+
+                alpaca_sigs = {
+                    "daily_pct": round(daily_change_pct, 2) if daily_change_pct else 0,
+                    "intraday_pct": round(intraday_change_pct, 2) if intraday_change_pct else 0,
+                    "strength": signal_strength,
+                    "mult": round(sizing_mult, 3),
+                }
+                try:
+                    llm_result = review_trade(
+                        symbol=symbol,
+                        strategy="stocks-momentum",
+                        signals=alpaca_sigs,
+                        price=current_price,
+                        score=(abs(intraday_change_pct or daily_change_pct or 0)) / 2,
+                        portfolio_euro=equity * 0.92,  # EUR approx
+                        available_euro=order_size_usd * 0.92,
+                        open_positions=len(positions),
+                    )
+                except Exception as e:
+                    print(f"LLM review failed: {e} — buying directly", file=sys.stderr)
+                    llm_result = {"verdict": "APPROVE", "reason": f"LLM unavailable: {e}", "confidence": 0}
+
+                if llm_result["verdict"] != "APPROVE":
+                    report["action_taken"] = "SKIP"
+                    report["details"] = f"LLM rejected {symbol}: {llm_result['reason']}"
+                    msg_lines.append(f"❌ LLM απέρριψε {symbol}: {llm_result['reason']}")
+                    should_notify = True
+                    finalize()
+                    return
+
+                msg_lines.append(
+                    f"✅ LLM ενέκρινε {symbol} (conf {llm_result['confidence']}/10): {llm_result['reason']}"
+                )
+                should_notify = True
+                # ── End LLM evaluation ────────────────────────────────────
+
                 # Place BUY order
                 timestamp_suffix = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
                 client_order_id = f"stocks-{symbol}-{timestamp_suffix}"
@@ -522,6 +538,11 @@ def run_cycle():
                 if DRY_RUN:
                     print(f"DRY_RUN: BUY {symbol} ${round(order_size_usd, 2)}", file=sys.stderr)
                     order = {"id": f"dry-run-{client_order_id}", "status": "filled"}
+                    order_res_status = 201
+                elif _ALPACA_PAPER:
+                    print(f"PAPER: BUY {symbol} ${round(order_size_usd, 2)}", file=sys.stderr)
+                    oid = f"paper-{client_order_id}"
+                    order = {"id": oid, "client_order_id": oid, "status": "filled"}
                     order_res_status = 201
                 else:
                     order_res = requests.post(order_url, headers=headers, json=order_data, timeout=10)
@@ -578,16 +599,15 @@ def run_cycle():
             report["action_taken"] = "SKIP"
             report["details"] = "No momentum signals found."
 
-    # Only print strategy line when we have a trade, error, or important event
-    # (not every 5-minute cycle — that would spam Telegram)
-    if daily_strategy and (has_trade := report.get("action_taken") in ("BUY", "SELL")):
-        print(f"📊 Strategy: {daily_strategy.get('market_regime', 'unknown')} regime, "
-              f"risk={daily_strategy.get('risk_level', 'unknown')}")
-
     finalize()
 
 
 def main():
+    # ── Orchestrator integration ──────────────────────────────────────
+    import aitrader_registry as orch
+    orch.mark_started("alpaca-stocks")
+    # ──────────────────────────────────────────────────────────────────
+
     # Single-instance lock: a second overlapping cron job would double orders
     # and race trading_state. Bail out if the lock is already held.
     lock_fp = open(LOCK_FILE, "w")
@@ -613,6 +633,12 @@ def main():
             lock_fp.close()
         except Exception:
             pass
+
+    # ── Orchestrator: schedule next run ──────────────────────────────
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    _ath = _tz(_td(hours=3))
+    _next = (_dt.now(_ath) + _td(minutes=5)).isoformat()
+    orch.mark_done("alpaca-stocks", _next)
 
 
 if __name__ == "__main__":

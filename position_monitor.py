@@ -1,0 +1,286 @@
+#!/usr/bin/env python3
+"""Position Monitor — checks open positions every 2h, LLM decides SELL/HOLD.
+
+Replaces the old AI Overseer's buy-side logic. Only handles exits.
+Triggered by the orchestrator, runs synchronously.
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+from datetime import datetime, timezone
+
+import ccxt
+from dotenv import load_dotenv
+from openai import OpenAI
+
+from traders.common.exchange import market_sell
+from traders.common.gates import check_and_set_btc_pause
+
+# ── Env ─────────────────────────────────────────────────────────────
+for p in ["/home/pank/projects/aitrader/.env", "/home/pank/.hermes/.env"]:
+    if os.path.exists(p):
+        load_dotenv(p, override=False)
+
+KRAKEN_KEY = os.getenv("KRAKEN_API_KEY")
+KRAKEN_SECRET = os.getenv("KRAKEN_SECRET")
+DEEPSEEK_KEY = os.getenv("DEEPSEEK_API_KEY")
+AI_MODEL = "deepseek-v4-flash"
+LITELLM_BASE = "http://localhost:4000/v1"
+
+_PAPER_MODE = os.environ.get("AITRADER_MODE", "") == "paper"
+EXCHANGE_NAME = _PAPER_MODE and "paper-position-monitor" or "position-monitor"
+
+# trading_state rows are written by the strategies under their own keys
+# (kraken-momentum / kraken-pullback), paper-prefixed in paper mode — NOT "kraken".
+# This is the exact set of exchange keys that can appear for the current mode.
+_STATE_EXCHANGES = (
+    ("paper-kraken-momentum", "paper-kraken-pullback")
+    if _PAPER_MODE
+    else ("kraken-momentum", "kraken-pullback")
+)
+
+# ── DB helpers ──────────────────────────────────────────────────────
+def _get_db():
+    import psycopg2
+    return psycopg2.connect(
+        host=os.environ["DB_HOST"],
+        port=int(os.environ.get("DB_PORT", 5432)),
+        dbname=os.environ["DB_NAME"],
+        user=os.environ["DB_USER"],
+        password=os.environ["DB_PASSWORD"],
+        connect_timeout=5,
+    )
+
+
+# ── LLM ─────────────────────────────────────────────────────────────
+def _llm_decide(position: dict, price_ctx: str) -> dict:
+    """Ask LLM: SELL or HOLD this position?"""
+    client = OpenAI(api_key=DEEPSEEK_KEY, base_url=LITELLM_BASE)
+
+    prompt = f"""You are a position monitor for a crypto/stock portfolio.
+Decide whether to SELL or HOLD this position.
+
+POSITION:
+  Symbol: {position['symbol']}
+  Entry: €{position['entry']:.4f}
+  Current: €{position['current']:.4f}
+  P&L: {position['pnl_pct']:+.2f}%
+  Qty: {position['qty']:.6f}
+  Value: €{position['value']:.2f}
+  Exchange: {position['exchange']}
+
+PRICE CONTEXT:
+{price_ctx}
+
+Return JSON:
+{{"action": "SELL"|"HOLD", "reason": "brief reason", "confidence": 1-10}}
+
+Guidelines:
+- SELL if the trade thesis is clearly broken (e.g., -5%+ loss with no recovery signs).
+- HOLD if there's no clear reason to exit — small fluctuations are normal.
+- If price is near entry and signals are neutral, default to HOLD.
+- Be decisive — don't HOLD bleeding positions out of hope."""
+
+    try:
+        resp = client.chat.completions.create(
+            model=AI_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+            max_tokens=200,
+            response_format={"type": "json_object"},
+            timeout=15,
+        )
+        raw = resp.choices[0].message.content.strip()
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[-1]
+            if raw.endswith("```"):
+                raw = raw[:-3]
+        raw = raw.strip()
+        brace = raw.find("{")
+        if brace > 0:
+            raw = raw[brace:]
+        elif brace < 0:
+            raw = '{"action": "HOLD", "reason": "LLM returned text", "confidence": 5}'
+        result = json.loads(raw)
+        return {
+            "action": result.get("action", "HOLD"),
+            "reason": result.get("reason", ""),
+            "confidence": int(result.get("confidence", 5)),
+        }
+    except Exception as e:
+        return {"action": "HOLD", "reason": f"LLM error: {e}", "confidence": 0}
+
+
+# ── Price context ───────────────────────────────────────────────────
+def _price_context(db, symbol: str, exchange_name: str) -> str:
+    """Query recent price history for the position."""
+    cur = db.cursor()
+    base = symbol.split("/")[0]
+    lines = []
+
+    # Last price from DB
+    cur.execute(
+        """SELECT price FROM asset_prices
+           WHERE exchange=%s AND symbol=%s
+           ORDER BY timestamp DESC LIMIT 1""",
+        (exchange_name, base))
+    row = cur.fetchone()
+    current = float(row[0]) if row else 0
+
+    for label, minutes in [("1h", 60), ("6h", 360), ("24h", 1440)]:
+        cur.execute(
+            """SELECT price FROM asset_prices
+               WHERE exchange=%s AND symbol=%s
+               AND timestamp >= NOW() - (%s * INTERVAL '1 minute')
+               ORDER BY timestamp LIMIT 1""",
+            (exchange_name, base, minutes))
+        row = cur.fetchone()
+        if row:
+            old = float(row[0])
+            chg = (current - old) / old * 100 if old else 0
+            lines.append(f"  {label} ago: €{old:.4f} → €{current:.4f} ({chg:+.2f}%)")
+        else:
+            lines.append(f"  {label} ago: no data")
+
+    # BTC for crypto
+    if exchange_name == "kraken" and base != "BTC":
+        cur.execute(
+            """SELECT price FROM asset_prices
+               WHERE exchange='kraken' AND symbol='BTC'
+               ORDER BY timestamp DESC LIMIT 72""")
+        rows = cur.fetchall()
+        if rows:
+            btc_now = float(rows[0][0])
+            btc_avg = sum(float(r[0]) for r in rows) / len(rows)
+            lines.append(f"  BTC: €{btc_now:,.0f} ({(btc_now-btc_avg)/btc_avg*100:+.1f}% vs 6h avg)")
+
+    return "\n".join(lines) if lines else "(no data)"
+
+
+# ── Main ────────────────────────────────────────────────────────────
+def main():
+    # Orchestrator integration
+    import aitrader_registry as orch
+    orch.mark_started("position-monitor")
+    script_name = "position-monitor"
+
+    db = _get_db()
+    # Re-arm the BTC-drawdown safety pause. ai_overseer.py used to do this
+    # every cycle; it was deleted, so the pause was never being set again.
+    # Idempotent + None-safe (see gates.check_and_set_btc_pause contract).
+    check_and_set_btc_pause(db)
+
+    kraken = ccxt.kraken({
+        "apiKey": KRAKEN_KEY, "secret": KRAKEN_SECRET,
+        "enableRateLimit": True,
+    })
+
+    log = []
+    now_str = datetime.now(timezone.utc).isoformat()
+
+    # ── Collect positions ─────────────────────────────────────────
+    positions = []
+
+    # Kraken
+    try:
+        bal = kraken.fetch_balance()
+        for coin, qty in bal.get("total", {}).items():
+            if coin in ("EUR", "USD", "USDT", "USDC") or float(qty) <= 0:
+                continue
+            qty_f = float(qty)
+            try:
+                ticker = kraken.fetch_ticker(f"{coin}/EUR")
+                price = ticker.get("last", 0)
+            except Exception:
+                continue
+            value = qty_f * price
+            if value < 1.0:  # skip sub-€1 dust
+                continue
+            # Get entry from trading_state
+            cur = db.cursor()
+            cur.execute(
+                "SELECT entry_price FROM trading_state WHERE exchange IN %s AND symbol=%s",
+                (_STATE_EXCHANGES, f"{coin}/EUR"))
+            row = cur.fetchone()
+            entry = float(row[0]) if row else price
+            pnl = (price - entry) / entry * 100 if entry else 0
+            positions.append({
+                "exchange": "kraken", "symbol": f"{coin}/EUR",
+                "entry": entry, "current": price, "qty": qty_f,
+                "value": value, "pnl_pct": pnl,
+            })
+    except Exception as e:
+        log.append(f"Kraken balance error: {e}")
+
+    log.append(f"{now_str} | {len(positions)} positions found")
+
+    # ── Evaluate each position ────────────────────────────────────
+    for pos in positions:
+        sym = pos["symbol"]
+        ex = pos["exchange"]
+        pnl = pos["pnl_pct"]
+        log.append(f"  {sym}: entry €{pos['entry']:.4f} now €{pos['current']:.4f} ({pnl:+.2f}%)")
+
+        # Hard stop at -15% — sell without LLM
+        if pnl <= -15:
+            log.append(f"    🛑 HARD STOP -15% — selling immediately")
+            if ex == "kraken":
+                try:
+                    fqty = float(kraken.amount_to_precision(sym, pos["qty"]))
+                    res = market_sell(kraken, sym, fqty, pos["current"])
+                    log.append(f"    ✅ Sold {fqty} {sym} @ ~€{pos['current']:.4f}")
+                    # Remove from trading_state
+                    cur = db.cursor()
+                    cur.execute("DELETE FROM trading_state WHERE exchange IN %s AND symbol=%s", (_STATE_EXCHANGES, sym))
+                    db.commit()
+                except Exception as e:
+                    log.append(f"    ❌ Sell failed: {e}")
+            continue
+
+        # Get price context + LLM decision
+        price_ctx = _price_context(db, sym, ex)
+        decision = _llm_decide(pos, price_ctx)
+        log.append(f"    🤖 LLM: {decision['action']} (conf {decision['confidence']}/10) — {decision['reason']}")
+
+        # Log to DB
+        try:
+            cur = db.cursor()
+            cur.execute(
+                """INSERT INTO llm_review_log
+                   (strategy, symbol, price, score, verdict, reason, confidence,
+                    portfolio_euro, available_euro)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (script_name, sym, pos["current"], 0,
+                 decision["action"], decision["reason"], decision["confidence"],
+                 sum(p["value"] for p in positions), 0),
+            )
+            db.commit()
+        except Exception:
+            pass
+
+        # Execute SELL
+        if decision["action"] == "SELL" and ex == "kraken":
+            try:
+                fqty = float(kraken.amount_to_precision(sym, pos["qty"]))
+                res = market_sell(kraken, sym, fqty, pos["current"])
+                log.append(f"    ✅ Sold {fqty} {sym}")
+                cur = db.cursor()
+                cur.execute("DELETE FROM trading_state WHERE exchange IN %s AND symbol=%s", (_STATE_EXCHANGES, sym))
+                db.commit()
+            except Exception as e:
+                log.append(f"    ❌ Sell failed: {e}")
+
+    # ── Done ─────────────────────────────────────────────────────
+    db.close()
+    for line in log:
+        print(line)
+
+    from datetime import timedelta as _td
+    _next = (datetime.now(timezone.utc) + _td(hours=2)).isoformat()
+    orch.mark_done(script_name, _next)
+
+
+if __name__ == "__main__":
+    main()

@@ -8,6 +8,10 @@ from datetime import datetime, timezone
 from traders.common.config import AI_GATE_FILE, ARCHITECT_TRIGGER_FILE
 
 BTC_RECOVERY_FACTOR = 0.99
+# Pause mirror of the recovery factor: pause the buyers when BTC trades >3% below
+# its 6h average. Kept intentionally below BTC_RECOVERY_FACTOR (0.99) so the
+# pause/recovery band has hysteresis and cannot flap between the two on a flat tape.
+BTC_PAUSE_FACTOR = 0.97
 RECOVERY_THRESHOLD = 3
 
 
@@ -24,8 +28,14 @@ def load_ai_gates():
         return default
 
 
-def check_gate(db_conn, daily_strategy=None):
+def check_gate(db_conn):
     """Return (paused, reason_or_msg). Auto-clears stale pauses when recovered."""
+    # Re-arm the BTC-drawdown pause on the buyer's own cadence (~5 min). The setter
+    # is idempotent + None-safe, so calling it here every cycle is cheap and will not
+    # reset check_gate's recovery bookkeeping (it short-circuits when already paused).
+    # This restores the ~5-min re-arm cadence of the deleted ai_overseer.py; the 2h
+    # position_monitor call remains as defense-in-depth if a buyer is down.
+    check_and_set_btc_pause(db_conn)
     gates = load_ai_gates()
     if not gates.get("script_paused"):
         return False, None
@@ -68,9 +78,42 @@ def signal_architect_rethink(trigger_reason):
         pass
 
 
-def _check_btc_recovery(db_conn):
-    if db_conn is None:
+def check_and_set_btc_pause(db_conn):
+    """Pause the buyer scripts when BTC drops >3% below its 6h average.
+
+    Mirror of the ``_check_btc_recovery`` auto-resume machinery: this is the
+    *setter* half that the deleted ai_overseer used to own. Returns True when the
+    scripts are (now or already) paused, else False.
+
+    Idempotent: if a pause is already active we return True *without* rewriting the
+    gate file — recovery bookkeeping (recovery_count/threshold) is owned solely by
+    ``check_gate``, so re-writing here would reset its progress every cycle.
+    The gate we write carries ``trigger={"type": "btc_below_avg"}`` so the existing
+    ``check_gate`` auto-resume path clears it on recovery with zero extra code.
+    """
+    if load_ai_gates().get("script_paused"):
+        return True
+
+    stats = _btc_stats(db_conn)
+    if stats is None:
         return False
+
+    current, avg_6h = stats
+    if current < avg_6h * BTC_PAUSE_FACTOR:
+        pct = (current / avg_6h - 1.0) * 100.0
+        _write_pause_gate(
+            reason=f"BTC {pct:.1f}% below 6h avg (paused at {current:.0f})",
+            trigger={"type": "btc_below_avg"},
+        )
+        return True
+    return False
+
+
+def _btc_stats(db_conn):
+    """Return (current_price, 6h_avg) from the same window _check_btc_recovery reads,
+    or None when the DB is unavailable or the sample is too small to trust."""
+    if db_conn is None:
+        return None
     try:
         cur = db_conn.cursor()
         cur.execute(
@@ -79,14 +122,20 @@ def _check_btc_recovery(db_conn):
             "ORDER BY timestamp DESC LIMIT 72")
         rows = cur.fetchall()
     except Exception:
-        return False
+        return None
 
     if not rows or len(rows) < 12:
-        return False
+        return None
 
     prices = [float(r[0]) for r in rows]
-    current = prices[0]
-    avg_6h = sum(prices) / len(prices)
+    return prices[0], sum(prices) / len(prices)
+
+
+def _check_btc_recovery(db_conn):
+    stats = _btc_stats(db_conn)
+    if stats is None:
+        return False
+    current, avg_6h = stats
     return current > avg_6h * BTC_RECOVERY_FACTOR
 
 
@@ -97,6 +146,23 @@ def _write_clear_gate():
         "reason": "Auto-resume: condition recovered",
         "paused_since": None,
         "trigger": None,
+        "recovery_count": 0,
+        "recovery_threshold": RECOVERY_THRESHOLD,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    })
+
+
+def _write_pause_gate(reason, trigger):
+    """Write a fresh pause gate in the exact shape check_gate expects to read.
+
+    Mirror of _write_clear_gate: same keys, inverted state. recovery_count starts at
+    0 so check_gate's auto-resume counts from a clean slate on the next recovery."""
+    _atomic_write({
+        "script_paused": True,
+        "consult_on_entry": False,
+        "reason": reason,
+        "paused_since": datetime.now(timezone.utc).isoformat(),
+        "trigger": trigger,
         "recovery_count": 0,
         "recovery_threshold": RECOVERY_THRESHOLD,
         "updated_at": datetime.now(timezone.utc).isoformat(),
