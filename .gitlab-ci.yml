@@ -85,7 +85,7 @@ docker-build:
 # ── Create Git tag ──
 create-tag:
   stage: deploy
-  image: alpine:latest
+  image: alpine:3.21
   before_script:
     - apk add --no-cache git openssh-client
     - echo "Creating tag for version ${FULL_VERSION}"
@@ -108,7 +108,7 @@ create-tag:
 # ── Deploy to homeserver ──
 deploy:
   stage: deploy
-  image: alpine:latest
+  image: alpine:3.21
   before_script:
     - apk add --no-cache openssh-client
     - mkdir -p ~/.ssh
