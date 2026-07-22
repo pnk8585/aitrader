@@ -46,11 +46,28 @@ async def dashboard(request: Request):
     for s in scripts.values():
         m = s.get("mode", "unknown")
         modes[m] = modes.get(m, 0) + 1
+
+    # Recent trade data
+    from app.db import get_conn
+    recent_trades = []
+    recent_reviews = []
+    try:
+        with get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT timestamp, exchange, action, ticker, entry_price, unrealized_plpc FROM trade_log ORDER BY timestamp DESC LIMIT 5")
+            recent_trades = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
+            cur.execute("SELECT created_at, strategy, symbol, verdict, score, reason FROM llm_review_log ORDER BY created_at DESC LIMIT 5")
+            recent_reviews = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
+    except Exception:
+        pass
+
     ctx = {
         "script_count": len(scripts),
         "modes": modes,
         "last_orch_run": orchestrator.get("last_run", "never"),
         "scripts": scripts,
+        "recent_trades": recent_trades,
+        "recent_reviews": recent_reviews,
     }
     return templates.TemplateResponse(request, "dashboard.html", ctx)
 

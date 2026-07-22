@@ -122,10 +122,7 @@
   <nav>
     <span class="brand">AITrader</span>
     <a href="/" {% if request.url.path == "/" %}class="active"{% endif %}>Dashboard</a>
-    <a href="/ui/admin/ai" {% if request.url.path.startswith("/ui/admin/ai") %}class="active"{% endif %}>AI Config</a>
-    <a href="/ui/admin/telegram" {% if request.url.path.startswith("/ui/admin/telegram") %}class="active"{% endif %}>Telegram</a>
-    <a href="/ui/admin/cron" {% if request.url.path.startswith("/ui/admin/cron") %}class="active"{% endif %}>Cron</a>
-    <a href="/ui/admin/data" {% if request.url.path.startswith("/ui/admin/data") %}class="active"{% endif %}>Data</a>
+    <a href="/ui/admin" {% if request.url.path.startswith("/ui/admin") %}class="active"{% endif %}>Admin</a>
   </nav>
   <main>
     {% block content %}{% endblock %}

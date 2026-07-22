@@ -18,12 +18,56 @@
   {% endfor %}
 </div>
 
-<div class="card" style="margin-bottom: 24px;">
-  <div class="label">Orchestrator Last Run</div>
-  <div class="value" style="font-size:16px;">{{ last_orch_run }}</div>
-</div>
+<!-- Recent Trades -->
+{% if recent_trades %}
+<h2 style="font-size:16px;margin-bottom:12px;margin-top:8px">Recent Trades</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Time</th><th>Exch</th><th>Action</th><th>Ticker</th><th>Entry</th><th>P/L %</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for t in recent_trades %}
+    <tr>
+      <td style="font-size:12px">{{ t.timestamp.strftime('%H:%M') if t.timestamp else '—' }}</td>
+      <td>{{ t.exchange }}</td>
+      <td><span class="badge badge-{{ 'live' if t.action == 'buy' else 'paper' }}">{{ t.action }}</span></td>
+      <td>{{ t.ticker }}</td>
+      <td>{{ t.entry_price }}</td>
+      <td style="color:{{ 'var(--green)' if (t.unrealized_plpc or 0) > 0 else 'var(--red)' }}">{{ "%.2f%%"|format(t.unrealized_plpc) if t.unrealized_plpc else '—' }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<!-- Recent LLM Reviews -->
+{% if recent_reviews %}
+<h2 style="font-size:16px;margin:24px 0 12px">Recent LLM Reviews</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Time</th><th>Strategy</th><th>Symbol</th><th>Verdict</th><th>Score</th><th>Reason</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for r in recent_reviews %}
+    <tr>
+      <td style="font-size:12px">{{ r.created_at.strftime('%H:%M') if r.created_at else '—' }}</td>
+      <td>{{ r.strategy }}</td>
+      <td>{{ r.symbol }}</td>
+      <td><span class="badge badge-{{ 'live' if r.verdict == 'buy' else ('paper' if r.verdict == 'sell' else 'paused') }}">{{ r.verdict }}</span></td>
+      <td>{{ r.score }}</td>
+      <td class="text-muted" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ r.reason or '—' }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
 
 {% if scripts %}
+<h2 style="font-size:16px;margin:24px 0 12px">Cron Scripts</h2>
 <table>
   <thead>
     <tr>
@@ -41,13 +85,11 @@
       <td>{{ s.status }}</td>
       <td><span class="badge badge-{{ s.mode }}">{{ s.mode }}</span></td>
       <td>{{ s.interval }}s</td>
-      <td>{{ s.last_run }}</td>
+      <td class="text-muted">{{ s.get("last_run", "—") }}</td>
     </tr>
   {% endfor %}
   </tbody>
 </table>
-{% else %}
-<p class="text-muted">No scripts in registry.</p>
 {% endif %}
 
 {% endblock %}
