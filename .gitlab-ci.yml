@@ -40,7 +40,7 @@ build:
       dotenv: build.env
     expire_in: 1 week
   only:
-    - master
+    - main
     - develop
 
 # ── Test stage ──
@@ -52,7 +52,7 @@ test:
   script:
     - python -m pytest tests/ -v --tb=short || echo "No tests yet - skipping"
   only:
-    - master
+    - main
     - develop
 
 # ── Docker build & push ──
@@ -78,7 +78,7 @@ docker-build:
     - docker push $CI_REGISTRY_IMAGE:${FULL_VERSION}
     - echo "Pushed Docker images with version ${FULL_VERSION}"
   only:
-    - master
+    - main
   dependencies:
     - build
 
@@ -101,7 +101,7 @@ create-tag:
         echo "Successfully created tag v${FULL_VERSION}"
       fi
   only:
-    - master
+    - main
   dependencies:
     - build
 
@@ -126,7 +126,7 @@ deploy:
       "
     - echo "Deployment complete"
   only:
-    - master
+    - main
   dependencies:
     - build
     - docker-build
