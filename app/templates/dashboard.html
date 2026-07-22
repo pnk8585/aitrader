@@ -28,24 +28,40 @@
   </div>
 </div>
 
-<!-- Recent Trades -->
-{% if recent_trades %}
-<h2 style="font-size:15px;margin-bottom:10px;margin-top:4px">Recent Trades</h2>
+<!-- Open Positions -->
+{% if open_positions %}
+<h2 style="font-size:15px;margin:24px 0 10px">Open Positions</h2>
 <table>
-  <thead>
-    <tr>
-      <th>Time</th><th>Exch</th><th>Action</th><th>Ticker</th><th>Entry</th><th>P/L %</th>
-    </tr>
-  </thead>
+  <thead><tr><th>Exch</th><th>Symbol</th><th>Entry</th><th>P/L %</th><th>Qty</th><th>Since</th></tr></thead>
   <tbody>
-  {% for t in recent_trades %}
+  {% for p in open_positions %}
+    <tr>
+      <td>{{ p.exchange }}</td><td>{{ p.symbol }}</td>
+      <td>{{ p.entry_price }}</td>
+      <td style="color:{{ 'var(--green)' if (p.peak_plpc or 0) > 0 else 'var(--red)' }}">{{ "%.2f%%"|format(p.peak_plpc) if p.peak_plpc else '—' }}</td>
+      <td>{{ p.quantity }}</td>
+      <td class="text-muted">{{ p.entry_time.strftime('%m-%d %H:%M') if p.entry_time else '—' }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<!-- Today's Trades -->
+{% if today_trades %}
+<h2 style="font-size:15px;margin:24px 0 10px">Today's Trades</h2>
+<table>
+  <thead><tr><th>Time</th><th>Exch</th><th>Ticker</th><th>Entry</th><th>P/L %</th><th>Qty</th><th>Reason</th></tr></thead>
+  <tbody>
+  {% for t in today_trades %}
     <tr>
       <td style="font-size:12px">{{ t.timestamp.strftime('%H:%M') if t.timestamp else '—' }}</td>
       <td>{{ t.exchange }}</td>
-      <td><span class="badge badge-{{ 'live' if t.action == 'buy' else 'paper' }}">{{ t.action }}</span></td>
       <td>{{ t.ticker }}</td>
       <td>{{ t.entry_price }}</td>
       <td style="color:{{ 'var(--green)' if (t.unrealized_plpc or 0) > 0 else 'var(--red)' }}">{{ "%.2f%%"|format(t.unrealized_plpc) if t.unrealized_plpc else '—' }}</td>
+      <td>{{ t.quantity }}</td>
+      <td class="text-muted" style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" onclick="this.style.whiteSpace='normal';this.style.maxWidth='none'" title="Click to expand">{{ t.reason or '—' }}</td>
     </tr>
   {% endfor %}
   </tbody>
@@ -56,20 +72,15 @@
 {% if recent_reviews %}
 <h2 style="font-size:15px;margin:24px 0 10px">Recent LLM Reviews</h2>
 <table>
-  <thead>
-    <tr>
-      <th>Time</th><th>Strategy</th><th>Symbol</th><th>Verdict</th><th>Score</th><th>Reason</th>
-    </tr>
-  </thead>
+  <thead><tr><th>Time</th><th>Strategy</th><th>Symbol</th><th>Verdict</th><th>Score</th><th>Reason</th></tr></thead>
   <tbody>
   {% for r in recent_reviews %}
     <tr>
       <td style="font-size:12px">{{ r.created_at.strftime('%H:%M') if r.created_at else '—' }}</td>
-      <td>{{ r.strategy }}</td>
-      <td>{{ r.symbol }}</td>
+      <td>{{ r.strategy }}</td><td>{{ r.symbol }}</td>
       <td><span class="badge badge-{{ 'live' if r.verdict == 'buy' else ('paper' if r.verdict == 'sell' else 'paused') }}">{{ r.verdict }}</span></td>
       <td>{{ r.score }}</td>
-      <td class="text-muted" style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ r.reason or '—' }}</td>
+      <td class="text-muted reason-cell" onclick="this.classList.toggle('expanded')" title="Click to expand">{{ r.reason or '—' }}</td>
     </tr>
   {% endfor %}
   </tbody>

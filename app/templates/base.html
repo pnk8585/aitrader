@@ -116,6 +116,15 @@
     .btn-sm:hover { background: var(--accent-hover); }
     th a { color: var(--text-muted); text-decoration: none; }
     th a:hover { color: var(--text); }
+    .reason-cell { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+    .reason-cell.expanded { max-width: none; white-space: normal; overflow: visible; }
+    .nav-dropdown { position: relative; display: inline-flex; align-items: center; }
+    .nav-dropdown > a { color: var(--text-muted); text-decoration: none; font-size: 14px; }
+    .nav-dropdown > a:hover, .nav-dropdown > a.active { color: var(--text); }
+    .nav-dropdown-menu { display: none; position: absolute; top: 100%; left: 0; background: var(--bg-card); border: 1px solid var(--border); border-radius: 4px; min-width: 160px; z-index: 100; padding: 4px 0; }
+    .nav-dropdown:hover .nav-dropdown-menu { display: block; }
+    .nav-dropdown-menu a { display: block; padding: 6px 14px; color: var(--text-muted); text-decoration: none; font-size: 13px; white-space: nowrap; }
+    .nav-dropdown-menu a:hover { background: var(--bg-card-hover); color: var(--text); }
   </style>
 </head>
 <body>
@@ -124,7 +133,17 @@
     <a href="/" {% if request.url.path == "/" %}class="active"{% endif %}>Dashboard</a>
     <a href="/ui/admin" {% if request.url.path.startswith("/ui/admin") %}class="active"{% endif %}>Admin</a>
     <span style="color:var(--border);margin:0 4px">|</span>
-    <a href="/ui/admin/data" {% if request.url.path.startswith("/ui/admin/data") %}class="active"{% endif %}>Data</a>
+    <div class="nav-dropdown">
+      <a href="/ui/admin/data" {% if request.url.path.startswith("/ui/admin/data") %}class="active"{% endif %}>Data ▾</a>
+      <div class="nav-dropdown-menu">
+        <a href="/ui/admin/data/trade_log">Trade Log</a>
+        <a href="/ui/admin/data/trading_state">Positions</a>
+        <a href="/ui/admin/data/llm_review_log">LLM Reviews</a>
+        <a href="/ui/admin/data/asset_prices">Prices</a>
+        <a href="/ui/admin/data/cron_jobs">Cron Jobs</a>
+        <a href="/ui/admin/data/cron_runs">Cron Runs</a>
+      </div>
+    </div>
   </nav>
   <main>
     {% block content %}{% endblock %}

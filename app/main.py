@@ -49,7 +49,8 @@ async def dashboard(request: Request):
 
     # Recent trade data
     from app.db import get_conn
-    recent_trades = []
+    today_trades = []
+    open_positions = []
     recent_reviews = []
     summary = {"total_trades": 0, "open_positions": 0, "today_trades": 0, "total_pl": 0.0}
     try:
@@ -61,11 +62,16 @@ async def dashboard(request: Request):
             summary["open_positions"] = cur.fetchone()[0]
             cur.execute("SELECT COUNT(*) FROM trade_log WHERE timestamp >= CURRENT_DATE")
             summary["today_trades"] = cur.fetchone()[0]
-            cur.execute("SELECT COALESCE(SUM(unrealized_plpc), 0) FROM trading_state")
+            cur.execute("SELECT COALESCE(SUM(peak_plpc), 0) FROM trading_state")
             summary["total_pl"] = round(float(cur.fetchone()[0] or 0), 2)
-            cur.execute("SELECT timestamp, exchange, action, ticker, entry_price, unrealized_plpc FROM trade_log ORDER BY timestamp DESC LIMIT 5")
-            recent_trades = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
-            cur.execute("SELECT created_at, strategy, symbol, verdict, score, reason FROM llm_review_log ORDER BY created_at DESC LIMIT 5")
+            # Today's trades full list
+            cur.execute("SELECT timestamp, exchange, action, ticker, entry_price, unrealized_plpc, quantity, reason FROM trade_log WHERE timestamp >= CURRENT_DATE ORDER BY timestamp DESC")
+            today_trades = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
+            # Open positions
+            cur.execute("SELECT exchange, symbol, entry_price, entry_time, peak_plpc, quantity FROM trading_state ORDER BY entry_time DESC")
+            open_positions = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
+            # Recent LLM reviews
+            cur.execute("SELECT created_at, strategy, symbol, verdict, score, reason FROM llm_review_log ORDER BY created_at DESC LIMIT 10")
             recent_reviews = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
     except Exception:
         pass
@@ -75,7 +81,8 @@ async def dashboard(request: Request):
         "modes": modes,
         "last_orch_run": orchestrator.get("last_run", "never"),
         "summary": summary,
-        "recent_trades": recent_trades,
+        "today_trades": today_trades,
+        "open_positions": open_positions,
         "recent_reviews": recent_reviews,
     }
     return templates.TemplateResponse(request, "dashboard.html", ctx)
