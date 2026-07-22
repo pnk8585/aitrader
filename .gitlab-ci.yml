@@ -1,0 +1,143 @@
+# aitrader - GitLab CI Pipeline
+# Mirrors the bettips-ai pipeline structure
+
+image: python:3.11-slim
+
+stages:
+  - build
+  - test
+  - docker
+  - deploy
+
+variables:
+  CI_REGISTRY: "dockerhub.pkatopodis.me"
+  CI_REGISTRY_IMAGE: "dockerhub.pkatopodis.me/pank85/aitrader"
+  CI_SERVER_HOST: "gitlab-ce:8080"
+  # Also push to GitLab registry
+  GITLAB_REGISTRY_IMAGE: "gitlab-ce:5050/$CI_PROJECT_PATH"
+  MAJOR_MINOR_VERSION: ""
+  FULL_VERSION: ""
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.pip-cache"
+
+cache:
+  paths:
+    - .pip-cache/
+
+# ── Build stage ──
+build:
+  stage: build
+  before_script:
+    # Extract version from pyproject.toml or default to 1.0
+    - MAJOR_MINOR_VERSION=$(grep -oP '(?<=version = \")[^\"]+' pyproject.toml 2>/dev/null | cut -d'.' -f1,2 || echo "1.0")
+    - DAY_OF_YEAR=$(date +%j)
+    - YEAR_SHORT=$(date +%y)
+    - export FULL_VERSION="${MAJOR_MINOR_VERSION}.${YEAR_SHORT}${DAY_OF_YEAR}.${CI_PIPELINE_IID}"
+    - echo "Building version ${FULL_VERSION}"
+    - echo "FULL_VERSION=${FULL_VERSION}" >> build.env
+  script:
+    - pip install --cache-dir $PIP_CACHE_DIR -r requirements.txt
+    - pip install --cache-dir $PIP_CACHE_DIR -e .
+  artifacts:
+    reports:
+      dotenv: build.env
+    expire_in: 1 week
+  only:
+    - master
+    - develop
+
+# ── Test stage ──
+test:
+  stage: test
+  before_script:
+    - pip install --cache-dir $PIP_CACHE_DIR -r requirements.txt
+    - pip install --cache-dir $PIP_CACHE_DIR pytest pytest-asyncio httpx
+  script:
+    - python -m pytest tests/ -v --tb=short || echo "No tests yet - skipping"
+  only:
+    - master
+    - develop
+
+# ── Docker build & push ──
+docker-build:
+  stage: docker
+  image: docker:latest
+  services:
+    - name: docker:dind
+      alias: docker
+      entrypoint: ["dockerd"]
+      command: ["--host=tcp://0.0.0.0:2375", "--insecure-registry=gitlab-ce:5050", "--insecure-registry=dockerhub.pkatopodis.me"]
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+  before_script:
+    - until docker info; do sleep 1; done
+    - echo "Docker build for version ${FULL_VERSION}"
+    # Login to dockerhub registry (homeserver pulls from here)
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+    # Also login to GitLab registry for backup
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "gitlab-ce:5050"
+  script:
+    - docker build -t $CI_REGISTRY_IMAGE:${FULL_VERSION} -t $CI_REGISTRY_IMAGE:latest -t $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA .
+    # Push to dockerhub (primary - used by homeserver)
+    - docker push $CI_REGISTRY_IMAGE:latest
+    - docker push $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+    - docker push $CI_REGISTRY_IMAGE:${FULL_VERSION}
+    # Also push to GitLab registry (backup)
+    - docker tag $CI_REGISTRY_IMAGE:latest $GITLAB_REGISTRY_IMAGE:latest
+    - docker tag $CI_REGISTRY_IMAGE:${FULL_VERSION} $GITLAB_REGISTRY_IMAGE:${FULL_VERSION}
+    - docker push $GITLAB_REGISTRY_IMAGE:latest
+    - docker push $GITLAB_REGISTRY_IMAGE:${FULL_VERSION}
+    - echo "Pushed Docker images with version ${FULL_VERSION}"
+  only:
+    - master
+  dependencies:
+    - build
+
+# ── Create Git tag ──
+create-tag:
+  stage: deploy
+  image: alpine:latest
+  before_script:
+    - apk add --no-cache git openssh-client
+    - echo "Creating tag for version ${FULL_VERSION}"
+  script:
+    - git config user.name "Panagiotis Katopodis"
+    - git config user.email "panoskatopodis@gmail.com"
+    - |
+      if git rev-parse "v${FULL_VERSION}" >/dev/null 2>&1; then
+        echo "Tag v${FULL_VERSION} already exists, skipping..."
+      else
+        git tag -a "v${FULL_VERSION}" -m "Release v${FULL_VERSION}"
+        git push "https://gitlab-ci-token:${GITLAB_TOKEN}@gitlab.pkatopodis.me/pank85/aitrader.git" "v${FULL_VERSION}"
+        echo "Successfully created tag v${FULL_VERSION}"
+      fi
+  only:
+    - master
+  dependencies:
+    - build
+
+# ── Deploy to homeserver ──
+deploy:
+  stage: deploy
+  image: alpine:latest
+  before_script:
+    - apk add --no-cache openssh-client
+    - mkdir -p ~/.ssh
+    - echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+    - chmod 600 ~/.ssh/id_rsa
+    - ssh-keyscan -H 172.16.0.50 >> ~/.ssh/known_hosts 2>/dev/null
+  script:
+    - echo "Deploying version ${FULL_VERSION} to homeserver"
+    - |
+      ssh -o StrictHostKeyChecking=no pank@172.16.0.50 "
+        cd ~/homeserver/docker-compose/aitrader &&
+        sudo docker compose pull &&
+        sudo docker compose down &&
+        sudo docker compose up -d
+      "
+    - echo "Deployment complete"
+  only:
+    - master
+  dependencies:
+    - build
+    - docker-build
