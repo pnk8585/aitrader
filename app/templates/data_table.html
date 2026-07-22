@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}AITrader · {{ table }}{% endblock %}
+{% block content %}
+<h1>{{ table }}</h1>
+<p class="text-muted">{{ total }} row{{ "" if total == 1 else "s" }}</p>
+
+<form method="get">
+  <input type="hidden" name="sort" value="{{ sort }}">
+  <input type="hidden" name="dir" value="{{ dir }}">
+  <table>
+    <thead>
+      <tr>
+        {% for col in columns %}
+        <th>
+          <a href="?{{ filter_qs }}{% if filter_qs %}&{% endif %}sort={{ col }}&dir={{ 'desc' if (sort == col and dir == 'asc') else 'asc' }}&page=1">
+            {{ col }}{% if sort == col %} {{ "▼" if dir == "desc" else "▲" }}{% endif %}
+          </a>
+        </th>
+        {% endfor %}
+      </tr>
+      <tr>
+        {% for col in columns %}
+        <th><input type="text" class="filter-input" name="{{ col }}" value="{{ filters.get(col, "") }}"></th>
+        {% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+      <tr>
+        {% for val in row %}
+        <td>{{ val if val is not none else "" }}</td>
+        {% endfor %}
+      </tr>
+      {% else %}
+      <tr><td colspan="{{ columns|length }}" class="text-muted">No rows.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <button type="submit">Filter</button>
+</form>
+
+<div class="pagination">
+  <a class="{{ 'disabled' if page <= 1 }}" href="?{{ filter_qs }}{% if filter_qs %}&{% endif %}sort={{ sort }}&dir={{ dir }}&page={{ page - 1 }}">Previous</a>
+  <span>Page {{ page }} of {{ total_pages }}</span>
+  <a class="{{ 'disabled' if page >= total_pages }}" href="?{{ filter_qs }}{% if filter_qs %}&{% endif %}sort={{ sort }}&dir={{ dir }}&page={{ page + 1 }}">Next</a>
+</div>
+
+{% endblock %}

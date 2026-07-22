@@ -246,3 +246,39 @@ async def cron_resume(name: str, request: Request):
 @app.get("/healthz")
 async def healthz():
     return {"status": "ok"}
+
+
+# ── Data browser ─────────────────────────────────────────────
+
+@app.get("/ui/admin/data", response_class=HTMLResponse)
+async def data_index(request: Request):
+    from app.data import TABLES
+    return templates.TemplateResponse(request, "data_index.html", {"tables": TABLES})
+
+
+@app.get("/ui/admin/data/{table}", response_class=HTMLResponse)
+async def data_table_view(table: str, request: Request, page: int = 1, sort: str = "", dir: str = "asc"):
+    from urllib.parse import urlencode
+
+    from app.data import TABLES, query_table
+
+    if table not in TABLES:
+        return HTMLResponse("Not found", status_code=404)
+
+    reserved = {"page", "sort", "dir"}
+    filters = {k: v for k, v in request.query_params.items() if k not in reserved and v}
+    columns, rows, total, total_pages, page = query_table(table, filters, sort, dir, page)
+
+    ctx = {
+        "table": table,
+        "columns": columns,
+        "rows": rows,
+        "filters": filters,
+        "filter_qs": urlencode(filters),
+        "sort": sort,
+        "dir": dir,
+        "page": page,
+        "total_pages": total_pages,
+        "total": total,
+    }
+    return templates.TemplateResponse(request, "data_table.html", ctx)

@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}AITrader · Data{% endblock %}
+{% block content %}
+<h1>Data</h1>
+
+<div class="admin-links">
+  {% for t in tables %}
+  <a href="/ui/admin/data/{{ t }}" class="admin-link">
+    <h3>{{ t }}</h3>
+  </a>
+  {% endfor %}
+</div>
+
+{% endblock %}
