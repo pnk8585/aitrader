@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}AITrader · Admin{% endblock %}
+{% block content %}
+<h1>Admin</h1>
+
+<div class="admin-links">
+  <a href="/ui/admin/ai" class="admin-link">
+    <h3>AI Config</h3>
+    <p>Model, provider base URL, API key</p>
+  </a>
+  <a href="/ui/admin/telegram" class="admin-link">
+    <h3>Telegram</h3>
+    <p>Bot token, chat ID, test send</p>
+  </a>
+  <a href="/ui/admin/cron" class="admin-link">
+    <h3>Cron</h3>
+    <p>Manage trading scripts, toggle modes, run now</p>
+  </a>
+</div>
+
+{% endblock %}

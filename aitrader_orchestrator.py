@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/home/pank/projects/aitrader/.venv/bin/python3
 """AITrader Orchestrator — one cron to rule them all. Every 1'.
 
 Reads registry JSON, spawns trading scripts when their next_run time arrives.
@@ -19,9 +19,10 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 import aitrader_registry as orch  # noqa: E402
+from app import state as app_state  # noqa: E402
 
 ATHENS = timezone(timedelta(hours=3))
-REGISTRY_PATH = ROOT / "aitrader_orchestrator.json"
+REGISTRY_PATH = app_state.registry_path()  # informational; orch delegates to aitrader_registry
 GRACE_SECONDS = 30
 STUCK_ONGOING_MINUTES = 15  # trading scripts can take longer than superbet
 

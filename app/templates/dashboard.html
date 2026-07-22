@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}AITrader · Dashboard{% endblock %}
+{% block content %}
+<h1>Dashboard</h1>
+
+<div class="cards">
+  <div class="card">
+    <div class="label">Scripts</div>
+    <div class="value">{{ script_count }}</div>
+    <div class="sub">registered</div>
+  </div>
+  {% for mode, count in modes.items() %}
+  <div class="card">
+    <div class="label">{{ mode }}</div>
+    <div class="value">{{ count }}</div>
+    <div class="sub">scripts</div>
+  </div>
+  {% endfor %}
+</div>
+
+<div class="card" style="margin-bottom: 24px;">
+  <div class="label">Orchestrator Last Run</div>
+  <div class="value" style="font-size:16px;">{{ last_orch_run }}</div>
+</div>
+
+{% if scripts %}
+<table>
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Status</th>
+      <th>Mode</th>
+      <th>Interval</th>
+      <th>Last Run</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for name, s in scripts.items() %}
+    <tr>
+      <td>{{ name }}</td>
+      <td>{{ s.status }}</td>
+      <td><span class="badge badge-{{ s.mode }}">{{ s.mode }}</span></td>
+      <td>{{ s.interval }}s</td>
+      <td>{{ s.last_run }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="text-muted">No scripts in registry.</p>
+{% endif %}
+
+{% endblock %}

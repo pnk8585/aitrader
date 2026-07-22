@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}AITrader · Telegram{% endblock %}
+{% block content %}
+<h1>Telegram</h1>
+
+<div class="card" style="max-width:520px">
+  <form hx-post="/ui/admin/telegram" hx-target="#telegram-feedback" hx-swap="innerHTML">
+    <div style="display:flex;flex-direction:column;gap:16px">
+      <div>
+        <label class="label" style="display:block;margin-bottom:4px">Bot Token</label>
+        <input type="password" name="token" autocomplete="off"
+               value=""
+               placeholder="{% if masked_token %}{{ masked_token }} (leave blank to keep current){% else %}123456:ABC-DEF...{% endif %}"
+               style="width:100%;padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:14px">
+        {% if token_set %}
+        <span class="text-muted" style="display:block;margin-top:4px">Token is set (masked). Leave blank to keep current.</span>
+        {% endif %}
+      </div>
+      <div>
+        <label class="label" style="display:block;margin-bottom:4px">Chat ID</label>
+        <input type="text" name="chat_id"
+               value="{{ chat_id or '' }}"
+               placeholder="123456789"
+               style="width:100%;padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:14px">
+      </div>
+      <div>
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+          <input type="checkbox" name="enabled" value="true" {% if enabled %}checked{% endif %}
+                 style="accent-color:var(--accent);width:16px;height:16px">
+          <span style="font-size:14px">Enabled</span>
+        </label>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button type="submit"
+                style="padding:8px 20px;background:var(--accent);color:#fff;border:none;border-radius:6px;font-size:14px;font-weight:600;cursor:pointer">
+          Save
+        </button>
+        <button type="button" hx-post="/ui/admin/telegram/test" hx-target="#telegram-feedback" hx-swap="innerHTML"
+                style="padding:8px 20px;background:transparent;color:var(--text);border:1px solid var(--border);border-radius:6px;font-size:14px;cursor:pointer">
+          Send test
+        </button>
+      </div>
+    </div>
+  </form>
+  <div id="telegram-feedback" style="margin-top:16px"></div>
+</div>
+{% endblock %}

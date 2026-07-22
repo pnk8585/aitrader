@@ -1,0 +1,15 @@
+.git
+logs/
+__pycache__/
+.venv/
+.env
+.env.paper
+.pytest_cache/
+*.egg-info/
+.orchestration/
+*.pyc
+*.pyo
+.gitignore
+.dockerignore
+Dockerfile
+docker-compose.yml

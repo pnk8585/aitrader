@@ -50,16 +50,32 @@ def _ensure_env():
 
 
 # ── Config ──────────────────────────────────────────────────────────
-AI_MODEL = "deepseek-v4-flash"
-LITELLM_BASE = "http://localhost:4000/v1"
+# ponytail: DB-first with env fallback; keep hardcoded default as last resort
+
+def _resolve_config():
+    """Resolve AI model, base_url, api_key. DB → env → defaults. Never crashes."""
+    _ensure_env()
+    model = os.getenv("AI_MODEL") or "deepseek-v4-flash"
+    base_url = os.getenv("LITELLM_BASE_URL") or "http://localhost:4000/v1"
+    api_key = os.getenv("DEEPSEEK_API_KEY")
+
+    try:
+        from app.settings import get_ai_config
+        cfg = get_ai_config()
+        model = cfg.get("model") or model
+        base_url = cfg.get("base_url") or base_url
+        api_key = cfg.get("api_key") or api_key
+    except Exception:
+        pass
+
+    return model, base_url, api_key
 
 
 def _get_client():
-    _ensure_env()
-    key = os.getenv("DEEPSEEK_API_KEY")
-    if not key:
-        raise RuntimeError("DEEPSEEK_API_KEY not found in environment")
-    return OpenAI(api_key=key, base_url=LITELLM_BASE)
+    model, base_url, api_key = _resolve_config()
+    if not api_key:
+        raise RuntimeError("DEEPSEEK_API_KEY not found in environment or settings")
+    return OpenAI(api_key=api_key, base_url=base_url), model
 
 
 def review_trade(
@@ -75,7 +91,7 @@ def review_trade(
     db_conn=None,  # optional — for price history enrichment
 ) -> dict:
     """Call LLM to evaluate a trade candidate. Returns {verdict, reason, confidence}."""
-    client = _get_client()
+    client, model = _get_client()
 
     # ── Price context from DB ────────────────────────────────────────
     price_ctx = ""
@@ -91,6 +107,29 @@ def review_trade(
         news_ctx = _fetch_news_parallel(symbol, timeout=4)
     except Exception as e:
         news_ctx = f"(news unavailable: {e})"
+
+    # ── Market strategy context (from daily Market Architect) ──────────
+    strategy_ctx = ""
+    try:
+        from traders.common.market_architect import get_strategy
+        strat = get_strategy()
+        if strat:
+            strategy_ctx = (
+                f"MARKET STRATEGY (Market Architect):\n"
+                f"  Market regime: {strat.get('market_regime', 'unknown')}\n"
+                f"  Risk level: {strat.get('risk_level', 'unknown')}\n"
+                f"  BTC regime: {strat.get('btc_regime', 'unknown')}\n"
+                f"  Pullback: {strat.get('pullback_adjustment', 'normal')}\n"
+                f"  Momentum: {strat.get('momentum_adjustment', 'normal')}\n"
+                f"  Max daily buys: {strat.get('max_daily_buys', 3)}\n"
+                f"  Geopolitical risk: {strat.get('geopolitical_risk', 'unknown')}\n"
+                f"  Macro events: {', '.join(strat.get('macro_events_today', [])) or 'none'}\n"
+                f"  Strategy notes: {strat.get('strategy_notes', '')[:200]}\n"
+            )
+        else:
+            strategy_ctx = "(Market Architect: strategy stale, regenerating — trade without macro context)\n"
+    except Exception as e:
+        strategy_ctx = f"(Market Architect unavailable: {e})\n"
 
     sig_str = "\n".join(f"  {k}: {v}" for k, v in sorted(signals.items()))
 
@@ -114,6 +153,7 @@ PRICE CONTEXT:
 NEWS:
 {news_ctx}
 
+{strategy_ctx}
 Evaluate this candidate. Return JSON:
 {{"verdict": "APPROVE"|"REJECT", "reason": "brief reason", "confidence": 1-10}}
 
@@ -121,11 +161,12 @@ Rules:
 - Default to APPROVE when evidence is balanced; reject only for clear reasons.
 - If score is negative or very low (< 2): lean REJECT.
 - Reject only for clear reasons: extreme volatility, conflicting signals, tiny capital.
-- Use price context: reject if the coin already pumped +15% in 6h (chasing top)."""
+- Use price context: reject if the coin already pumped +15% in 6h (chasing top).
+- Use the Market Strategy above to align with the macro view: if regime is bullish and pullback is aggressive, favor entries. If cautious/skip, be more selective."""
 
     try:
         resp = client.chat.completions.create(
-            model=AI_MODEL,
+            model=model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
             max_tokens=300,
@@ -158,17 +199,36 @@ Rules:
         }
         _log_review(symbol, strategy, price, score, signals,
                     portfolio_euro, available_euro, final)
+        _notify_verdict(final, symbol, strategy, price)
         return final
     except json.JSONDecodeError:
         final = {"verdict": "APPROVE", "reason": "LLM parse error, defaulting to APPROVE", "confidence": 5}
         _log_review(symbol, strategy, price, score, signals,
                     portfolio_euro, available_euro, final)
+        _notify_verdict(final, symbol, strategy, price)
         return final
     except Exception as e:
         final = {"verdict": "APPROVE", "reason": f"LLM error: {str(e)[:80]}", "confidence": 5}
         _log_review(symbol, strategy, price, score, signals,
                     portfolio_euro, available_euro, final)
+        _notify_verdict(final, symbol, strategy, price)
         return final
+
+
+def _notify_verdict(verdict: dict, symbol: str, strategy: str, price: float) -> None:
+    """Best-effort Telegram notification. Lazy import — never raises into the trade path."""
+    try:
+        from app.notify import send_telegram
+    except Exception:
+        return
+    try:
+        v = verdict.get("verdict", "?")
+        conf = verdict.get("confidence", "?")
+        emoji = "✅" if v == "APPROVE" else "❌" if v == "REJECT" else "⚠️"
+        msg = f"{emoji} {v}: {symbol} ({strategy}) @ €{price:.4f} conf={conf}"
+        send_telegram(msg)
+    except Exception:
+        pass
 
 
 def _log_review(symbol, strategy, price, score, signals,

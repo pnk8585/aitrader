@@ -1,0 +1,16 @@
+services:
+  aitrader:
+    build: .
+    container_name: aitrader
+    restart: unless-stopped
+    ports:
+      - "9237:9237"
+    env_file:
+      - /home/pank/docker-data/aitrader/.env
+    environment:
+      - AITRADER_STATE_DIR=/state
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - /home/pank/docker-data/aitrader:/state
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

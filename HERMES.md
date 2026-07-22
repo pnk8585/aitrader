@@ -44,3 +44,23 @@ AITrader Orchestrator (cron every 1m)
 - **Secrets/keys**: Never in project files — Bitwarden only (`DEEPSEEK_API_KEY`, `KRAKEN_API_KEY`, `ALPACA_API_KEY`, DB creds).
 - **Orchestrator config**: Edit `aitrader_orchestrator.json` to change modes/intervals.
 - **LLM model**: `deepseek-v4-flash` via LiteLLM at `localhost:4000`.
+
+## Docker
+
+The admin UI runs in a container; the orchestrator stays on the host.
+
+```bash
+# One-time: populate shared state dir
+bash scripts/init_state_dir.sh
+
+# Edit /home/pank/docker-data/aitrader/.env — set DB_HOST=host.docker.internal
+# (or the host LAN IP) so the container can reach the host's Postgres + LiteLLM.
+
+docker compose up -d --build
+# UI at http://localhost:9237
+# Health: curl http://localhost:9237/healthz
+```
+
+The container mounts `/home/pank/docker-data/aitrader` as `/state`. Mode changes
+in the UI write to `registry.json` there; the host orchestrator picks them up on
+its next tick. No scheduler runs inside the container.

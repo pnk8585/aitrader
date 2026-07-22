@@ -12,7 +12,15 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-REGISTRY_PATH = ROOT / "aitrader_orchestrator.json"
+
+from app import state as _app_state  # noqa: E402
+
+REGISTRY_PATH = _app_state.registry_path()
+# ponytail: fallback to old filename so existing cron keeps working before init_state_dir
+if not REGISTRY_PATH.exists():
+    _legacy = ROOT / "aitrader_orchestrator.json"
+    if _legacy.exists():
+        REGISTRY_PATH = _legacy
 
 ATHENS = timezone(timedelta(hours=3))
 
