@@ -108,7 +108,7 @@ create-tag:
         echo "Tag v${FULL_VERSION} already exists, skipping..."
       else
         git tag -a "v${FULL_VERSION}" -m "Release v${FULL_VERSION}"
-        git push "https://gitlab-ci-token:${GITLAB_TOKEN}@gitlab.pkatopodis.me/pank85/aitrader.git" "v${FULL_VERSION}"
+        git push "https://gitlab-ci-token:${GITLAB_TOKEN}@gitlab.pkatopodis.me/aiagents/aitrader.git" "v${FULL_VERSION}"
         echo "Successfully created tag v${FULL_VERSION}"
       fi
   only:
