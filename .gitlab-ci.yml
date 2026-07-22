@@ -10,9 +10,10 @@ stages:
   - deploy
 
 variables:
-  CI_REGISTRY: "gitlab-ce:5050"
-  CI_REGISTRY_IMAGE: "gitlab-ce:5050/$CI_PROJECT_PATH"
+  CI_REGISTRY: "dockerhub.pkatopodis.me"
+  CI_REGISTRY_IMAGE: "dockerhub.pkatopodis.me/pank85/aitrader"
   CI_SERVER_HOST: "gitlab-ce:8080"
+  GITLAB_REGISTRY_IMAGE: "gitlab-ce:5050/$CI_PROJECT_PATH"
   MAJOR_MINOR_VERSION: ""
   FULL_VERSION: ""
   PIP_CACHE_DIR: "$CI_PROJECT_DIR/.pip-cache"
@@ -25,7 +26,6 @@ cache:
 build:
   stage: build
   before_script:
-    # Extract version from pyproject.toml or default to 1.0
     - MAJOR_MINOR_VERSION=$(grep -oP '(?<=version = \")[^\"]+' pyproject.toml 2>/dev/null | cut -d'.' -f1,2 || echo "1.0")
     - DAY_OF_YEAR=$(date +%j)
     - YEAR_SHORT=$(date +%y)
@@ -63,7 +63,7 @@ docker-build:
     - name: docker:dind
       alias: docker
       entrypoint: ["dockerd"]
-      command: ["--host=tcp://0.0.0.0:2375", "--insecure-registry=gitlab-ce:5050"]
+      command: ["--host=tcp://0.0.0.0:2375", "--insecure-registry=gitlab-ce:5050", "--insecure-registry=dockerhub.pkatopodis.me"]
   variables:
     DOCKER_HOST: tcp://docker:2375
     DOCKER_TLS_CERTDIR: ""
@@ -71,11 +71,16 @@ docker-build:
     - until docker info; do sleep 1; done
     - echo "Docker build for version ${FULL_VERSION}"
     - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "gitlab-ce:5050"
   script:
     - docker build -t $CI_REGISTRY_IMAGE:${FULL_VERSION} -t $CI_REGISTRY_IMAGE:latest -t $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA .
     - docker push $CI_REGISTRY_IMAGE:latest
     - docker push $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
     - docker push $CI_REGISTRY_IMAGE:${FULL_VERSION}
+    - docker tag $CI_REGISTRY_IMAGE:latest $GITLAB_REGISTRY_IMAGE:latest
+    - docker tag $CI_REGISTRY_IMAGE:${FULL_VERSION} $GITLAB_REGISTRY_IMAGE:${FULL_VERSION}
+    - docker push $GITLAB_REGISTRY_IMAGE:latest
+    - docker push $GITLAB_REGISTRY_IMAGE:${FULL_VERSION}
     - echo "Pushed Docker images with version ${FULL_VERSION}"
   only:
     - main
