@@ -5,22 +5,32 @@
 
 <div class="cards">
   <div class="card">
+    <div class="label">Total Trades</div>
+    <div class="value">{{ summary.total_trades }}</div>
+  </div>
+  <div class="card">
+    <div class="label">Open Positions</div>
+    <div class="value">{{ summary.open_positions }}</div>
+  </div>
+  <div class="card">
+    <div class="label">Today</div>
+    <div class="value">{{ summary.today_trades }}</div>
+    <div class="sub">trades</div>
+  </div>
+  <div class="card">
+    <div class="label">Total P/L %</div>
+    <div class="value" style="color:{{ 'var(--green)' if summary.total_pl >= 0 else 'var(--red)' }}">{{ "%.2f"|format(summary.total_pl) }}%</div>
+  </div>
+  <div class="card">
     <div class="label">Scripts</div>
     <div class="value">{{ script_count }}</div>
-    <div class="sub">registered</div>
+    <div class="sub">{% for mode, count in modes.items() %}{{ mode }}: {{ count }} {% endfor %}</div>
   </div>
-  {% for mode, count in modes.items() %}
-  <div class="card">
-    <div class="label">{{ mode }}</div>
-    <div class="value">{{ count }}</div>
-    <div class="sub">scripts</div>
-  </div>
-  {% endfor %}
 </div>
 
 <!-- Recent Trades -->
 {% if recent_trades %}
-<h2 style="font-size:16px;margin-bottom:12px;margin-top:8px">Recent Trades</h2>
+<h2 style="font-size:15px;margin-bottom:10px;margin-top:4px">Recent Trades</h2>
 <table>
   <thead>
     <tr>
@@ -44,7 +54,7 @@
 
 <!-- Recent LLM Reviews -->
 {% if recent_reviews %}
-<h2 style="font-size:16px;margin:24px 0 12px">Recent LLM Reviews</h2>
+<h2 style="font-size:15px;margin:24px 0 10px">Recent LLM Reviews</h2>
 <table>
   <thead>
     <tr>
@@ -59,33 +69,7 @@
       <td>{{ r.symbol }}</td>
       <td><span class="badge badge-{{ 'live' if r.verdict == 'buy' else ('paper' if r.verdict == 'sell' else 'paused') }}">{{ r.verdict }}</span></td>
       <td>{{ r.score }}</td>
-      <td class="text-muted" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ r.reason or '—' }}</td>
-    </tr>
-  {% endfor %}
-  </tbody>
-</table>
-{% endif %}
-
-{% if scripts %}
-<h2 style="font-size:16px;margin:24px 0 12px">Cron Scripts</h2>
-<table>
-  <thead>
-    <tr>
-      <th>Name</th>
-      <th>Status</th>
-      <th>Mode</th>
-      <th>Interval</th>
-      <th>Last Run</th>
-    </tr>
-  </thead>
-  <tbody>
-  {% for name, s in scripts.items() %}
-    <tr>
-      <td>{{ name }}</td>
-      <td>{{ s.status }}</td>
-      <td><span class="badge badge-{{ s.mode }}">{{ s.mode }}</span></td>
-      <td>{{ s.interval }}s</td>
-      <td class="text-muted">{{ s.get("last_run", "—") }}</td>
+      <td class="text-muted" style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ r.reason or '—' }}</td>
     </tr>
   {% endfor %}
   </tbody>

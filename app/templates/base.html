@@ -123,6 +123,8 @@
     <span class="brand">AITrader</span>
     <a href="/" {% if request.url.path == "/" %}class="active"{% endif %}>Dashboard</a>
     <a href="/ui/admin" {% if request.url.path.startswith("/ui/admin") %}class="active"{% endif %}>Admin</a>
+    <span style="color:var(--border);margin:0 4px">|</span>
+    <a href="/ui/admin/data" {% if request.url.path.startswith("/ui/admin/data") %}class="active"{% endif %}>Data</a>
   </nav>
   <main>
     {% block content %}{% endblock %}

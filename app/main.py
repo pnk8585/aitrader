@@ -51,9 +51,18 @@ async def dashboard(request: Request):
     from app.db import get_conn
     recent_trades = []
     recent_reviews = []
+    summary = {"total_trades": 0, "open_positions": 0, "today_trades": 0, "total_pl": 0.0}
     try:
         with get_conn() as conn:
             cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM trade_log")
+            summary["total_trades"] = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM trading_state")
+            summary["open_positions"] = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM trade_log WHERE timestamp >= CURRENT_DATE")
+            summary["today_trades"] = cur.fetchone()[0]
+            cur.execute("SELECT COALESCE(SUM(unrealized_plpc), 0) FROM trading_state")
+            summary["total_pl"] = round(float(cur.fetchone()[0] or 0), 2)
             cur.execute("SELECT timestamp, exchange, action, ticker, entry_price, unrealized_plpc FROM trade_log ORDER BY timestamp DESC LIMIT 5")
             recent_trades = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
             cur.execute("SELECT created_at, strategy, symbol, verdict, score, reason FROM llm_review_log ORDER BY created_at DESC LIMIT 5")
@@ -65,7 +74,7 @@ async def dashboard(request: Request):
         "script_count": len(scripts),
         "modes": modes,
         "last_orch_run": orchestrator.get("last_run", "never"),
-        "scripts": scripts,
+        "summary": summary,
         "recent_trades": recent_trades,
         "recent_reviews": recent_reviews,
     }
