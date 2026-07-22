@@ -20,10 +20,11 @@ sys.path.insert(0, str(ROOT))
 
 # name → (script_path, interval_seconds, default_mode)
 JOB_REGISTRY: dict[str, tuple[str, int, str]] = {
-    "kraken-pullback":  ("traders/crypto_trades/kraken_pullback.py", 300,  "live"),
-    "kraken-momentum":  ("traders/crypto_trades/kraken_momentum.py", 300,  "paper"),
-    "position-monitor": ("position_monitor.py",                       7200, "live"),
-    "alpaca-stocks":    ("traders/trades/alpaca_stocks.py",           300,  "live"),
+    "kraken-pullback":    ("traders/crypto_trades/kraken_pullback.py", 300,  "live"),
+    "kraken-momentum":    ("traders/crypto_trades/kraken_momentum.py", 300,  "paper"),
+    "position-monitor":   ("position_monitor.py",                       7200, "live"),
+    "alpaca-stocks":      ("traders/trades/alpaca_stocks.py",           300,  "live"),
+    "end-of-day-review":  ("traders/eod_review.py",                    86400, "live"),
 }
 
 _RUNNING_STALE = timedelta(hours=3)
