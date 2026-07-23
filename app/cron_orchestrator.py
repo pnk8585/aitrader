@@ -15,6 +15,8 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from app.notify import send_telegram
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
@@ -148,6 +150,13 @@ def _finish_run(db, run_id: int, name: str, status: str, summary: str,
             (_now() + timedelta(seconds=interval), _now(), name),
         )
     db.commit()
+
+    # ── Telegram notification ────────────────────────────────
+    if summary and summary not in ("completed",):
+        try:
+            send_telegram(f"🤖 {name}\n{summary[:3800]}")
+        except Exception:
+            pass  # notification is best-effort
 
     return {"name": name, "status": status, "summary": summary, "duration_ms": duration_ms}
 
