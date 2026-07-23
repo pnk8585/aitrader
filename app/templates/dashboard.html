@@ -36,6 +36,7 @@
 <!-- Open Positions -->
 {% if open_positions %}
 <h2 style="font-size:15px;margin:24px 0 10px">Open Positions</h2>
+<div id="sell-flash"></div>
 <table>
   <thead><tr><th>Exch</th><th>Symbol</th><th>Entry</th><th>Current P/L %</th><th>Peak P/L %</th><th>Qty</th><th>Since</th><th></th></tr></thead>
   <tbody>
@@ -47,7 +48,7 @@
       <td style="color:{{ 'var(--green)' if (p.peak_plpc or 0) > 0 else 'var(--red)' }}">{{ "%.2f%%"|format(p.peak_plpc) if p.peak_plpc else '—' }}</td>
       <td>{{ p.quantity }}</td>
       <td class="text-muted">{{ p.entry_time.strftime('%m-%d %H:%M') if p.entry_time else '—' }}</td>
-      <td><button class="btn-action btn-danger" hx-post="/ui/admin/positions/{{ p.exchange }}/{{ p.symbol }}/sell" hx-swap="outerHTML">Sell</button></td>
+      <td><button class="btn-action btn-danger" hx-post="/ui/admin/positions/{{ p.exchange }}/{{ p.symbol }}/sell" hx-target="#sell-flash" hx-swap="innerHTML">Sell</button></td>
     </tr>
   {% endfor %}
   </tbody>

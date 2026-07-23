@@ -1,4 +1,5 @@
 <div id="cron-db-table" hx-get="/ui/admin/cron/db-table" hx-trigger="every 10s" hx-swap="outerHTML">
+  <div id="cron-flash"></div>
   <table>
     <thead>
       <tr>
@@ -20,9 +21,14 @@
         <td>{{ "✅" if j.enabled else "⏸️" }}</td>
         <td class="text-muted">{{ j.next_run_at.strftime("%d/%m %H:%M") if j.next_run_at else "—" }}</td>
         <td class="text-muted">{{ j.updated_at.strftime("%d/%m %H:%M") if j.updated_at else "—" }}</td>
-        <td><button class="btn-action" hx-post="/ui/admin/cron-jobs/{{ j.name }}/run" hx-target="#cron-db-table" hx-swap="outerHTML">Run</button></td>
+        <td>
+          <button class="btn-action" hx-post="/ui/admin/cron-jobs/{{ j.name }}/run" hx-target="#cron-db-table" hx-swap="outerHTML" hx-indicator="#cron-spinner">
+            Run
+          </button>
+        </td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
+  <div id="cron-spinner" class="htmx-indicator" style="text-align:center;padding:8px;color:var(--text-muted)">Running...</div>
 </div>
