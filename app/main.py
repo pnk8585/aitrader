@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -16,7 +15,6 @@ load_dotenv()
 from app.db import init_schema  # noqa: E402
 from app.render import partial  # noqa: E402
 from app.settings import get_ai_config, set_setting  # noqa: E402
-from app.state import _STATE_DIR  # noqa: E402
 
 app = FastAPI(title="AITrader")
 templates = Jinja2Templates("app/templates")
@@ -27,31 +25,16 @@ async def _startup():
     init_schema()
 
 
-def _read_registry() -> dict:
-    """Read registry JSON, trying both possible paths."""
-    for name in ("registry.json", "aitrader_orchestrator.json"):
-        path = _STATE_DIR / name
-        if path.exists():
-            return json.loads(path.read_text())
-    return {}
-
-
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
-    reg = _read_registry()
-    scripts = reg.get("scripts", {})
-    orchestrator = reg.get("orchestrator", {})
-    modes = {}
-    for s in scripts.values():
-        m = s.get("mode", "unknown")
-        modes[m] = modes.get(m, 0) + 1
-
-    # Recent trade data
     from app.db import get_conn
     today_trades = []
     open_positions = []
     recent_reviews = []
     summary = {"total_trades": 0, "open_positions": 0, "today_trades": 0, "total_pl": 0.0}
+    script_count = 0
+    modes = {}
+    last_orch_run = "never"
     try:
         with get_conn() as conn:
             cur = conn.cursor()
@@ -82,13 +65,23 @@ async def dashboard(request: Request):
             # Recent LLM reviews
             cur.execute("SELECT created_at, strategy, symbol, verdict, score, reason FROM llm_review_log ORDER BY created_at DESC LIMIT 10")
             recent_reviews = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
+            # Cron jobs stats
+            cur.execute("SELECT COUNT(*) FROM cron_jobs WHERE enabled = TRUE")
+            script_count = cur.fetchone()[0]
+            cur.execute("SELECT mode, COUNT(*) FROM cron_jobs WHERE enabled = TRUE GROUP BY mode")
+            for mode, cnt in cur.fetchall():
+                modes[mode] = cnt
+            cur.execute("SELECT MAX(updated_at) FROM cron_jobs")
+            row = cur.fetchone()
+            if row and row[0]:
+                last_orch_run = row[0].strftime("%d/%m %H:%M")
     except Exception:
         pass
 
     ctx = {
-        "script_count": len(scripts),
+        "script_count": script_count,
         "modes": modes,
-        "last_orch_run": orchestrator.get("last_run", "never"),
+        "last_orch_run": last_orch_run,
         "summary": summary,
         "today_trades": today_trades,
         "open_positions": open_positions,

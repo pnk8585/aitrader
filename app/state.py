@@ -8,10 +8,6 @@ from pathlib import Path
 _STATE_DIR = Path(os.environ.get("AITRADER_STATE_DIR", "/home/pank/projects/aitrader"))
 
 
-def registry_path() -> Path:
-    return _STATE_DIR / "registry.json"
-
-
 def env_path() -> Path:
     return _STATE_DIR / ".env"
 
