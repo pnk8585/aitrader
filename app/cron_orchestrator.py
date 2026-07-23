@@ -25,6 +25,7 @@ JOB_REGISTRY: dict[str, tuple[str, int, str]] = {
     "position-monitor":   ("position_monitor.py",                       7200, "live"),
     "alpaca-stocks":      ("traders/trades/alpaca_stocks.py",           300,  "live"),
     "end-of-day-review":  ("traders/eod_review.py",                    86400, "live"),
+    "db-cleanup":         ("scripts/db_cleanup.py",                   86400, "live"),
 }
 
 _RUNNING_STALE = timedelta(hours=3)
