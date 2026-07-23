@@ -604,8 +604,7 @@ def run_cycle():
 
 def main():
     # ── Orchestrator integration ──────────────────────────────────────
-    import aitrader_registry as orch
-    orch.mark_started("alpaca-stocks")
+    # Run tracking handled by container cron_orchestrator (DB-driven)
     # ──────────────────────────────────────────────────────────────────
 
     # Single-instance lock: a second overlapping cron job would double orders
@@ -635,10 +634,7 @@ def main():
             pass
 
     # ── Orchestrator: schedule next run ──────────────────────────────
-    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
-    _ath = _tz(_td(hours=3))
-    _next = (_dt.now(_ath) + _td(minutes=5)).isoformat()
-    orch.mark_done("alpaca-stocks", _next)
+    # (no-op: next_run_at managed by container cron_orchestrator)
 
 
 if __name__ == "__main__":

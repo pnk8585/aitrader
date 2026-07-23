@@ -603,8 +603,7 @@ def run_cycle():
 
 def main():
     # ── Orchestrator integration ──────────────────────────────────────
-    import aitrader_registry as orch
-    orch.mark_started(EXCHANGE_NAME.replace("paper-", "").replace("kraken-pullback", "kraken-pullback"))
+    # Run tracking handled by container cron_orchestrator (DB-driven)
     # ──────────────────────────────────────────────────────────────────
 
     # Single-instance lock: a second */5 job (or a slow overrun) that overlaps
@@ -633,10 +632,7 @@ def main():
             pass
 
     # ── Orchestrator: schedule next run ──────────────────────────────
-    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
-    _ath = _tz(_td(hours=3))
-    _next = (_dt.now(_ath) + _td(minutes=5)).isoformat()
-    orch.mark_done("kraken-pullback", _next)
+    # (no-op: next_run_at managed by container cron_orchestrator)
 
 
 if __name__ == "__main__":
