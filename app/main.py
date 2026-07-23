@@ -126,9 +126,11 @@ async def dashboard(request: Request, tsearch: str = "", tdate: str = "all", rse
                 p["position_value"] = None
                 if p["entry_price"]:
                     if p["exchange"] == "kraken":
+                        # trading_state stores "AVAX/EUR", asset_prices stores "AVAX" — strip quote currency
+                        sym = p["symbol"].split("/")[0] if "/" in str(p["symbol"]) else p["symbol"]
                         cur.execute(
                             "SELECT price FROM asset_prices WHERE exchange='kraken' AND symbol=%s ORDER BY timestamp DESC LIMIT 1",
-                            (p["symbol"],))
+                            (sym,))
                         row = cur.fetchone()
                         if row and row[0]:
                             cp = float(row[0])
