@@ -119,16 +119,23 @@ async def dashboard(request: Request, tsearch: str = "", tdate: str = "all", rse
             # Open positions
             cur.execute("SELECT exchange, symbol, entry_price, entry_time, peak_plpc, quantity FROM trading_state ORDER BY entry_time DESC")
             open_positions = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
-            # Current P/L from latest kraken price (Alpaca has no asset_prices data)
+            # Enrich with current price, P/L, and position value
             for p in open_positions:
+                p["current_price"] = None
                 p["current_pl"] = None
-                if p["exchange"] == "kraken" and p["entry_price"]:
-                    cur.execute(
-                        "SELECT price FROM asset_prices WHERE exchange='kraken' AND symbol=%s ORDER BY timestamp DESC LIMIT 1",
-                        (p["symbol"],))
-                    row = cur.fetchone()
-                    if row and row[0]:
-                        p["current_pl"] = round((float(row[0]) - float(p["entry_price"])) / float(p["entry_price"]) * 100, 2)
+                p["position_value"] = None
+                if p["entry_price"]:
+                    if p["exchange"] == "kraken":
+                        cur.execute(
+                            "SELECT price FROM asset_prices WHERE exchange='kraken' AND symbol=%s ORDER BY timestamp DESC LIMIT 1",
+                            (p["symbol"],))
+                        row = cur.fetchone()
+                        if row and row[0]:
+                            cp = float(row[0])
+                            p["current_price"] = round(cp, 6)
+                            p["current_pl"] = round((cp - float(p["entry_price"])) / float(p["entry_price"]) * 100, 2)
+                            qty = float(p.get("quantity", 0) or 0)
+                            p["position_value"] = round(cp * qty, 2)
             # Cron jobs stats
             cur.execute("SELECT COUNT(*) FROM cron_jobs WHERE enabled = TRUE")
             script_count = cur.fetchone()[0]
