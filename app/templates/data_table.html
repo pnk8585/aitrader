@@ -4,14 +4,6 @@
 <h1>{{ table }}</h1>
 <p class="text-muted">{{ total }} row{{ "" if total == 1 else "s" }}</p>
 
-{# ponytail: date-col = first column whose name looks date-ish; -1 if none #}
-{% set ns = namespace(date_col=-1) %}
-{% for col in columns %}
-  {% if ns.date_col == -1 and ("timestamp" in col or "date" in col or col.endswith("_at")) %}
-    {% set ns.date_col = loop.index0 %}
-  {% endif %}
-{% endfor %}
-
 <div class="table-filter" style="display:flex;gap:8px;margin:8px 0">
   <input type="text" class="filter-input filter-text" data-target="tbl-data" placeholder="Αναζήτηση..." style="max-width:220px">
   <select class="filter-input filter-date" data-target="tbl-data" style="max-width:160px">
@@ -45,7 +37,7 @@
     </thead>
     <tbody>
       {% for row in rows %}
-      <tr{% if ns.date_col >= 0 and row[ns.date_col] is not none %} data-date="{{ row[ns.date_col] }}"{% endif %}>
+      <tr>
         {% for val in row %}
         <td>{{ val if val is not none else "" }}</td>
         {% endfor %}
