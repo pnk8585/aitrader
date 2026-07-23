@@ -116,8 +116,8 @@ async def dashboard(request: Request, tsearch: str = "", tdate: str = "all", rse
             summary["today_trades"] = cur.fetchone()[0]
             cur.execute("SELECT COALESCE(SUM(peak_plpc), 0) FROM trading_state")
             summary["total_pl"] = round(float(cur.fetchone()[0] or 0), 2)
-            # Open positions
-            cur.execute("SELECT exchange, symbol, entry_price, entry_time, peak_plpc, quantity FROM trading_state ORDER BY entry_time DESC")
+            # Open positions — exclude ghost positions (quantity=0 or entry_price=0)
+            cur.execute("SELECT exchange, symbol, entry_price, entry_time, peak_plpc, quantity FROM trading_state WHERE quantity > 0 AND entry_price > 0 ORDER BY entry_time DESC")
             open_positions = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
             # Enrich with current price, P/L, and position value
             for p in open_positions:
