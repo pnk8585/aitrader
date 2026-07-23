@@ -42,7 +42,7 @@
       <td style="color:{{ 'var(--green)' if (p.peak_plpc or 0) > 0 else 'var(--red)' }}">{{ "%.2f%%"|format(p.peak_plpc) if p.peak_plpc else '—' }}</td>
       <td>{{ p.quantity }}</td>
       <td class="text-muted">{{ p.entry_time.strftime('%m-%d %H:%M') if p.entry_time else '—' }}</td>
-      <td><button hx-post="/ui/admin/positions/{{ p.exchange }}/{{ p.symbol }}/sell" hx-swap="outerHTML">Sell</button></td>
+      <td><button class="btn-action btn-danger" hx-post="/ui/admin/positions/{{ p.exchange }}/{{ p.symbol }}/sell" hx-swap="outerHTML">Sell</button></td>
     </tr>
   {% endfor %}
   </tbody>
@@ -52,11 +52,21 @@
 <!-- Today's Trades -->
 {% if today_trades %}
 <h2 style="font-size:15px;margin:24px 0 10px">Today's Trades</h2>
-<table>
+<div class="table-filter" style="display:flex;gap:8px;margin:8px 0">
+  <input type="text" class="filter-input filter-text" data-target="tbl-today" placeholder="Αναζήτηση..." style="max-width:220px">
+  <select class="filter-input filter-date" data-target="tbl-today" style="max-width:160px">
+    <option value="all">Όλα</option>
+    <option value="today">Σήμερα</option>
+    <option value="yesterday">Χθες</option>
+    <option value="month">Τρέχων Μήνας</option>
+    <option value="year">Τρέχον Έτος</option>
+  </select>
+</div>
+<table id="tbl-today">
   <thead><tr><th>Time</th><th>Exch</th><th>Ticker</th><th>Entry</th><th>P/L %</th><th>Qty</th><th>Reason</th></tr></thead>
   <tbody>
   {% for t in today_trades %}
-    <tr>
+    <tr data-date="{{ t.timestamp.isoformat() if t.timestamp else '' }}">
       <td style="font-size:12px">{{ t.timestamp.strftime('%H:%M') if t.timestamp else '—' }}</td>
       <td>{{ t.exchange }}</td>
       <td>{{ t.ticker }}</td>
@@ -73,12 +83,22 @@
 <!-- Recent LLM Reviews -->
 {% if recent_reviews %}
 <h2 style="font-size:15px;margin:24px 0 10px">Recent LLM Reviews</h2>
-<table>
+<div class="table-filter" style="display:flex;gap:8px;margin:8px 0">
+  <input type="text" class="filter-input filter-text" data-target="tbl-reviews" placeholder="Αναζήτηση..." style="max-width:220px">
+  <select class="filter-input filter-date" data-target="tbl-reviews" style="max-width:160px">
+    <option value="all">Όλα</option>
+    <option value="today">Σήμερα</option>
+    <option value="yesterday">Χθες</option>
+    <option value="month">Τρέχων Μήνας</option>
+    <option value="year">Τρέχον Έτος</option>
+  </select>
+</div>
+<table id="tbl-reviews">
   <thead><tr><th>Time</th><th>Strategy</th><th>Symbol</th><th>Verdict</th><th>Score</th><th>Reason</th></tr></thead>
   <tbody>
   {% for r in recent_reviews %}
-    <tr>
-      <td style="font-size:12px">{{ r.created_at.strftime('%H:%M') if r.created_at else '—' }}</td>
+    <tr data-date="{{ r.created_at.isoformat() if r.created_at else '' }}">
+      <td style="font-size:12px">{{ r.created_at.strftime('%d/%m %H:%M') if r.created_at else '—' }}</td>
       <td>{{ r.strategy }}</td><td>{{ r.symbol }}</td>
       <td><span class="badge badge-{{ 'live' if r.verdict == 'buy' else ('paper' if r.verdict == 'sell' else 'paused') }}">{{ r.verdict }}</span></td>
       <td>{{ r.score }}</td>
@@ -89,4 +109,42 @@
 </table>
 {% endif %}
 
+<script>
+// ponytail: client-side table filters (text + date range) for Today's Trades and LLM Reviews
+(function () {
+  function sameDay(a, b) {
+    return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+  }
+  function inRange(d, range, now) {
+    if (isNaN(d)) return false;
+    if (range === 'today') return sameDay(d, now);
+    if (range === 'yesterday') { var y = new Date(now); y.setDate(now.getDate() - 1); return sameDay(d, y); }
+    if (range === 'month') return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth();
+    if (range === 'year') return d.getFullYear() === now.getFullYear();
+    return true;
+  }
+  function apply(targetId) {
+    var table = document.getElementById(targetId);
+    if (!table) return;
+    var textEl = document.querySelector('.filter-text[data-target="' + targetId + '"]');
+    var dateEl = document.querySelector('.filter-date[data-target="' + targetId + '"]');
+    var q = (textEl && textEl.value || '').toLowerCase();
+    var range = dateEl && dateEl.value || 'all';
+    var now = new Date();
+    table.querySelectorAll('tbody tr').forEach(function (row) {
+      var show = true;
+      if (q) show = row.textContent.toLowerCase().indexOf(q) !== -1;
+      if (show && range !== 'all') {
+        var ds = row.getAttribute('data-date');
+        show = ds ? inRange(new Date(ds), range, now) : false;
+      }
+      row.style.display = show ? '' : 'none';
+    });
+  }
+  document.querySelectorAll('.filter-text, .filter-date').forEach(function (el) {
+    var ev = el.classList.contains('filter-text') ? 'input' : 'change';
+    el.addEventListener(ev, function () { apply(el.getAttribute('data-target')); });
+  });
+})();
+</script>
 {% endblock %}
