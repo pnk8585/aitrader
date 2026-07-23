@@ -4,10 +4,29 @@
 <h1>{{ table }}</h1>
 <p class="text-muted">{{ total }} row{{ "" if total == 1 else "s" }}</p>
 
+{# ponytail: date-col = first column whose name looks date-ish; -1 if none #}
+{% set ns = namespace(date_col=-1) %}
+{% for col in columns %}
+  {% if ns.date_col == -1 and ("timestamp" in col or "date" in col or col.endswith("_at")) %}
+    {% set ns.date_col = loop.index0 %}
+  {% endif %}
+{% endfor %}
+
+<div class="table-filter" style="display:flex;gap:8px;margin:8px 0">
+  <input type="text" class="filter-input filter-text" data-target="tbl-data" placeholder="Αναζήτηση..." style="max-width:220px">
+  <select class="filter-input filter-date" data-target="tbl-data" style="max-width:160px">
+    <option value="all">Όλα</option>
+    <option value="today">Σήμερα</option>
+    <option value="yesterday">Χθες</option>
+    <option value="month">Τρέχων Μήνας</option>
+    <option value="year">Τρέχον Έτος</option>
+  </select>
+</div>
+
 <form method="get">
   <input type="hidden" name="sort" value="{{ sort }}">
   <input type="hidden" name="dir" value="{{ dir }}">
-  <table>
+  <table id="tbl-data">
     <thead>
       <tr>
         {% for col in columns %}
@@ -26,7 +45,7 @@
     </thead>
     <tbody>
       {% for row in rows %}
-      <tr>
+      <tr{% if ns.date_col >= 0 and row[ns.date_col] is not none %} data-date="{{ row[ns.date_col] }}"{% endif %}>
         {% for val in row %}
         <td>{{ val if val is not none else "" }}</td>
         {% endfor %}
@@ -45,4 +64,41 @@
   <a class="{{ 'disabled' if page >= total_pages }}" href="?{{ filter_qs }}{% if filter_qs %}&{% endif %}sort={{ sort }}&dir={{ dir }}&page={{ page + 1 }}">Next</a>
 </div>
 
+<script>
+(function () {
+  function sameDay(a, b) {
+    return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+  }
+  function inRange(d, range, now) {
+    if (isNaN(d)) return false;
+    if (range === 'today') return sameDay(d, now);
+    if (range === 'yesterday') { var y = new Date(now); y.setDate(now.getDate() - 1); return sameDay(d, y); }
+    if (range === 'month') return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth();
+    if (range === 'year') return d.getFullYear() === now.getFullYear();
+    return true;
+  }
+  function apply(targetId) {
+    var table = document.getElementById(targetId);
+    if (!table) return;
+    var textEl = document.querySelector('.filter-text[data-target="' + targetId + '"]');
+    var dateEl = document.querySelector('.filter-date[data-target="' + targetId + '"]');
+    var q = (textEl && textEl.value || '').toLowerCase();
+    var range = dateEl && dateEl.value || 'all';
+    var now = new Date();
+    table.querySelectorAll('tbody tr').forEach(function (row) {
+      var show = true;
+      if (q) show = row.textContent.toLowerCase().indexOf(q) !== -1;
+      if (show && range !== 'all') {
+        var ds = row.getAttribute('data-date');
+        show = ds ? inRange(new Date(ds), range, now) : false;
+      }
+      row.style.display = show ? '' : 'none';
+    });
+  }
+  document.querySelectorAll('.filter-text, .filter-date').forEach(function (el) {
+    var ev = el.classList.contains('filter-text') ? 'input' : 'change';
+    el.addEventListener(ev, function () { apply(el.getAttribute('data-target')); });
+  });
+})();
+</script>
 {% endblock %}
