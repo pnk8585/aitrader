@@ -32,7 +32,7 @@ _TRADES_COLS = ["timestamp", "exchange", "ticker", "entry_price", "unrealized_pl
 _TRADES_SEARCH = ["exchange", "ticker", "action", "reason"]
 _REVIEWS_COLS = ["created_at", "strategy", "symbol", "verdict", "score", "reason"]
 _REVIEWS_SEARCH = ["strategy", "symbol", "verdict", "reason"]
-_DASH_LIMIT = 200  # ponytail: cap dashboard rows; add pagination if a table outgrows this
+_DASH_LIMIT = 5  # ponytail: show last 5 on dashboard
 
 
 def _date_clause(date_col: str, date: str):
