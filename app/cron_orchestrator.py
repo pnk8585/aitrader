@@ -32,6 +32,12 @@ JOB_REGISTRY: dict[str, tuple[str, int, str]] = {
 
 _RUNNING_STALE = timedelta(hours=3)
 
+# Jobs that only notify on real trade signals (not every run)
+_TRADE_SIGNAL_JOBS = frozenset({"kraken-pullback", "kraken-momentum", "alpaca-stocks"})
+_TRADE_SIGNAL_KEYWORDS = ("BUY", "SELL", "🛒", "🔄", "entry", "exit",
+                           "trade placed", "order filled", "bought", "sold",
+                           "opening", "closing", "⚠️", "PENDING_AI_REVIEW")
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -153,10 +159,21 @@ def _finish_run(db, run_id: int, name: str, status: str, summary: str,
 
     # ── Telegram notification ────────────────────────────────
     if summary and summary not in ("completed",):
-        try:
-            send_telegram(f"🤖 {name}\n{summary[:3800]}")
-        except Exception:
-            pass  # notification is best-effort
+        if name in _TRADE_SIGNAL_JOBS:
+            # Only notify on real trade signals
+            if not any(kw in summary for kw in _TRADE_SIGNAL_KEYWORDS):
+                pass  # silent — no trade happened
+            else:
+                try:
+                    send_telegram(f"🤖 {name}\n{summary[:3800]}")
+                except Exception:
+                    pass
+        else:
+            # Non-trading jobs: always notify
+            try:
+                send_telegram(f"🤖 {name}\n{summary[:3800]}")
+            except Exception:
+                pass
 
     return {"name": name, "status": status, "summary": summary, "duration_ms": duration_ms}
 
