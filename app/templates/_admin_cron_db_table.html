@@ -8,6 +8,7 @@
         <th>Enabled</th>
         <th>Next Run</th>
         <th>Updated</th>
+        <th>Run</th>
       </tr>
     </thead>
     <tbody>
@@ -19,6 +20,7 @@
         <td>{{ "✅" if j.enabled else "⏸️" }}</td>
         <td class="text-muted">{{ j.next_run_at.strftime("%d/%m %H:%M") if j.next_run_at else "—" }}</td>
         <td class="text-muted">{{ j.updated_at.strftime("%d/%m %H:%M") if j.updated_at else "—" }}</td>
+        <td><button hx-post="/ui/admin/cron-jobs/{{ j.name }}/run" hx-target="#cron-db-table" hx-swap="outerHTML">Run</button></td>
       </tr>
       {% endfor %}
     </tbody>

@@ -13,7 +13,6 @@ from fastapi.templating import Jinja2Templates
 
 load_dotenv()
 
-from app import cron  # noqa: E402
 from app.db import init_schema  # noqa: E402
 from app.render import partial  # noqa: E402
 from app.settings import get_ai_config, set_setting  # noqa: E402
@@ -70,6 +69,16 @@ async def dashboard(request: Request):
             # Open positions
             cur.execute("SELECT exchange, symbol, entry_price, entry_time, peak_plpc, quantity FROM trading_state ORDER BY entry_time DESC")
             open_positions = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
+            # Current P/L from latest kraken price (Alpaca has no asset_prices data)
+            for p in open_positions:
+                p["current_pl"] = None
+                if p["exchange"] == "kraken" and p["entry_price"]:
+                    cur.execute(
+                        "SELECT price FROM asset_prices WHERE exchange='kraken' AND symbol=%s ORDER BY timestamp DESC LIMIT 1",
+                        (p["symbol"],))
+                    row = cur.fetchone()
+                    if row and row[0]:
+                        p["current_pl"] = round((float(row[0]) - float(p["entry_price"])) / float(p["entry_price"]) * 100, 2)
             # Recent LLM reviews
             cur.execute("SELECT created_at, strategy, symbol, verdict, score, reason FROM llm_review_log ORDER BY created_at DESC LIMIT 10")
             recent_reviews = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
@@ -205,10 +214,9 @@ async def telegram_test(request: Request):
 async def cron_page(request: Request):
     from app.cron_orchestrator import list_jobs
     from app.db import get_conn
-    scripts = cron.list_scripts()
     with get_conn() as conn:
         jobs = list_jobs(conn)
-    return templates.TemplateResponse(request, "admin_cron.html", {"scripts": scripts, "jobs": jobs})
+    return templates.TemplateResponse(request, "admin_cron.html", {"jobs": jobs})
 
 
 @app.get("/ui/admin/cron/db-table", response_class=HTMLResponse)
@@ -221,52 +229,37 @@ async def cron_db_table(request: Request):
     return HTMLResponse(html)
 
 
-@app.get("/ui/admin/cron/table", response_class=HTMLResponse)
-async def cron_table(request: Request):
-    scripts = cron.list_scripts()
-    html = partial(request, "_admin_cron_table.html", scripts=scripts)
+@app.post("/ui/admin/cron-jobs/{name}/run", response_class=HTMLResponse)
+async def cron_job_run(name: str, request: Request):
+    from app.cron_orchestrator import list_jobs, run_job
+    from app.db import get_conn
+    with get_conn() as conn:
+        try:
+            run_job(conn, name)
+        except Exception as e:
+            return HTMLResponse(
+                f'<div class="flash flash-err">{e}</div>', status_code=400
+            )
+        jobs = list_jobs(conn)
+    html = partial(request, "_admin_cron_db_table.html", jobs=jobs)
     return HTMLResponse(html)
 
 
-@app.post("/ui/admin/cron/{name}/mode", response_class=HTMLResponse)
-async def cron_set_mode(name: str, request: Request):
-    data = await request.form()
-    mode = data.get("mode", "")
-    try:
-        cron.set_mode(name, mode)
-    except (ValueError, KeyError) as e:
-        return HTMLResponse(
-            f'<div class="flash flash-err">{e}</div>', status_code=400
-        )
-    scripts = cron.list_scripts()
-    html = partial(request, "_admin_cron_table.html", scripts=scripts)
-    return HTMLResponse(html)
-
-
-@app.post("/ui/admin/cron/{name}/run", response_class=HTMLResponse)
-async def cron_run_now(name: str, request: Request):
-    try:
-        cron.run_now(name)
-    except KeyError as e:
-        return HTMLResponse(
-            f'<div class="flash flash-err">{e}</div>', status_code=400
-        )
-    scripts = cron.list_scripts()
-    html = partial(request, "_admin_cron_table.html", scripts=scripts)
-    return HTMLResponse(html)
-
-
-@app.post("/ui/admin/cron/{name}/pause", response_class=HTMLResponse)
-async def cron_pause(name: str, request: Request):
-    try:
-        cron.pause(name)
-    except KeyError as e:
-        return HTMLResponse(
-            f'<div class="flash flash-err">{e}</div>', status_code=400
-        )
-    scripts = cron.list_scripts()
-    html = partial(request, "_admin_cron_table.html", scripts=scripts)
-    return HTMLResponse(html)
+@app.post("/ui/admin/positions/{exchange}/{symbol}/sell", response_class=HTMLResponse)
+async def position_sell(exchange: str, symbol: str, request: Request):
+    from app.db import get_conn
+    from app.notify import send_telegram
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT 1 FROM trading_state WHERE exchange=%s AND symbol=%s",
+            (exchange, symbol))
+        if cur.fetchone() is None:
+            return HTMLResponse(
+                '<div class="flash flash-err">Position not found</div>', status_code=404)
+    send_telegram(f"🔴 SELL REQUEST: {exchange} {symbol} @ market")
+    return HTMLResponse(
+        f'<div class="flash">Sell request sent for {exchange} {symbol}</div>')
 
 
 @app.get("/ui/admin/cron-jobs")
@@ -275,19 +268,6 @@ async def cron_jobs_api(request: Request):
     from app.db import get_conn
     with get_conn() as conn:
         return list_jobs(conn)
-
-
-@app.post("/ui/admin/cron/{name}/resume", response_class=HTMLResponse)
-async def cron_resume(name: str, request: Request):
-    try:
-        cron.resume(name)
-    except KeyError as e:
-        return HTMLResponse(
-            f'<div class="flash flash-err">{e}</div>', status_code=400
-        )
-    scripts = cron.list_scripts()
-    html = partial(request, "_admin_cron_table.html", scripts=scripts)
-    return HTMLResponse(html)
 
 
 @app.get("/healthz")
