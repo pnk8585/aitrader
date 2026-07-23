@@ -119,6 +119,10 @@
     .btn-danger { background: var(--red); }
     th a { color: var(--text-muted); text-decoration: none; }
     th a:hover { color: var(--text); }
+    th.sortable { cursor: pointer; user-select: none; }
+    th.sortable:hover { opacity: 0.8; }
+    th[data-sort-dir="asc"]::after { content: " ▲"; }
+    th[data-sort-dir="desc"]::after { content: " ▼"; }
     .reason-cell { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
     .reason-cell.expanded { max-width: none; white-space: normal; overflow: visible; }
     .nav-dropdown { position: relative; display: inline-flex; align-items: center; }

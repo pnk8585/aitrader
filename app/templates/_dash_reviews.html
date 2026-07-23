@@ -1,0 +1,24 @@
+{# ponytail: full LLM reviews table (sortable headers + rows). Rendered inline on dashboard load and re-fetched by /ui/dashboard/reviews on filter/sort. Vars: rows, sort, dir #}
+{% set cols = [('created_at','Time'),('strategy','Strategy'),('symbol','Symbol'),('verdict','Verdict'),('score','Score'),('reason','Reason')] %}
+<table>
+  <thead><tr>
+    {% for col, label in cols %}
+    <th class="sortable" data-sort-dir="{{ dir if sort == col else '' }}"
+        hx-get="/ui/dashboard/reviews?sort={{ col }}&dir={{ 'desc' if (sort == col and dir == 'asc') else 'asc' }}"
+        hx-target="#tbl-reviews" hx-include="#dash-reviews-search, #dash-reviews-date">{{ label }}</th>
+    {% endfor %}
+  </tr></thead>
+  <tbody>
+  {% for r in rows %}
+    <tr>
+      <td style="font-size:12px">{{ r.created_at.strftime('%d/%m %H:%M') if r.created_at else '—' }}</td>
+      <td>{{ r.strategy }}</td><td>{{ r.symbol }}</td>
+      <td><span class="badge badge-{{ 'live' if r.verdict == 'buy' else ('paper' if r.verdict == 'sell' else 'paused') }}">{{ r.verdict }}</span></td>
+      <td>{{ r.score }}</td>
+      <td class="text-muted reason-cell" onclick="this.classList.toggle('expanded')" title="Click to expand">{{ r.reason or '—' }}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="{{ cols|length }}" class="text-muted">No reviews.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>

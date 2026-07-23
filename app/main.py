@@ -25,12 +25,79 @@ async def _startup():
     init_schema()
 
 
+# ── Dashboard table queries (server-side search / date / sort) ───
+
+# (display cols, search cols, date col) per dashboard table
+_TRADES_COLS = ["timestamp", "exchange", "ticker", "entry_price", "unrealized_plpc", "quantity", "reason"]
+_TRADES_SEARCH = ["exchange", "ticker", "action", "reason"]
+_REVIEWS_COLS = ["created_at", "strategy", "symbol", "verdict", "score", "reason"]
+_REVIEWS_SEARCH = ["strategy", "symbol", "verdict", "reason"]
+_DASH_LIMIT = 200  # ponytail: cap dashboard rows; add pagination if a table outgrows this
+
+
+def _date_clause(date_col: str, date: str):
+    from psycopg2 import sql
+    c = sql.Identifier(date_col)
+    if date == "today":
+        return sql.SQL("{c} >= CURRENT_DATE").format(c=c)
+    if date == "yesterday":
+        return sql.SQL("{c} >= CURRENT_DATE - INTERVAL '1 day' AND {c} < CURRENT_DATE").format(c=c)
+    if date == "month":
+        return sql.SQL("date_trunc('month', {c}) = date_trunc('month', CURRENT_DATE)").format(c=c)
+    if date == "year":
+        return sql.SQL("date_trunc('year', {c}) = date_trunc('year', CURRENT_DATE)").format(c=c)
+    return None
+
+
+def _dash_rows(table, cols, search_cols, date_col, search, date, sort, direction, default_sort):
+    from psycopg2 import sql
+
+    from app.db import get_conn
+
+    where, params = [], []
+    if search:
+        likes = [sql.SQL("{}::text ILIKE %s").format(sql.Identifier(c)) for c in search_cols]
+        where.append(sql.SQL("(") + sql.SQL(" OR ").join(likes) + sql.SQL(")"))
+        params += [f"%{search}%"] * len(search_cols)
+    dc = _date_clause(date_col, date)
+    if dc is not None:
+        where.append(dc)
+    where_sql = (sql.SQL(" WHERE ") + sql.SQL(" AND ").join(where)) if where else sql.SQL("")
+
+    sort_col = sort if sort in cols else default_sort
+    order = sql.SQL(" ORDER BY {} {}").format(
+        sql.Identifier(sort_col), sql.SQL("ASC" if direction == "asc" else "DESC"))
+
+    query = sql.SQL("SELECT {} FROM {}{}{} LIMIT %s").format(
+        sql.SQL(", ").join(sql.Identifier(c) for c in cols),
+        sql.Identifier(table), where_sql, order)
+    try:
+        with get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute(query, params + [_DASH_LIMIT])
+            return [dict(zip([d[0] for d in cur.description], r)) for r in cur.fetchall()]
+    except Exception:
+        return []
+
+
+@app.get("/ui/dashboard/trades", response_class=HTMLResponse)
+async def dash_trades(request: Request, search: str = "", date: str = "all", sort: str = "timestamp", dir: str = "desc"):
+    rows = _dash_rows("trade_log", _TRADES_COLS, _TRADES_SEARCH, "timestamp", search, date, sort, dir, "timestamp")
+    return HTMLResponse(partial(request, "_dash_trades.html", rows=rows, sort=sort, dir=dir))
+
+
+@app.get("/ui/dashboard/reviews", response_class=HTMLResponse)
+async def dash_reviews(request: Request, search: str = "", date: str = "all", sort: str = "created_at", dir: str = "desc"):
+    rows = _dash_rows("llm_review_log", _REVIEWS_COLS, _REVIEWS_SEARCH, "created_at", search, date, sort, dir, "created_at")
+    return HTMLResponse(partial(request, "_dash_reviews.html", rows=rows, sort=sort, dir=dir))
+
+
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
     from app.db import get_conn
-    today_trades = []
+    today_trades = _dash_rows("trade_log", _TRADES_COLS, _TRADES_SEARCH, "timestamp", "", "all", "timestamp", "desc", "timestamp")
     open_positions = []
-    recent_reviews = []
+    recent_reviews = _dash_rows("llm_review_log", _REVIEWS_COLS, _REVIEWS_SEARCH, "created_at", "", "all", "created_at", "desc", "created_at")
     summary = {"total_trades": 0, "open_positions": 0, "today_trades": 0, "total_pl": 0.0}
     script_count = 0
     modes = {}
@@ -46,9 +113,6 @@ async def dashboard(request: Request):
             summary["today_trades"] = cur.fetchone()[0]
             cur.execute("SELECT COALESCE(SUM(peak_plpc), 0) FROM trading_state")
             summary["total_pl"] = round(float(cur.fetchone()[0] or 0), 2)
-            # Today's trades full list
-            cur.execute("SELECT timestamp, exchange, action, ticker, entry_price, unrealized_plpc, quantity, reason FROM trade_log WHERE timestamp >= CURRENT_DATE ORDER BY timestamp DESC")
-            today_trades = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
             # Open positions
             cur.execute("SELECT exchange, symbol, entry_price, entry_time, peak_plpc, quantity FROM trading_state ORDER BY entry_time DESC")
             open_positions = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
@@ -62,9 +126,6 @@ async def dashboard(request: Request):
                     row = cur.fetchone()
                     if row and row[0]:
                         p["current_pl"] = round((float(row[0]) - float(p["entry_price"])) / float(p["entry_price"]) * 100, 2)
-            # Recent LLM reviews
-            cur.execute("SELECT created_at, strategy, symbol, verdict, score, reason FROM llm_review_log ORDER BY created_at DESC LIMIT 10")
-            recent_reviews = [dict(zip([d[0] for d in cur.description], row)) for row in cur.fetchall()]
             # Cron jobs stats
             cur.execute("SELECT COUNT(*) FROM cron_jobs WHERE enabled = TRUE")
             script_count = cur.fetchone()[0]
@@ -212,13 +273,18 @@ async def cron_page(request: Request):
     return templates.TemplateResponse(request, "admin_cron.html", {"jobs": jobs})
 
 
+_CRON_SORT_COLS = {"name", "mode", "schedule_seconds", "enabled", "next_run_at", "updated_at"}
+
+
 @app.get("/ui/admin/cron/db-table", response_class=HTMLResponse)
-async def cron_db_table(request: Request):
+async def cron_db_table(request: Request, sort: str = "", dir: str = "asc"):
     from app.cron_orchestrator import list_jobs
     from app.db import get_conn
     with get_conn() as conn:
         jobs = list_jobs(conn)
-    html = partial(request, "_admin_cron_db_table.html", jobs=jobs)
+    if sort in _CRON_SORT_COLS:
+        jobs.sort(key=lambda j: (j[sort] is None, j[sort]), reverse=(dir == "desc"))
+    html = partial(request, "_admin_cron_db_table.html", jobs=jobs, sort=sort, dir=dir)
     return HTMLResponse(html)
 
 
@@ -234,7 +300,7 @@ async def cron_job_run(name: str, request: Request):
                 f'<div class="flash flash-err">{e}</div>', status_code=400
             )
         jobs = list_jobs(conn)
-    html = partial(request, "_admin_cron_db_table.html", jobs=jobs)
+    html = partial(request, "_admin_cron_db_table.html", jobs=jobs, sort="", dir="asc")
     return HTMLResponse(html)
 
 

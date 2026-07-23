@@ -1,0 +1,26 @@
+{# ponytail: full trades table (sortable headers + rows). Rendered inline on dashboard load and re-fetched by /ui/dashboard/trades on filter/sort. Vars: rows, sort, dir #}
+{% set cols = [('timestamp','Time'),('exchange','Exch'),('ticker','Ticker'),('entry_price','Entry'),('unrealized_plpc','P/L %'),('quantity','Qty'),('reason','Reason')] %}
+<table>
+  <thead><tr>
+    {% for col, label in cols %}
+    <th class="sortable" data-sort-dir="{{ dir if sort == col else '' }}"
+        hx-get="/ui/dashboard/trades?sort={{ col }}&dir={{ 'desc' if (sort == col and dir == 'asc') else 'asc' }}"
+        hx-target="#tbl-trades" hx-include="#dash-trades-search, #dash-trades-date">{{ label }}</th>
+    {% endfor %}
+  </tr></thead>
+  <tbody>
+  {% for t in rows %}
+    <tr>
+      <td style="font-size:12px">{{ t.timestamp.strftime('%d/%m %H:%M') if t.timestamp else '—' }}</td>
+      <td>{{ t.exchange }}</td>
+      <td>{{ t.ticker }}</td>
+      <td>{{ t.entry_price }}</td>
+      <td style="color:{{ 'var(--green)' if (t.unrealized_plpc or 0) > 0 else 'var(--red)' }}">{{ "%.2f%%"|format(t.unrealized_plpc) if t.unrealized_plpc else '—' }}</td>
+      <td>{{ t.quantity }}</td>
+      <td class="text-muted reason-cell" onclick="this.classList.toggle('expanded')" title="Click to expand">{{ t.reason or '—' }}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="{{ cols|length }}" class="text-muted">No trades.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
