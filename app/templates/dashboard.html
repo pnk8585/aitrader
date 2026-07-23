@@ -31,12 +31,8 @@
 <!-- Open Positions -->
 {% if open_positions %}
 <h2 style="font-size:15px;margin:24px 0 10px">Open Positions</h2>
-<table id="tbl-positions">
-  <thead><tr>
-    <th class="sortable">Exch</th><th class="sortable">Symbol</th><th class="sortable">Entry</th>
-    <th class="sortable">Current P/L %</th><th class="sortable">Peak P/L %</th><th class="sortable">Qty</th>
-    <th class="sortable">Since</th><th></th>
-  </tr></thead>
+<table>
+  <thead><tr><th>Exch</th><th>Symbol</th><th>Entry</th><th>Current P/L %</th><th>Peak P/L %</th><th>Qty</th><th>Since</th><th></th></tr></thead>
   <tbody>
   {% for p in open_positions %}
     <tr>
@@ -53,62 +49,66 @@
 </table>
 {% endif %}
 
-{# ponytail: date-range <select> reused by both tables #}
-{% macro date_select(id, url, target, include) %}
-<select id="{{ id }}" name="date" class="filter-input" style="max-width:160px"
-        hx-get="{{ url }}" hx-target="{{ target }}" hx-trigger="change" hx-include="{{ include }}">
-  <option value="all">Όλα</option>
-  <option value="today">Σήμερα</option>
-  <option value="yesterday">Χθες</option>
-  <option value="month">Τρέχων Μήνας</option>
-  <option value="year">Τρέχον Έτος</option>
-</select>
-{% endmacro %}
-
 <!-- Trades -->
 <h2 style="font-size:15px;margin:24px 0 10px">Trades</h2>
-<div class="table-filter" style="display:flex;gap:8px;margin:8px 0">
-  <input type="text" id="dash-trades-search" name="search" class="filter-input" placeholder="Αναζήτηση..." style="max-width:220px"
-         hx-get="/ui/dashboard/trades" hx-target="#tbl-trades" hx-trigger="keyup changed delay:300ms" hx-include="#dash-trades-date">
-  {{ date_select("dash-trades-date", "/ui/dashboard/trades", "#tbl-trades", "#dash-trades-search") }}
-</div>
-<div id="tbl-trades">
-  {% with rows=today_trades, sort="timestamp", dir="desc" %}{% include "_dash_trades.html" %}{% endwith %}
-</div>
+<form method="get" action="/" style="display:flex;gap:8px;margin:8px 0">
+  <input type="text" name="tsearch" class="filter-input" placeholder="Αναζήτηση..." value="{{ tsearch or '' }}" style="max-width:220px">
+  <select name="tdate" class="filter-input" style="max-width:160px">
+    <option value="all" {% if tdate == 'all' %}selected{% endif %}>Όλα</option>
+    <option value="today" {% if tdate == 'today' %}selected{% endif %}>Σήμερα</option>
+    <option value="yesterday" {% if tdate == 'yesterday' %}selected{% endif %}>Χθες</option>
+    <option value="month" {% if tdate == 'month' %}selected{% endif %}>Τρέχων Μήνας</option>
+    <option value="year" {% if tdate == 'year' %}selected{% endif %}>Τρέχον Έτος</option>
+  </select>
+  <button type="submit" class="btn-action">Φίλτρο</button>
+</form>
+<table>
+  <thead><tr><th>Time</th><th>Exch</th><th>Ticker</th><th>Entry</th><th>P/L %</th><th>Qty</th><th>Reason</th></tr></thead>
+  <tbody>
+  {% for t in today_trades %}
+    <tr>
+      <td style="font-size:12px">{{ t.timestamp.strftime('%d/%m %H:%M') if t.timestamp else '—' }}</td>
+      <td>{{ t.exchange }}</td>
+      <td>{{ t.ticker }}</td>
+      <td>{{ t.entry_price }}</td>
+      <td style="color:{{ 'var(--green)' if (t.unrealized_plpc or 0) > 0 else 'var(--red)' }}">{{ "%.2f%%"|format(t.unrealized_plpc) if t.unrealized_plpc else '—' }}</td>
+      <td>{{ t.quantity }}</td>
+      <td class="text-muted reason-cell" onclick="this.classList.toggle('expanded')" title="Click to expand">{{ t.reason or '—' }}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="7" class="text-muted">No trades found.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
 
 <!-- LLM Reviews -->
 <h2 style="font-size:15px;margin:24px 0 10px">LLM Reviews</h2>
-<div class="table-filter" style="display:flex;gap:8px;margin:8px 0">
-  <input type="text" id="dash-reviews-search" name="search" class="filter-input" placeholder="Αναζήτηση..." style="max-width:220px"
-         hx-get="/ui/dashboard/reviews" hx-target="#tbl-reviews" hx-trigger="keyup changed delay:300ms" hx-include="#dash-reviews-date">
-  {{ date_select("dash-reviews-date", "/ui/dashboard/reviews", "#tbl-reviews", "#dash-reviews-search") }}
-</div>
-<div id="tbl-reviews">
-  {% with rows=recent_reviews, sort="created_at", dir="desc" %}{% include "_dash_reviews.html" %}{% endwith %}
-</div>
+<form method="get" action="/" style="display:flex;gap:8px;margin:8px 0">
+  <input type="text" name="rsearch" class="filter-input" placeholder="Αναζήτηση..." value="{{ rsearch or '' }}" style="max-width:220px">
+  <select name="rdate" class="filter-input" style="max-width:160px">
+    <option value="all" {% if rdate == 'all' %}selected{% endif %}>Όλα</option>
+    <option value="today" {% if rdate == 'today' %}selected{% endif %}>Σήμερα</option>
+    <option value="yesterday" {% if rdate == 'yesterday' %}selected{% endif %}>Χθες</option>
+    <option value="month" {% if rdate == 'month' %}selected{% endif %}>Τρέχων Μήνας</option>
+    <option value="year" {% if rdate == 'year' %}selected{% endif %}>Τρέχον Έτος</option>
+  </select>
+  <button type="submit" class="btn-action">Φίλτρο</button>
+</form>
+<table>
+  <thead><tr><th>Time</th><th>Strategy</th><th>Symbol</th><th>Verdict</th><th>Score</th><th>Reason</th></tr></thead>
+  <tbody>
+  {% for r in recent_reviews %}
+    <tr>
+      <td style="font-size:12px">{{ r.created_at.strftime('%d/%m %H:%M') if r.created_at else '—' }}</td>
+      <td>{{ r.strategy }}</td><td>{{ r.symbol }}</td>
+      <td><span class="badge badge-{{ 'live' if r.verdict == 'buy' else ('paper' if r.verdict == 'sell' else 'paused') }}">{{ r.verdict }}</span></td>
+      <td>{{ r.score }}</td>
+      <td class="text-muted reason-cell" onclick="this.classList.toggle('expanded')" title="Click to expand">{{ r.reason or '—' }}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="6" class="text-muted">No reviews found.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
 
-<script>
-// ponytail: client-side column sort for Open Positions — all rows are present (current state, no
-// pagination), so sorting in the DOM is correct and complete. No server round-trip needed.
-(function () {
-  var table = document.getElementById('tbl-positions');
-  if (!table) return;
-  table.querySelectorAll('th.sortable').forEach(function (th, col) {
-    th.addEventListener('click', function () {
-      var asc = th.getAttribute('data-sort-dir') !== 'asc';
-      table.querySelectorAll('th').forEach(function (h) { h.removeAttribute('data-sort-dir'); });
-      th.setAttribute('data-sort-dir', asc ? 'asc' : 'desc');
-      var tbody = table.tBodies[0];
-      var rows = Array.prototype.slice.call(tbody.rows);
-      rows.sort(function (a, b) {
-        var x = a.cells[col].textContent.trim(), y = b.cells[col].textContent.trim();
-        var nx = parseFloat(x.replace('%', '')), ny = parseFloat(y.replace('%', ''));
-        var cmp = (!isNaN(nx) && !isNaN(ny)) ? nx - ny : x.localeCompare(y);
-        return asc ? cmp : -cmp;
-      });
-      rows.forEach(function (r) { tbody.appendChild(r); });
-    });
-  });
-})();
-</script>
 {% endblock %}

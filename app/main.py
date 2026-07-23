@@ -93,11 +93,11 @@ async def dash_reviews(request: Request, search: str = "", date: str = "all", so
 
 
 @app.get("/", response_class=HTMLResponse)
-async def dashboard(request: Request):
+async def dashboard(request: Request, tsearch: str = "", tdate: str = "all", rsearch: str = "", rdate: str = "all"):
     from app.db import get_conn
-    today_trades = _dash_rows("trade_log", _TRADES_COLS, _TRADES_SEARCH, "timestamp", "", "all", "timestamp", "desc", "timestamp")
+    today_trades = _dash_rows("trade_log", _TRADES_COLS, _TRADES_SEARCH, "timestamp", tsearch, tdate, "timestamp", "desc", "timestamp")
     open_positions = []
-    recent_reviews = _dash_rows("llm_review_log", _REVIEWS_COLS, _REVIEWS_SEARCH, "created_at", "", "all", "created_at", "desc", "created_at")
+    recent_reviews = _dash_rows("llm_review_log", _REVIEWS_COLS, _REVIEWS_SEARCH, "created_at", rsearch, rdate, "created_at", "desc", "created_at")
     summary = {"total_trades": 0, "open_positions": 0, "today_trades": 0, "total_pl": 0.0}
     script_count = 0
     modes = {}
@@ -147,6 +147,10 @@ async def dashboard(request: Request):
         "today_trades": today_trades,
         "open_positions": open_positions,
         "recent_reviews": recent_reviews,
+        "tsearch": tsearch,
+        "tdate": tdate,
+        "rsearch": rsearch,
+        "rdate": rdate,
     }
     return templates.TemplateResponse(request, "dashboard.html", ctx)
 
