@@ -50,7 +50,7 @@
     <div class="value" style="font-size:14px;color:var(--red)">{{ kraken.error }}</div>
     {% else %}
     <div class="value">€{{ "%.2f"|format(kraken.total_eur) }}</div>
-    <div class="sub">Free: €{{ "%.2f"|format(kraken.free_eur) }} · Locked: €{{ "%.2f"|format(kraken.locked_eur) }}</div>
+    <div class="sub">Free: €{{ "%.2f"|format(kraken.free_eur) }} · Positions: €{{ "%.2f"|format(kraken.positions_value) }}{% if kraken.truly_free is not none %} · Truly free: €{{ "%.2f"|format(kraken.truly_free) }}{% endif %}</div>
     {% endif %}
   </div>
 </div>

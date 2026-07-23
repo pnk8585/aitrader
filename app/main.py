@@ -149,6 +149,11 @@ async def dashboard(request: Request, tsearch: str = "", tdate: str = "all", rse
     except Exception:
         pass
 
+    # Compute truly free cash (subtract open position values from wallet)
+    kraken_positions_value = sum(p.get("position_value", 0) or 0 for p in open_positions if p.get("exchange") == "kraken")
+    kraken["positions_value"] = round(kraken_positions_value, 2)
+    kraken["truly_free"] = round(kraken.get("free_eur", 0) - kraken_positions_value, 2) if kraken.get("free_eur") is not None else None
+
     ctx = {
         "script_count": script_count,
         "modes": modes,
