@@ -52,15 +52,14 @@
 <!-- Trades -->
 <h2 style="font-size:15px;margin:24px 0 10px">Trades</h2>
 <form method="get" action="/" style="display:flex;gap:8px;margin:8px 0">
-  <input type="text" name="tsearch" class="filter-input" placeholder="Αναζήτηση..." value="{{ tsearch or '' }}" style="max-width:220px">
-  <select name="tdate" class="filter-input" style="max-width:160px">
+  <input type="text" name="tsearch" class="filter-input" placeholder="Αναζήτηση..." value="{{ tsearch or '' }}" style="max-width:220px" onchange="this.form.submit()">
+  <select name="tdate" class="filter-input" style="max-width:160px" onchange="this.form.submit()">
     <option value="all" {% if tdate == 'all' %}selected{% endif %}>Όλα</option>
     <option value="today" {% if tdate == 'today' %}selected{% endif %}>Σήμερα</option>
     <option value="yesterday" {% if tdate == 'yesterday' %}selected{% endif %}>Χθες</option>
     <option value="month" {% if tdate == 'month' %}selected{% endif %}>Τρέχων Μήνας</option>
     <option value="year" {% if tdate == 'year' %}selected{% endif %}>Τρέχον Έτος</option>
   </select>
-  <button type="submit" class="btn-action">Φίλτρο</button>
 </form>
 <table>
   <thead><tr><th>Time</th><th>Exch</th><th>Ticker</th><th>Entry</th><th>P/L %</th><th>Qty</th><th>Reason</th></tr></thead>
@@ -84,15 +83,14 @@
 <!-- LLM Reviews -->
 <h2 style="font-size:15px;margin:24px 0 10px">LLM Reviews</h2>
 <form method="get" action="/" style="display:flex;gap:8px;margin:8px 0">
-  <input type="text" name="rsearch" class="filter-input" placeholder="Αναζήτηση..." value="{{ rsearch or '' }}" style="max-width:220px">
-  <select name="rdate" class="filter-input" style="max-width:160px">
+  <input type="text" name="rsearch" class="filter-input" placeholder="Αναζήτηση..." value="{{ rsearch or '' }}" style="max-width:220px" onchange="this.form.submit()">
+  <select name="rdate" class="filter-input" style="max-width:160px" onchange="this.form.submit()">
     <option value="all" {% if rdate == 'all' %}selected{% endif %}>Όλα</option>
     <option value="today" {% if rdate == 'today' %}selected{% endif %}>Σήμερα</option>
     <option value="yesterday" {% if rdate == 'yesterday' %}selected{% endif %}>Χθες</option>
     <option value="month" {% if rdate == 'month' %}selected{% endif %}>Τρέχων Μήνας</option>
     <option value="year" {% if rdate == 'year' %}selected{% endif %}>Τρέχον Έτος</option>
   </select>
-  <button type="submit" class="btn-action">Φίλτρο</button>
 </form>
 <table>
   <thead><tr><th>Time</th><th>Strategy</th><th>Symbol</th><th>Verdict</th><th>Score</th><th>Reason</th></tr></thead>
