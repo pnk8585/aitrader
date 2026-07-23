@@ -36,11 +36,45 @@ def query_table(table: str, filters: dict, sort: str, direction: str, page: int)
         cur = conn.cursor()
         columns = _columns(cur, table)
 
-        active = [(col, val) for col, val in filters.items() if col in columns and val]
+        active = [(col, val) for col, val in filters.items() if col in columns and val and not col.startswith("_")]
         params = [f"%{val}%" for _, val in active]
         where = sql.SQL("")
+        clauses = []
+        
+        # Per-column ILIKE filters
         if active:
-            clauses = [sql.SQL("{} :: text ILIKE %s").format(sql.Identifier(col)) for col, _ in active]
+            clauses += [sql.SQL("{} :: text ILIKE %s").format(sql.Identifier(col)) for col, _ in active]
+        
+        # Unified text search (_search) — ILIKE across all text-like columns
+        search = filters.get("_search", "").strip()
+        if search:
+            text_cols = [c for c in columns if c not in ('id', 'quantity', 'score') and 
+                         not c.endswith('_plpc') and not c.endswith('_price') and not c.endswith('_ms')]
+            if text_cols:
+                search_clauses = [sql.SQL("{} :: text ILIKE %s").format(sql.Identifier(c)) for c in text_cols]
+                clauses.append(sql.SQL("(") + sql.SQL(" OR ").join(search_clauses) + sql.SQL(")"))
+                params += [f"%{search}%"] * len(text_cols)
+        
+        # Date filter (_date) — applies to first timestamp/date/_at column
+        date_val = filters.get("_date", "all")
+        if date_val and date_val != "all":
+            date_col = None
+            for c in columns:
+                if "timestamp" in c or "date" in c or c.endswith("_at"):
+                    date_col = c
+                    break
+            if date_col:
+                dc = sql.Identifier(date_col)
+                if date_val == "today":
+                    clauses.append(sql.SQL("{dc} >= CURRENT_DATE").format(dc=dc))
+                elif date_val == "yesterday":
+                    clauses.append(sql.SQL("{dc} >= CURRENT_DATE - INTERVAL '1 day' AND {dc} < CURRENT_DATE").format(dc=dc))
+                elif date_val == "month":
+                    clauses.append(sql.SQL("date_trunc('month', {dc}) = date_trunc('month', CURRENT_DATE)").format(dc=dc))
+                elif date_val == "year":
+                    clauses.append(sql.SQL("date_trunc('year', {dc}) = date_trunc('year', CURRENT_DATE)").format(dc=dc))
+
+        if clauses:
             where = sql.SQL(" WHERE ") + sql.SQL(" AND ").join(clauses)
 
         cur.execute(
