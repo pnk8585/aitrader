@@ -37,7 +37,7 @@
     </thead>
     <tbody>
       {% for row in rows %}
-      <tr>
+      <tr{% if date_col >= 0 and row[date_col] is not none %} data-date="{{ row[date_col] }}"{% endif %}>
         {% for val in row %}
         <td>{{ val if val is not none else "" }}</td>
         {% endfor %}

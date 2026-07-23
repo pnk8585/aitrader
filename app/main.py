@@ -355,6 +355,13 @@ async def data_table_view(table: str, request: Request, page: int = 1, sort: str
     filters = {k: v for k, v in request.query_params.items() if k not in reserved and v}
     columns, rows, total, total_pages, page = query_table(table, filters, sort, dir, page)
 
+    # Find first date-like column for client-side date filter
+    date_col = -1
+    for i, col in enumerate(columns):
+        if "timestamp" in col or "date" in col or col.endswith("_at"):
+            date_col = i
+            break
+
     ctx = {
         "table": table,
         "columns": columns,
@@ -363,6 +370,7 @@ async def data_table_view(table: str, request: Request, page: int = 1, sort: str
         "filter_qs": urlencode(filters),
         "sort": sort,
         "dir": dir,
+        "date_col": date_col,
         "page": page,
         "total_pages": total_pages,
         "total": total,
