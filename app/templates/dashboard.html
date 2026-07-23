@@ -33,6 +33,28 @@
   </div>
 </div>
 
+<!-- Wallets -->
+<div class="cards" style="margin-bottom:16px">
+  <div class="card">
+    <div class="label">🦅 Alpaca</div>
+    {% if alpaca.error %}
+    <div class="value" style="font-size:14px;color:var(--red)">{{ alpaca.error }}</div>
+    {% else %}
+    <div class="value">€{{ "%.2f"|format(alpaca.equity_eur) }}</div>
+    <div class="sub">Cash: €{{ "%.2f"|format(alpaca.cash_eur) }} · Positions: €{{ "%.2f"|format(alpaca.positions_eur) }}</div>
+    {% endif %}
+  </div>
+  <div class="card">
+    <div class="label">🐙 Kraken</div>
+    {% if kraken.error %}
+    <div class="value" style="font-size:14px;color:var(--red)">{{ kraken.error }}</div>
+    {% else %}
+    <div class="value">€{{ "%.2f"|format(kraken.total_eur) }}</div>
+    <div class="sub">Free: €{{ "%.2f"|format(kraken.free_eur) }} · Locked: €{{ "%.2f"|format(kraken.locked_eur) }}</div>
+    {% endif %}
+  </div>
+</div>
+
 <!-- Open Positions -->
 {% if open_positions %}
 <h2 style="font-size:15px;margin:24px 0 10px">Open Positions</h2>

@@ -95,10 +95,13 @@ async def dash_reviews(request: Request, search: str = "", date: str = "all", so
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request, tsearch: str = "", tdate: str = "all", rsearch: str = "", rdate: str = "all"):
     from app.db import get_conn
+    from app.wallets import kraken_balance, alpaca_balance
     today_trades = _dash_rows("trade_log", _TRADES_COLS, _TRADES_SEARCH, "timestamp", tsearch, tdate, "timestamp", "desc", "timestamp")
     open_positions = []
     recent_reviews = _dash_rows("llm_review_log", _REVIEWS_COLS, _REVIEWS_SEARCH, "created_at", rsearch, rdate, "created_at", "desc", "created_at")
     summary = {"total_trades": 0, "open_positions": 0, "today_trades": 0, "total_pl": 0.0}
+    kraken = kraken_balance()
+    alpaca = alpaca_balance()
     script_count = 0
     modes = {}
     last_orch_run = "never"
@@ -151,6 +154,8 @@ async def dashboard(request: Request, tsearch: str = "", tdate: str = "all", rse
         "tdate": tdate,
         "rsearch": rsearch,
         "rdate": rdate,
+        "kraken": kraken,
+        "alpaca": alpaca,
     }
     return templates.TemplateResponse(request, "dashboard.html", ctx)
 
