@@ -88,6 +88,13 @@ def run_job(db, name: str) -> dict:
         row = cur.fetchone()
         if row and row[0] and row[0] > _now() - _RUNNING_STALE:
             return {"name": name, "status": "skipped", "summary": "already running", "duration_ms": 0}
+        # Clean up stale running runs (crashed/restarted container)
+        if row:
+            cur.execute(
+                "UPDATE cron_runs SET status='error', summary='killed: stale run (>3h)' WHERE job_name=%s AND status='running'",
+                (name,),
+            )
+            db.commit()
 
     # Read live mode from DB (may differ from registry default)
     with db.cursor() as cur:
