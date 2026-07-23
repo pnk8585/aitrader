@@ -1,6 +1,11 @@
 {% extends "base.html" %}
 {% block title %}Cron — AITrader{% endblock %}
 {% block content %}
-<h1>Cron Scripts</h1>
+<h1>Cron</h1>
+
+<h2 style="margin-top:24px">DB Scheduler (container)</h2>
+{% include "_admin_cron_db_table.html" %}
+
+<h2 style="margin-top:32px">Host Scripts (legacy)</h2>
 {% include "_admin_cron_table.html" %}
 {% endblock %}

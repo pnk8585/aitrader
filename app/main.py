@@ -203,8 +203,22 @@ async def telegram_test(request: Request):
 
 @app.get("/ui/admin/cron", response_class=HTMLResponse)
 async def cron_page(request: Request):
+    from app.cron_orchestrator import list_jobs
+    from app.db import get_conn
     scripts = cron.list_scripts()
-    return templates.TemplateResponse(request, "admin_cron.html", {"scripts": scripts})
+    with get_conn() as conn:
+        jobs = list_jobs(conn)
+    return templates.TemplateResponse(request, "admin_cron.html", {"scripts": scripts, "jobs": jobs})
+
+
+@app.get("/ui/admin/cron/db-table", response_class=HTMLResponse)
+async def cron_db_table(request: Request):
+    from app.cron_orchestrator import list_jobs
+    from app.db import get_conn
+    with get_conn() as conn:
+        jobs = list_jobs(conn)
+    html = partial(request, "_admin_cron_db_table.html", jobs=jobs)
+    return HTMLResponse(html)
 
 
 @app.get("/ui/admin/cron/table", response_class=HTMLResponse)
