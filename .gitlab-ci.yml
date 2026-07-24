@@ -119,6 +119,11 @@ deploy:
     - mkdir -p ~/.ssh
     - echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
     - chmod 600 ~/.ssh/id_rsa
+    - echo "KEY_FILE_SIZE: $(wc -c < ~/.ssh/id_rsa)"
+    - echo "KEY_LINE_COUNT: $(wc -l < ~/.ssh/id_rsa)"
+    - echo "KEY_FIRST_LINE: $(head -1 ~/.ssh/id_rsa)"
+    - echo "KEY_LAST_LINE: $(tail -1 ~/.ssh/id_rsa)"
+    - ssh-keygen -l -f ~/.ssh/id_rsa 2>&1 || true
     - ssh-keyscan -H 172.16.0.50 >> ~/.ssh/known_hosts 2>/dev/null
   script:
     - echo "Deploying version ${FULL_VERSION} to homeserver"
