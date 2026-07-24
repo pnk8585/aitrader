@@ -117,13 +117,14 @@ deploy:
   before_script:
     - apk add --no-cache openssh-client
     - mkdir -p ~/.ssh
-    - echo "$SSH_PRIVATE_KEY_B64" | base64 -d > ~/.ssh/id_rsa
-    - chmod 600 ~/.ssh/id_rsa
+    - echo "$SSH_PRIVATE_KEY_B64" | base64 -d > ~/.ssh/id_ed25519
+    - chmod 600 ~/.ssh/id_ed25519
+    - ssh-keygen -l -f ~/.ssh/id_ed25519 || echo "KEY VALIDATION FAILED"
     - ssh-keyscan -H 172.16.0.50 >> ~/.ssh/known_hosts 2>/dev/null
   script:
     - echo "Deploying version ${FULL_VERSION} to homeserver"
     - |
-      ssh -o StrictHostKeyChecking=no pank@172.16.0.50 "
+      ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no pank@172.16.0.50 "
         cd ~/homeserver/docker-compose/aitrader &&
         sudo docker compose pull &&
         sudo docker compose down &&
