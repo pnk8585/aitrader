@@ -133,6 +133,10 @@ def review_trade(
 
     sig_str = "\n".join(f"  {k}: {v}" for k, v in sorted(signals.items()))
 
+    system_prompt = (
+        f"You are an AI trade reviewer for a {strategy} crypto/stock strategy. "
+        "Reply with JSON only."
+    )
     prompt = f"""You are an AI trade reviewer for a {strategy} crypto strategy.
 
 CONTEXT:
@@ -164,16 +168,22 @@ Rules:
 - Use price context: reject if the coin already pumped +15% in 6h (chasing top).
 - Use the Market Strategy above to align with the macro view: if regime is bullish and pullback is aggressive, favor entries. If cautious/skip, be more selective."""
 
+    t0 = time.monotonic()
     try:
         resp = client.chat.completions.create(
             model=model,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt},
+            ],
             temperature=0.2,
             max_tokens=300,
             response_format={"type": "json_object"},
             timeout=timeout,
         )
-        raw = resp.choices[0].message.content.strip()
+        latency_ms = (time.monotonic() - t0) * 1000
+        raw = (resp.choices[0].message.content or "").strip()
+        raw_full = raw
         # Strip markdown fences and leading/trailing noise
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[-1]
@@ -197,18 +207,47 @@ Rules:
             "reason": result.get("reason", "No reason given"),
             "confidence": int(result.get("confidence", 5)),
         }
-        _log_review(symbol, strategy, price, score, signals,
-                    portfolio_euro, available_euro, final)
-        _notify_verdict(final, symbol, strategy, price)
-        return final
-    except json.JSONDecodeError:
-        final = {"verdict": "APPROVE", "reason": "LLM parse error, defaulting to APPROVE", "confidence": 5}
+        _log_llm_jsonl(
+            kind="trade_review",
+            model=model,
+            system_prompt=system_prompt,
+            user_prompt=prompt,
+            response=raw_full,
+            status="ok",
+            latency_ms=latency_ms,
+            symbol=symbol,
+            strategy=strategy,
+            final=final,
+            extra={
+                "price": price,
+                "score": score,
+                "signals": signals,
+                "portfolio_euro": portfolio_euro,
+                "available_euro": available_euro,
+                "open_positions": open_positions,
+            },
+        )
         _log_review(symbol, strategy, price, score, signals,
                     portfolio_euro, available_euro, final)
         _notify_verdict(final, symbol, strategy, price)
         return final
     except Exception as e:
+        latency_ms = (time.monotonic() - t0) * 1000
         final = {"verdict": "APPROVE", "reason": f"LLM error: {str(e)[:80]}", "confidence": 5}
+        _log_llm_jsonl(
+            kind="trade_review",
+            model=model,
+            system_prompt=system_prompt,
+            user_prompt=prompt,
+            response=None,
+            status="error",
+            error=str(e),
+            latency_ms=latency_ms,
+            symbol=symbol,
+            strategy=strategy,
+            final=final,
+            extra={"price": price, "score": score},
+        )
         _log_review(symbol, strategy, price, score, signals,
                     portfolio_euro, available_euro, final)
         _notify_verdict(final, symbol, strategy, price)
@@ -227,6 +266,47 @@ def _notify_verdict(verdict: dict, symbol: str, strategy: str, price: float) -> 
         emoji = "✅" if v == "APPROVE" else "❌" if v == "REJECT" else "⚠️"
         msg = f"{emoji} {v}: {symbol} ({strategy}) @ €{price:.4f} conf={conf}"
         send_telegram(msg)
+    except Exception:
+        pass
+
+
+def _log_llm_jsonl(
+    *,
+    kind: str,
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    response: str | None,
+    status: str,
+    latency_ms: float,
+    symbol: str,
+    strategy: str,
+    final: dict,
+    error: str | None = None,
+    extra: dict | None = None,
+) -> None:
+    """Structured audit line → logs/llm.jsonl (bettips-ai style). Never raises."""
+    try:
+        from app.logging_setup import log_llm_call
+        payload = dict(extra or {})
+        payload.update({
+            "verdict": final.get("verdict"),
+            "reason": final.get("reason"),
+            "confidence": final.get("confidence"),
+        })
+        log_llm_call(
+            kind=kind,
+            model=model,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            response=response,
+            status=status,
+            error=error,
+            latency_ms=latency_ms,
+            symbol=symbol,
+            strategy=strategy,
+            extra=payload,
+        )
     except Exception:
         pass
 

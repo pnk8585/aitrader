@@ -90,7 +90,10 @@ With `AITRADER_STATE_DIR=/state` (production mount):
 
 - `/state/logs/scheduler.log`, `cron.log`
 - `/state/logs/jobs/<job-name>.log` — full job stdout
+- `/state/logs/llm.jsonl` — structured LLM decisions (prompt, response, verdict, latency)
 - Also: `docker logs aitrader`
+
+Set `LOG_LLM_PROMPTS=0` to disable `llm.jsonl`. Verdicts still go to DB `llm_review_log`.
 
 ## Kill switch
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from datetime import datetime, timezone
 
 import ccxt
@@ -76,6 +77,7 @@ def _llm_decide(position: dict, price_ctx: str) -> dict:
         return {"action": "HOLD", "reason": "no API key", "confidence": 0}
     client = OpenAI(api_key=api_key, base_url=base_url)
 
+    system_prompt = "You are a position monitor. Reply with JSON only: action SELL or HOLD."
     prompt = f"""You are a position monitor for a crypto/stock portfolio.
 Decide whether to SELL or HOLD this position.
 
@@ -100,16 +102,22 @@ Guidelines:
 - If price is near entry and signals are neutral, default to HOLD.
 - Be decisive — don't HOLD bleeding positions out of hope."""
 
+    t0 = time.monotonic()
     try:
         resp = client.chat.completions.create(
             model=model,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt},
+            ],
             temperature=0.2,
             max_tokens=200,
             response_format={"type": "json_object"},
             timeout=15,
         )
-        raw = resp.choices[0].message.content.strip()
+        latency_ms = (time.monotonic() - t0) * 1000
+        raw_full = (resp.choices[0].message.content or "").strip()
+        raw = raw_full
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[-1]
             if raw.endswith("```"):
@@ -121,13 +129,77 @@ Guidelines:
         elif brace < 0:
             raw = '{"action": "HOLD", "reason": "LLM returned text", "confidence": 5}'
         result = json.loads(raw)
-        return {
+        final = {
             "action": result.get("action", "HOLD"),
             "reason": result.get("reason", ""),
             "confidence": int(result.get("confidence", 5)),
         }
+        _log_position_llm(
+            model=model,
+            system_prompt=system_prompt,
+            user_prompt=prompt,
+            response=raw_full,
+            status="ok",
+            latency_ms=latency_ms,
+            position=position,
+            final=final,
+        )
+        return final
     except Exception as e:
-        return {"action": "HOLD", "reason": f"LLM error: {e}", "confidence": 0}
+        latency_ms = (time.monotonic() - t0) * 1000
+        final = {"action": "HOLD", "reason": f"LLM error: {e}", "confidence": 0}
+        _log_position_llm(
+            model=model,
+            system_prompt=system_prompt,
+            user_prompt=prompt,
+            response=None,
+            status="error",
+            error=str(e),
+            latency_ms=latency_ms,
+            position=position,
+            final=final,
+        )
+        return final
+
+
+def _log_position_llm(
+    *,
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    response: str | None,
+    status: str,
+    latency_ms: float,
+    position: dict,
+    final: dict,
+    error: str | None = None,
+) -> None:
+    """Structured llm.jsonl line for exit decisions. Never raises."""
+    try:
+        from app.logging_setup import log_llm_call
+        log_llm_call(
+            kind="position_monitor",
+            model=model,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            response=response,
+            status=status,
+            error=error,
+            latency_ms=latency_ms,
+            symbol=position.get("symbol"),
+            strategy="position-monitor",
+            extra={
+                "action": final.get("action"),
+                "reason": final.get("reason"),
+                "confidence": final.get("confidence"),
+                "entry": position.get("entry"),
+                "current": position.get("current"),
+                "pnl_pct": position.get("pnl_pct"),
+                "exchange": position.get("exchange"),
+            },
+        )
+    except Exception:
+        pass
 
 
 # ── Price context ───────────────────────────────────────────────────

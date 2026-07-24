@@ -62,5 +62,6 @@ bash scripts/init_state_dir.sh
 ```
 
 **State volume** `/home/pank/docker-data/aitrader` → `/state`:
-- logs: `scheduler.log`, `cron.log`, `jobs/<name>.log`, locks
+- logs: `scheduler.log`, `cron.log`, `jobs/<name>.log`, `llm.jsonl` (structured LLM audit), locks
 - `.env`, gates under `ai_overseer/`
+- Disable LLM file audit: `LOG_LLM_PROMPTS=0` (DB `llm_review_log` still used)
