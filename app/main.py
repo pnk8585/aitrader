@@ -42,6 +42,22 @@ async def _startup():
         print(f"[startup] apply_log_level: {e}")
 
 
+# uvicorn attaches access handlers after import — re-apply once on first request
+_log_level_reapplied = False
+
+
+@app.middleware("http")
+async def _reapply_log_level_once(request: Request, call_next):
+    global _log_level_reapplied
+    if not _log_level_reapplied:
+        _log_level_reapplied = True
+        try:
+            apply_log_level_from_settings()
+        except Exception:
+            pass
+    return await call_next(request)
+
+
 # ── Dashboard table queries (server-side search / date / sort) ───
 
 # (display cols, search cols, date col) per dashboard table

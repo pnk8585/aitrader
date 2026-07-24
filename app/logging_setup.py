@@ -100,8 +100,30 @@ def _ensure_llm_path() -> None:
     _CONFIGURED = True
 
 
+def _silence_or_enable_access(app_level: int) -> None:
+    """uvicorn.access handlers are often NOTSET (accept everything).
+
+    At INFO+: access logger WARNING so INFO access lines never print.
+    At DEBUG: show access, rewritten to DEBUG via filter.
+    """
+    access = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, _AccessAsDebugFilter) for f in access.filters):
+        access.addFilter(_AccessAsDebugFilter())
+
+    if app_level <= logging.DEBUG:
+        access.setLevel(logging.DEBUG)
+        for h in list(access.handlers):
+            h.setLevel(logging.DEBUG)
+        access.propagate = False
+    else:
+        access.setLevel(logging.WARNING)
+        for h in list(access.handlers):
+            h.setLevel(logging.WARNING)
+        access.propagate = False
+
+
 def apply_log_level(level_name: str | None = None) -> str:
-    """Set app + console log level. Access logs always DEBUG severity.
+    """Set app + console log level. Access logs only when level is DEBUG.
 
     At INFO (default): HTTP access lines are hidden.
     At DEBUG: access lines appear as DEBUG.
@@ -118,28 +140,22 @@ def apply_log_level(level_name: str | None = None) -> str:
     for h in _managed_handlers:
         h.setLevel(level)
 
-    # uvicorn.error: lifecycle at least INFO when app is INFO+
+    # uvicorn.error: lifecycle visible at INFO+
     err = logging.getLogger("uvicorn.error")
-    err.setLevel(level if level <= logging.INFO else logging.INFO)
+    err.setLevel(logging.INFO if level > logging.DEBUG else logging.DEBUG)
 
-    # Access: force record level to DEBUG via filter; handler threshold = app level
-    access = logging.getLogger("uvicorn.access")
-    access.setLevel(logging.DEBUG)
-    if not any(isinstance(f, _AccessAsDebugFilter) for f in access.filters):
-        access.addFilter(_AccessAsDebugFilter())
-    for h in list(access.handlers):
-        h.setLevel(level)
-    access.propagate = True
+    _silence_or_enable_access(level)
 
     root = logging.getLogger()
+    root.setLevel(logging.DEBUG if level <= logging.DEBUG else logging.INFO)
     for h in root.handlers:
         if h not in _managed_handlers:
-            h.setLevel(level)
+            h.setLevel(logging.DEBUG if level <= logging.DEBUG else logging.INFO)
 
-    # Keep noisy libraries quiet unless DEBUG
-    lib_level = logging.DEBUG if level <= logging.DEBUG else logging.WARNING
     for lib in ("httpx", "httpcore", "httpcore.connection", "httpcore.http11", "urllib3"):
-        logging.getLogger(lib).setLevel(lib_level if level <= logging.DEBUG else logging.WARNING)
+        logging.getLogger(lib).setLevel(
+            logging.DEBUG if level <= logging.DEBUG else logging.WARNING
+        )
 
     return name
 
@@ -152,11 +168,13 @@ def apply_log_level_from_settings() -> str:
         level_name = get_setting("logging.level")
     except Exception:
         pass
+    if level_name:
+        level_name = str(level_name).strip()
     if not level_name:
-        level_name = os.getenv("LOG_LEVEL") or "INFO"
+        level_name = (os.getenv("LOG_LEVEL") or "INFO").strip()
     applied = apply_log_level(level_name)
     logging.getLogger("aitrader").info(
-        "Log level → %s (access logs are DEBUG severity)", applied
+        "Log level → %s (HTTP access hidden unless DEBUG)", applied
     )
     return applied
 
