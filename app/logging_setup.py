@@ -3,13 +3,18 @@
 Sinks under AITRADER_STATE_DIR/logs (or ./logs):
 
   scheduler.log / cron.log / jobs/*.log  — ops (existing)
-  llm.jsonl                             — one JSON object per LLM call
-                                          (prompt + response + verdict + latency)
+  aitrader.log / named *.log             — app loggers
+  llm.jsonl                              — one JSON object per LLM call
+
+Log level (default INFO) from app_settings ``logging.level`` (or env LOG_LEVEL).
+uvicorn.access HTTP lines are forced to DEBUG so they stay quiet at INFO
+(same behaviour as bettips-ai).
 
 Env:
   AITRADER_STATE_DIR  — durable state root (Docker: /state)
   LOG_DIR             — override log directory
   LOG_LLM_PROMPTS     — "0"/"false"/"no" disables llm.jsonl (default: on)
+  LOG_LEVEL           — fallback if DB setting missing (DEBUG|INFO|WARNING|ERROR)
 """
 
 from __future__ import annotations
@@ -23,10 +28,33 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+_LEVEL_NAMES = {
+    "DEBUG": logging.DEBUG,
+    "INFO": logging.INFO,
+    "WARNING": logging.WARNING,
+    "WARN": logging.WARNING,
+    "ERROR": logging.ERROR,
+    "CRITICAL": logging.CRITICAL,
+}
+
 _CONFIGURED = False
 _llm_lock = threading.Lock()
 _llm_path: str | None = None
 _log_llm_prompts = True
+_current_level = logging.INFO
+_current_level_name = "INFO"
+# Track handlers we created so apply_log_level can retarget them
+_managed_handlers: list[logging.Handler] = []
+_named_loggers: set[str] = set()
+
+
+class _AccessAsDebugFilter(logging.Filter):
+    """Rewrite uvicorn.access records to DEBUG so they only show when level is DEBUG."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.levelno = logging.DEBUG
+        record.levelname = "DEBUG"
+        return True
 
 
 def _env_truthy(name: str, default: bool = True) -> bool:
@@ -47,6 +75,13 @@ def logs_dir() -> Path:
     return Path(__file__).resolve().parent.parent / "logs"
 
 
+def _parse_level(level_name: str | None) -> tuple[int, str]:
+    name = (level_name or "INFO").strip().upper()
+    if name not in _LEVEL_NAMES:
+        name = "INFO"
+    return _LEVEL_NAMES[name], name
+
+
 def _ensure_llm_path() -> None:
     """Resolve llm.jsonl path once (lazy)."""
     global _llm_path, _log_llm_prompts, _CONFIGURED
@@ -65,15 +100,86 @@ def _ensure_llm_path() -> None:
     _CONFIGURED = True
 
 
-def setup_logging(name: str = "aitrader", *, level: int = logging.INFO) -> logging.Logger:
-    """Named logger: StreamHandler + file under logs_dir/{name}.log."""
+def apply_log_level(level_name: str | None = None) -> str:
+    """Set app + console log level. Access logs always DEBUG severity.
+
+    At INFO (default): HTTP access lines are hidden.
+    At DEBUG: access lines appear as DEBUG.
+    """
+    global _current_level, _current_level_name
+    level, name = _parse_level(level_name)
+    _current_level = level
+    _current_level_name = name
+
+    # Named aitrader loggers (scheduler, cron, aitrader, …)
+    for n in list(_named_loggers) + ["aitrader", "aitrader.llm"]:
+        logging.getLogger(n).setLevel(level)
+
+    for h in _managed_handlers:
+        h.setLevel(level)
+
+    # uvicorn.error: lifecycle at least INFO when app is INFO+
+    err = logging.getLogger("uvicorn.error")
+    err.setLevel(level if level <= logging.INFO else logging.INFO)
+
+    # Access: force record level to DEBUG via filter; handler threshold = app level
+    access = logging.getLogger("uvicorn.access")
+    access.setLevel(logging.DEBUG)
+    if not any(isinstance(f, _AccessAsDebugFilter) for f in access.filters):
+        access.addFilter(_AccessAsDebugFilter())
+    for h in list(access.handlers):
+        h.setLevel(level)
+    access.propagate = True
+
+    root = logging.getLogger()
+    for h in root.handlers:
+        if h not in _managed_handlers:
+            h.setLevel(level)
+
+    # Keep noisy libraries quiet unless DEBUG
+    lib_level = logging.DEBUG if level <= logging.DEBUG else logging.WARNING
+    for lib in ("httpx", "httpcore", "httpcore.connection", "httpcore.http11", "urllib3"):
+        logging.getLogger(lib).setLevel(lib_level if level <= logging.DEBUG else logging.WARNING)
+
+    return name
+
+
+def apply_log_level_from_settings() -> str:
+    """Read logging.level from DB (then env LOG_LEVEL), default INFO."""
+    level_name = None
+    try:
+        from app.settings import get_setting
+        level_name = get_setting("logging.level")
+    except Exception:
+        pass
+    if not level_name:
+        level_name = os.getenv("LOG_LEVEL") or "INFO"
+    applied = apply_log_level(level_name)
+    logging.getLogger("aitrader").info(
+        "Log level → %s (access logs are DEBUG severity)", applied
+    )
+    return applied
+
+
+def setup_logging(name: str = "aitrader", *, level: int | None = None) -> logging.Logger:
+    """Named logger: StreamHandler + file under logs_dir/{name}.log.
+
+    Level defaults to current app level (from apply_log_level / settings).
+    """
     global _CONFIGURED
     log = logging.getLogger(name)
+    _named_loggers.add(name)
+
+    use_level = level if level is not None else _current_level
+
     if log.handlers:
+        log.setLevel(use_level)
+        for h in log.handlers:
+            h.setLevel(use_level)
         _ensure_llm_path()
         return log
 
-    log.setLevel(level)
+    log.setLevel(use_level)
     log.propagate = False
 
     fmt = logging.Formatter(
@@ -83,21 +189,41 @@ def setup_logging(name: str = "aitrader", *, level: int = logging.INFO) -> loggi
 
     sh = logging.StreamHandler(sys.stdout)
     sh.setFormatter(fmt)
-    sh.setLevel(level)
+    sh.setLevel(use_level)
     log.addHandler(sh)
+    _managed_handlers.append(sh)
 
     try:
         d = logs_dir()
         d.mkdir(parents=True, exist_ok=True)
         fh = logging.FileHandler(d / f"{name}.log", encoding="utf-8")
         fh.setFormatter(fmt)
-        fh.setLevel(level)
+        fh.setLevel(use_level)
         log.addHandler(fh)
+        _managed_handlers.append(fh)
     except OSError as e:
         log.warning("Could not open file log under %s: %s", logs_dir(), e)
 
+    # Quiet access + libs once (first setup_logging call)
+    apply_log_level(logging.getLevelName(use_level))
+
     _ensure_llm_path()
     return log
+
+
+def configure_logging() -> str | None:
+    """Bootstrap logging (access→DEBUG, app at INFO/env) before DB is ready.
+
+    Returns log directory path if available.
+    """
+    apply_log_level(os.getenv("LOG_LEVEL") or "INFO")
+    setup_logging("aitrader")
+    try:
+        d = logs_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        return str(d)
+    except OSError:
+        return None
 
 
 def append_job_log(job_name: str, header: str, body: str) -> Path | None:

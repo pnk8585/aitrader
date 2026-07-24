@@ -13,8 +13,16 @@ from fastapi.templating import Jinja2Templates
 load_dotenv()
 
 from app.db import init_schema  # noqa: E402
+from app.logging_setup import (  # noqa: E402
+    apply_log_level,
+    apply_log_level_from_settings,
+    configure_logging,
+)
 from app.render import partial  # noqa: E402
-from app.settings import get_ai_config, set_setting  # noqa: E402
+from app.settings import get_ai_config, get_setting, set_setting  # noqa: E402
+
+# Quiet access logs until DB level applied (default INFO hides them)
+configure_logging()
 
 app = FastAPI(title="AITrader")
 templates = Jinja2Templates("app/templates")
@@ -23,6 +31,15 @@ templates = Jinja2Templates("app/templates")
 @app.on_event("startup")
 async def _startup():
     init_schema()
+    try:
+        from app.settings import seed_default_settings
+        seed_default_settings()
+    except Exception as e:
+        print(f"[startup] seed_default_settings: {e}")
+    try:
+        apply_log_level_from_settings()
+    except Exception as e:
+        print(f"[startup] apply_log_level: {e}")
 
 
 # ── Dashboard table queries (server-side search / date / sort) ───
@@ -187,16 +204,25 @@ def _mask_secret(value: str | None) -> str:
     return "••••" + value[-4:]
 
 
-@app.get("/ui/admin/ai", response_class=HTMLResponse)
-async def ai_config_form(request: Request):
+def _ai_form_ctx(**overrides):
     cfg = get_ai_config()
+    log_level = (get_setting("logging.level") or "INFO").upper()
+    if log_level not in ("DEBUG", "INFO", "WARNING", "ERROR"):
+        log_level = "INFO"
     ctx = {
         "model": cfg["model"] or "",
         "base_url": cfg["base_url"] or "",
         "api_key_masked": _mask_secret(cfg.get("api_key")),
         "has_api_key": bool(cfg.get("api_key")),
+        "logging_level": log_level,
     }
-    return templates.TemplateResponse(request, "admin_ai.html", ctx)
+    ctx.update(overrides)
+    return ctx
+
+
+@app.get("/ui/admin/ai", response_class=HTMLResponse)
+async def ai_config_form(request: Request):
+    return templates.TemplateResponse(request, "admin_ai.html", _ai_form_ctx())
 
 
 @app.post("/ui/admin/ai")
@@ -205,35 +231,37 @@ async def ai_config_save(request: Request):
     model = (form.get("model") or "").strip()
     base_url = (form.get("base_url") or "").strip()
     api_key = (form.get("api_key") or "").strip()
+    log_level = (form.get("logging_level") or "").strip().upper()
 
     errors = []
     if not model:
         errors.append("Model is required.")
     if not base_url.startswith(("http://", "https://")):
         errors.append("Base URL must start with http:// or https://")
+    if log_level and log_level not in ("DEBUG", "INFO", "WARNING", "ERROR"):
+        errors.append("Invalid log level.")
 
     if errors:
-        cfg = get_ai_config()
         inner = partial(request, "_admin_ai_form.html",
                         flash=" ".join(errors), flash_type="err",
-                        model=model or cfg.get("model") or "",
-                        base_url=base_url or cfg.get("base_url") or "",
-                        api_key_masked=_mask_secret(cfg.get("api_key")),
-                        has_api_key=bool(cfg.get("api_key")))
+                        **_ai_form_ctx(
+                            model=model or get_ai_config().get("model") or "",
+                            base_url=base_url or get_ai_config().get("base_url") or "",
+                            logging_level=log_level or "INFO",
+                        ))
         return HTMLResponse(f'<div id="ai-config">{inner}</div>')
 
     set_setting("ai.model", model)
     set_setting("ai.base_url", base_url)
     if api_key:
         set_setting("ai.api_key", api_key)
+    if log_level in ("DEBUG", "INFO", "WARNING", "ERROR"):
+        set_setting("logging.level", log_level)
+        apply_log_level(log_level)
 
-    cfg = get_ai_config()
     inner = partial(request, "_admin_ai_form.html",
                     flash="Settings saved.", flash_type="ok",
-                    model=cfg["model"] or "",
-                    base_url=cfg["base_url"] or "",
-                    api_key_masked=_mask_secret(cfg.get("api_key")),
-                    has_api_key=bool(cfg.get("api_key")))
+                    **_ai_form_ctx())
     return HTMLResponse(f'<div id="ai-config">{inner}</div>')
 
 

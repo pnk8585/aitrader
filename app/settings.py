@@ -51,6 +51,17 @@ def get_ai_config() -> dict[str, str | None]:
     return {"model": model, "base_url": base_url, "api_key": api_key}
 
 
+def seed_default_settings() -> None:
+    """Ensure default settings exist in app_settings (idempotent)."""
+    defaults = {
+        # App log level: DEBUG|INFO|WARNING|ERROR — uvicorn access is always DEBUG severity
+        "logging.level": "INFO",
+    }
+    for key, val in defaults.items():
+        if get_setting(key) is None:
+            set_setting(key, val)
+
+
 if __name__ == "__main__":
     # Self-check: set + get round-trip
     assert os.environ.get("DB_HOST"), "DB_HOST not set — source .env first"

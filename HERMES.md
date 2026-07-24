@@ -33,7 +33,7 @@ Docker: start.py
 | Entry | `start.py` | Scheduler + uvicorn in one process |
 | Scheduler | `scheduler.py` | 60s tick loop |
 | Jobs | `app/cron_orchestrator.py` | JOB_REGISTRY, run, Telegram notify |
-| Logging | `app/logging_setup.py` | stdout + `/state/logs` |
+| Logging | `app/logging_setup.py` | stdout + `/state/logs`; `logging.level` in DB (default INFO); access→DEBUG |
 | LLM review | `traders/common/llm_review.py` | Sync trade evaluation |
 | Exchange | `traders/common/exchange.py` | Paper/live order routing |
 | Gates | `traders/common/gates.py` | Safety pause (BTC drawdown, manual halt) |
@@ -65,3 +65,4 @@ bash scripts/init_state_dir.sh
 - logs: `scheduler.log`, `cron.log`, `jobs/<name>.log`, `llm.jsonl` (structured LLM audit), locks
 - `.env`, gates under `ai_overseer/`
 - Disable LLM file audit: `LOG_LLM_PROMPTS=0` (DB `llm_review_log` still used)
+- Log level: `app_settings.logging.level` (INFO default) or Admin → AI; access polls only at DEBUG

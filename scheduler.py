@@ -8,7 +8,13 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from app.db import get_conn
 from app.cron_orchestrator import tick
-from app.logging_setup import setup_logging
+from app.logging_setup import apply_log_level_from_settings, configure_logging, setup_logging
+
+configure_logging()
+try:
+    apply_log_level_from_settings()
+except Exception:
+    pass  # DB may not be ready yet on cold start
 
 log = setup_logging("scheduler")
 

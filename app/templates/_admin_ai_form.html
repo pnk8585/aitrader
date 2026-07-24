@@ -26,6 +26,15 @@
       <input type="password" id="api_key" name="api_key" value="" placeholder="{% if has_api_key %}{{ api_key_masked }} (leave blank to keep current){% else %}Enter API key{% endif %}">
       <div class="hint">{% if has_api_key %}Key is set. Leave blank to keep current value.{% else %}No key configured yet.{% endif %}</div>
     </div>
+    <div class="form-group">
+      <label for="logging_level">Log level</label>
+      <select id="logging_level" name="logging_level" style="width:100%;padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:14px;">
+        {% for lvl in ['DEBUG', 'INFO', 'WARNING', 'ERROR'] %}
+        <option value="{{ lvl }}" {% if logging_level == lvl %}selected{% endif %}>{{ lvl }}</option>
+        {% endfor %}
+      </select>
+      <div class="hint">Default INFO. HTTP access lines are DEBUG — only shown when level is DEBUG. Stored as <code>logging.level</code> in app_settings.</div>
+    </div>
     <button type="submit" class="btn">Save</button>
   </form>
 </div>
