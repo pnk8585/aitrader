@@ -2,14 +2,21 @@
 
 Multi-strategy automated trading system — **Kraken crypto** + **Alpaca US stocks**, with LLM-evaluated entries and exits.
 
+Runs as a **Docker container**: FastAPI admin UI + in-process scheduler (tick every 60s).  
+CI/CD deploys the image; production compose is `~/homeserver/docker-compose/aitrader/`.
+
 ## Architecture
 
 ```
-aitrader_orchestrator.py         ← cron every 1m, reads JSON registry
-├─ kraken_pullback.py            LIVE   every 5m   ← pullback entries
-├─ kraken_momentum.py            PAPER  every 5m   ← momentum entries
-├─ position_monitor.py           LIVE   every 2h   ← sells stale positions
-└─ alpaca_stocks.py              LIVE   every 5m   ← stock momentum
+start.py → scheduler.py (every 60s) + uvicorn :9237
+              │
+              └─ app/cron_orchestrator.py  (JOB_REGISTRY / DB cron_jobs)
+                 ├─ kraken-pullback     LIVE   5m
+                 ├─ kraken-momentum     PAPER  5m
+                 ├─ alpaca-stocks       LIVE   5m
+                 ├─ position-monitor    LIVE   2h
+                 ├─ end-of-day-review   LIVE   24h
+                 └─ db-cleanup          LIVE   24h
 ```
 
 Every buy/sell is evaluated by a local LLM (`traders/common/llm_review.py`) that gets:
@@ -17,22 +24,21 @@ Every buy/sell is evaluated by a local LLM (`traders/common/llm_review.py`) that
 - **News headlines**: 3 latest headlines from DuckDuckGo (4s timeout)
 - **Signal scores**: strategy-specific scoring from candidate analysis
 
-All decisions logged to `llm_review_log` table for retrospective accuracy analysis.
+All decisions logged to `llm_review_log` for retrospective accuracy analysis.
 
 ## Quick start
 
 ```bash
-cd /home/pank/projects/aitrader
-source .venv/bin/activate
+# One-time state dir
+bash scripts/init_state_dir.sh
+# Edit /home/pank/docker-data/aitrader/.env — DB_HOST=host.docker.internal
 
-# Check status
-python3 -c "import json; d=json.load(open('aitrader_orchestrator.json')); [print(f'{k:20s} {v[\"mode\"]:6s} {v[\"status\"]}') for k,v in d['scripts'].items()]"
+# Local run (dev)
+docker compose up -d --build
+# UI: http://localhost:9237  ·  Health: curl http://localhost:9237/healthz
 
-# Run orchestrator manually
-python3 aitrader_orchestrator.py
-
-# Test LLM review
-python3 traders/common/llm_review.py --symbol AVAX/EUR --strategy pullback --score 4.5 --price 5.82
+# Manual job tick (from host venv, against same DB)
+python -m scripts.cron_runner --mode tick
 ```
 
 ## Script modes
@@ -43,7 +49,7 @@ python3 traders/common/llm_review.py --symbol AVAX/EUR --strategy pullback --sco
 | `paper` | Simulated fills | `paper-` prefix |
 | `paused` | Skipped entirely | — |
 
-Edit `aitrader_orchestrator.json` to change modes.
+Modes live in the `cron_jobs` table (admin UI / DB). Env `AITRADER_MODE` is set per run by the orchestrator.
 
 ## Database tables
 
@@ -53,55 +59,45 @@ Edit `aitrader_orchestrator.json` to change modes.
 | `llm_review_log` | Every LLM evaluation (APPROVE/REJECT/SELL/HOLD) |
 | `trading_state` | Open position tracking |
 | `asset_prices` | 5-min price snapshots (Kraken) |
+| `cron_jobs` / `cron_runs` | Scheduler registry + run history |
 
 ## Project layout
 
 ```
 aitrader/
-├── aitrader_orchestrator.py     # Main daemon
-├── aitrader_orchestrator.json   # Script registry
-├── aitrader_registry.py         # Atomic JSON state
-├── position_monitor.py          # Position sell/hold monitor
-│
+├── start.py / scheduler.py      # Container entry + 60s tick loop
+├── position_monitor.py          # Exit monitor job
+├── app/                         # FastAPI UI, DB, cron_orchestrator, logging
+├── scripts/
+│   ├── cron_runner.py           # Manual tick / run-jobs
+│   ├── db_cleanup.py            # Daily cleanup job
+│   ├── init_state_dir.sh        # Bootstrap /state volume
+│   └── pnl_dashboard.py         # Manual P&L report
 ├── traders/
-│   ├── common/
-│   │   ├── llm_review.py        # Sync LLM evaluation
-│   │   ├── exchange.py          # Order routing (live/paper)
-│   │   ├── gates.py             # Safety gates (BTC drawdown)
-
-│   ├── crypto_trades/
-│   │   ├── kraken_pullback.py   # Pullback entries
-│   │   └── kraken_momentum.py   # Momentum entries
-│   ├── trades/
-│   │   └── alpaca_stocks.py     # Stock momentum
-│   ├── strategies/
-│   │   ├── pullback/            # Config, signals, exits
-│   │   └── momentum/            # Config, exits
-│   └── extreme/
-│       └── db_prices.py         # Price data queries
-│
+│   ├── common/                  # llm_review, exchange, gates, config
+│   ├── crypto_trades/           # kraken pullback + momentum
+│   ├── trades/alpaca_stocks.py
+│   ├── strategies/              # pullback + momentum modules
+│   ├── eod_review.py
+│   └── extreme/db_prices.py     # Shared price/DB helpers
+├── research/backtest_pullback.py
 └── tests/
 ```
 
-## Operations
+## Logs
 
-```bash
-# View recent LLM rejections
-python3 -c "
-import os; from dotenv import load_dotenv; load_dotenv()
-import psycopg2
-conn = psycopg2.connect(host=os.environ['DB_HOST'], port=int(os.environ['DB_PORT']),
-    dbname=os.environ['DB_NAME'], user=os.environ['DB_USER'], password=os.environ['DB_PASSWORD'])
-cur = conn.cursor()
-cur.execute(\"\"\"SELECT created_at, strategy, symbol, verdict, reason FROM llm_review_log WHERE verdict='REJECT' ORDER BY created_at DESC LIMIT 10\"\"\")
-for r in cur.fetchall(): print(f\"{r[0].strftime('%m-%d %H:%M')} {r[1]:15s} {r[2]:10s} {r[3]:8s} | {r[4][:80]}\")
-"
-```
+With `AITRADER_STATE_DIR=/state` (production mount):
+
+- `/state/logs/scheduler.log`, `cron.log`
+- `/state/logs/jobs/<job-name>.log` — full job stdout
+- Also: `docker logs aitrader`
 
 ## Kill switch
 
-Pause all entries by creating `ai_overseer/ai_gate.json`:
+Pause entries via `ai_overseer/ai_gate.json` (or under `/state/ai_overseer/` in the container):
+
 ```json
 {"script_paused": true, "reason": "manual halt"}
 ```
+
 Exits still run. Resume by deleting the file or setting `script_paused: false`.

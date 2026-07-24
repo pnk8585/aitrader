@@ -6,71 +6,61 @@ Multi-strategy automated trading system (AITrader) for Kraken crypto and Alpaca 
 ## Architecture
 
 ```
-AITrader Orchestrator (cron every 1m)
-├─ aitrader_orchestrator.py     ← reads registry, spawns due scripts
-├─ aitrader_registry.py         ← atomic JSON state per script
-│
-├─ kraken-pullback (LIVE, 5m)  ← pullback entries + LLM review
-├─ kraken-momentum (PAPER, 5m) ← momentum entries + LLM review
-├─ position-monitor (LIVE, 2h) ← checks positions, LLM sell/hold
-└─ alpaca-stocks (LIVE, 5m)    ← stock momentum + LLM review
+Docker: start.py
+├─ scheduler.py (tick every 60s)
+│    └─ app/cron_orchestrator.py → JOB_REGISTRY / cron_jobs
+│       ├─ kraken-pullback (LIVE, 5m)
+│       ├─ kraken-momentum (PAPER, 5m)
+│       ├─ alpaca-stocks (LIVE, 5m)
+│       ├─ position-monitor (LIVE, 2h)
+│       ├─ end-of-day-review (LIVE, 24h)
+│       └─ db-cleanup (LIVE, 24h)
+└─ uvicorn app.main:app :9237  (admin UI)
 ```
 
 **LLM evaluation** is synchronous — every buy/sell decision goes through `traders/common/llm_review.py` which:
 - Queries DB for price context (1h/6h/24h, BTC, 24h range)
 - Fetches recent news headlines (DuckDuckGo, 4s timeout)
-- Calls DeepSeek v4 via local LiteLLM proxy
-- Logs every verdict to `llm_review_log` table for later accuracy analysis
+- Calls the configured model via LiteLLM proxy
+- Logs every verdict to `llm_review_log` for later accuracy analysis
 
-**Orchestrator modes:** `live` (real orders) | `paper` (simulated, DB-logged) | `paused`
+**Modes:** `live` | `paper` | `paused` (per job in `cron_jobs`)
 
 ## Project Info
 
 | Topic | File | Purpose |
 |-------|------|---------|
-| Orchestrator | `aitrader_orchestrator.py` | Daemon — spawns scripts when due |
-| Registry | `aitrader_orchestrator.json` | Script config (mode, interval, state) |
-| LLM review | `traders/common/llm_review.py` | Sync trade evaluation + news + price context |
-| Exchange utils | `traders/common/exchange.py` | Paper/live order routing |
+| Entry | `start.py` | Scheduler + uvicorn in one process |
+| Scheduler | `scheduler.py` | 60s tick loop |
+| Jobs | `app/cron_orchestrator.py` | JOB_REGISTRY, run, Telegram notify |
+| Logging | `app/logging_setup.py` | stdout + `/state/logs` |
+| LLM review | `traders/common/llm_review.py` | Sync trade evaluation |
+| Exchange | `traders/common/exchange.py` | Paper/live order routing |
 | Gates | `traders/common/gates.py` | Safety pause (BTC drawdown, manual halt) |
 | DB prices | `traders/extreme/db_prices.py` | asset_prices queries |
-| Position monitor | `position_monitor.py` | Checks open positions, LLM exits |
-| Pullback strategy | `traders/strategies/pullback/` | Config, signals, exits |
-| Momentum strategy | `traders/strategies/momentum/` | Config, signals, exits |
-| Alpaca runner | `traders/trades/alpaca_stocks.py` | Stock momentum entries |
+| Position monitor | `position_monitor.py` | LLM exits |
+| Pullback | `traders/crypto_trades/kraken_pullback.py` | Entries |
+| Momentum | `traders/crypto_trades/kraken_momentum.py` | Entries |
+| Alpaca | `traders/trades/alpaca_stocks.py` | Stock momentum |
 
 ## Guidelines
 - **Write**: Save new info to the correct file — same one you found it in.
-- **Secrets/keys**: Never in project files — Bitwarden only (`DEEPSEEK_API_KEY`, `KRAKEN_API_KEY`, `ALPACA_API_KEY`, DB creds).
-- **Orchestrator config**: Edit `aitrader_orchestrator.json` to change modes/intervals.
+- **Secrets/keys**: Never in project files — Bitwarden only.
+- **Job config**: DB `cron_jobs` / admin UI — not JSON orchestrator files.
 - **LLM model**: `hermes-flash` via LiteLLM (`host.docker.internal:4000` from container).
-- **Container autonomous**: Docker runs admin UI **and** in-process scheduler (`start.py` → `scheduler.py` + uvicorn).
-- **Trade notifications**: Only BUY/SELL events trigger Telegram notifications. No HOLD/SKIP alerts.
-- **CI**: `dockerhub.pkatopodis.me` — images pushed here on deploy.
+- **Container**: Admin UI **and** scheduler inside Docker. Deploy via CI/CD only.
+- **Trade notifications**: Only BUY/SELL events → Telegram. No HOLD/SKIP spam.
+- **CI**: `dockerhub.pkatopodis.me` — image + homeserver compose pull/up.
 
 ## Docker
 
-Container runs both the admin UI and the cron scheduler (tick every 60s).
-
 ```bash
-# One-time: populate shared state dir
 bash scripts/init_state_dir.sh
-
-# Edit /home/pank/docker-data/aitrader/.env — set DB_HOST=host.docker.internal
-# (or the host LAN IP) so the container can reach the host's Postgres + LiteLLM.
-
-docker compose up -d --build
-# UI at http://localhost:9237
-# Health: curl http://localhost:9237/healthz
+# .env: DB_HOST=host.docker.internal
+# Production: ~/homeserver/docker-compose/aitrader/docker-compose.yml
+# Deploy: GitLab CI (do not manual-deploy from agents)
 ```
 
-The container mounts `/home/pank/docker-data/aitrader` as `/state` (`AITRADER_STATE_DIR`).
-Jobs are driven by DB `cron_jobs` / `JOB_REGISTRY` in `app/cron_orchestrator.py`.
-Scheduler stdout must inherit (not PIPE) so ticks never block.
-
-**Logs (durable under `/state/logs`):**
-- `scheduler.log` / `cron.log` — tick + job status (also in `docker logs aitrader`)
-- `jobs/<job-name>.log` — full job stdout/stderr per run
-- lock files (`kraken_*.lock`, etc.) live here too
-
-Production compose: `~/homeserver/docker-compose/aitrader/docker-compose.yml`
+**State volume** `/home/pank/docker-data/aitrader` → `/state`:
+- logs: `scheduler.log`, `cron.log`, `jobs/<name>.log`, locks
+- `.env`, gates under `ai_overseer/`
