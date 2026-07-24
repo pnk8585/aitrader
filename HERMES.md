@@ -43,11 +43,14 @@ AITrader Orchestrator (cron every 1m)
 - **Write**: Save new info to the correct file — same one you found it in.
 - **Secrets/keys**: Never in project files — Bitwarden only (`DEEPSEEK_API_KEY`, `KRAKEN_API_KEY`, `ALPACA_API_KEY`, DB creds).
 - **Orchestrator config**: Edit `aitrader_orchestrator.json` to change modes/intervals.
-- **LLM model**: `deepseek-v4-flash` via LiteLLM at `localhost:4000`.
+- **LLM model**: `hermes-flash` via LiteLLM (`host.docker.internal:4000` from container).
+- **Container autonomous**: Docker runs admin UI **and** in-process scheduler (`start.py` → `scheduler.py` + uvicorn).
+- **Trade notifications**: Only BUY/SELL events trigger Telegram notifications. No HOLD/SKIP alerts.
+- **CI**: `dockerhub.pkatopodis.me` — images pushed here on deploy.
 
 ## Docker
 
-The admin UI runs in a container; the orchestrator stays on the host.
+Container runs both the admin UI and the cron scheduler (tick every 60s).
 
 ```bash
 # One-time: populate shared state dir
@@ -61,6 +64,6 @@ docker compose up -d --build
 # Health: curl http://localhost:9237/healthz
 ```
 
-The container mounts `/home/pank/docker-data/aitrader` as `/state`. Mode changes
-in the UI write to `registry.json` there; the host orchestrator picks them up on
-its next tick. No scheduler runs inside the container.
+The container mounts `/home/pank/docker-data/aitrader` as `/state`. Jobs are driven
+by DB `cron_jobs` / `JOB_REGISTRY` in `app/cron_orchestrator.py`. Scheduler stdout
+must inherit (not PIPE) so ticks never block.

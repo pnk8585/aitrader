@@ -55,7 +55,7 @@ def _ensure_env():
 def _resolve_config():
     """Resolve AI model, base_url, api_key. DB → env → defaults. Never crashes."""
     _ensure_env()
-    model = os.getenv("AI_MODEL") or "deepseek-v4-flash"
+    model = os.getenv("AI_MODEL") or "hermes-flash"
     base_url = os.getenv("LITELLM_BASE_URL") or "http://localhost:4000/v1"
     api_key = os.getenv("DEEPSEEK_API_KEY")
 

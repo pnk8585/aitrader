@@ -45,7 +45,7 @@ def set_setting(key: str, value: str) -> None:
 
 def get_ai_config() -> dict[str, str | None]:
     """Return {model, base_url, api_key} — DB first, then env, then defaults."""
-    model = get_setting("ai.model") or os.getenv("AI_MODEL") or "deepseek-v4-flash"
+    model = get_setting("ai.model") or os.getenv("AI_MODEL") or "hermes-flash"
     base_url = get_setting("ai.base_url") or os.getenv("LITELLM_BASE_URL") or "http://localhost:4000/v1"
     api_key = get_setting("ai.api_key") or os.getenv("DEEPSEEK_API_KEY")
     return {"model": model, "base_url": base_url, "api_key": api_key}

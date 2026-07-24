@@ -26,8 +26,22 @@ for p in ["/home/pank/projects/aitrader/.env", "/home/pank/.hermes/.env"]:
 KRAKEN_KEY = os.getenv("KRAKEN_API_KEY")
 KRAKEN_SECRET = os.getenv("KRAKEN_SECRET")
 DEEPSEEK_KEY = os.getenv("DEEPSEEK_API_KEY")
-AI_MODEL = "deepseek-v4-flash"
-LITELLM_BASE = "http://localhost:4000/v1"
+
+
+def _resolve_llm() -> tuple[str, str, str | None]:
+    """DB/settings first (host.docker.internal in container), then env/defaults."""
+    model = os.getenv("AI_MODEL") or "hermes-flash"
+    base_url = os.getenv("LITELLM_BASE_URL") or "http://localhost:4000/v1"
+    api_key = DEEPSEEK_KEY
+    try:
+        from app.settings import get_ai_config
+        cfg = get_ai_config()
+        model = cfg.get("model") or model
+        base_url = cfg.get("base_url") or base_url
+        api_key = cfg.get("api_key") or api_key
+    except Exception:
+        pass
+    return model, base_url, api_key
 
 _PAPER_MODE = os.environ.get("AITRADER_MODE", "") == "paper"
 EXCHANGE_NAME = _PAPER_MODE and "paper-position-monitor" or "position-monitor"
@@ -57,7 +71,10 @@ def _get_db():
 # ── LLM ─────────────────────────────────────────────────────────────
 def _llm_decide(position: dict, price_ctx: str) -> dict:
     """Ask LLM: SELL or HOLD this position?"""
-    client = OpenAI(api_key=DEEPSEEK_KEY, base_url=LITELLM_BASE)
+    model, base_url, api_key = _resolve_llm()
+    if not api_key:
+        return {"action": "HOLD", "reason": "no API key", "confidence": 0}
+    client = OpenAI(api_key=api_key, base_url=base_url)
 
     prompt = f"""You are a position monitor for a crypto/stock portfolio.
 Decide whether to SELL or HOLD this position.
@@ -85,7 +102,7 @@ Guidelines:
 
     try:
         resp = client.chat.completions.create(
-            model=AI_MODEL,
+            model=model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
             max_tokens=200,
@@ -161,9 +178,8 @@ def _price_context(db, symbol: str, exchange_name: str) -> str:
 
 # ── Main ────────────────────────────────────────────────────────────
 def main():
-    # Orchestrator integration
-    import aitrader_registry as orch
-    orch.mark_started("position-monitor")
+    # Run tracking is owned by app.cron_orchestrator (cron_runs table).
+    # aitrader_registry was removed when Docker took over scheduling.
     script_name = "position-monitor"
 
     db = _get_db()
@@ -276,10 +292,6 @@ def main():
     db.close()
     for line in log:
         print(line)
-
-    from datetime import timedelta as _td
-    _next = (datetime.now(timezone.utc) + _td(hours=2)).isoformat()
-    orch.mark_done(script_name, _next)
 
 
 if __name__ == "__main__":
