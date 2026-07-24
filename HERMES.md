@@ -14,7 +14,7 @@ Docker: start.py
 │       ├─ alpaca-stocks (LIVE, 5m)
 │       ├─ position-monitor (LIVE, 2h)
 │       ├─ end-of-day-review (LIVE, 24h)
-│       └─ db-cleanup (LIVE, 24h)
+│       └─ db-cleanup (LIVE, ~05:00 Athens — prices downsample + cron_runs 24h)
 └─ uvicorn app.main:app :9237  (admin UI)
 ```
 

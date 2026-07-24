@@ -46,6 +46,23 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _next_athens_hour(hour: int = 5) -> datetime:
+    """Next wall-clock ``hour``:00 in Europe/Athens, as UTC-aware datetime."""
+    from zoneinfo import ZoneInfo
+    ath = ZoneInfo("Europe/Athens")
+    now_ath = datetime.now(timezone.utc).astimezone(ath)
+    target = now_ath.replace(hour=hour, minute=0, second=0, microsecond=0)
+    if target <= now_ath:
+        target += timedelta(days=1)
+    return target.astimezone(timezone.utc)
+
+
+# Jobs that should fire at a fixed Athens hour (not pure interval-from-now)
+_FIXED_ATHENS_HOUR: dict[str, int] = {
+    "db-cleanup": 5,  # 05:00 Athens daily
+}
+
+
 # ── seed ──────────────────────────────────────────────────────
 
 def seed_jobs(db) -> None:
@@ -59,11 +76,15 @@ def seed_jobs(db) -> None:
     for name, (_path, interval, mode) in JOB_REGISTRY.items():
         if name in existing:
             continue
+        if name in _FIXED_ATHENS_HOUR:
+            nxt = _next_athens_hour(_FIXED_ATHENS_HOUR[name])
+        else:
+            nxt = _now() + timedelta(seconds=interval)
         with db.cursor() as cur:
             cur.execute(
                 """INSERT INTO cron_jobs (name, schedule_seconds, mode, enabled, next_run_at, updated_at)
                    VALUES (%s, %s, %s, TRUE, %s, %s)""",
-                (name, interval, mode, _now() + timedelta(seconds=interval), _now()),
+                (name, interval, mode, nxt, _now()),
             )
         added += 1
 
@@ -170,11 +191,15 @@ def _finish_run(db, run_id: int, name: str, status: str, summary: str,
                WHERE id = %s""",
             (status, finished, summary, duration_ms, run_id),
         )
+        if name in _FIXED_ATHENS_HOUR:
+            nxt = _next_athens_hour(_FIXED_ATHENS_HOUR[name])
+        else:
+            nxt = _now() + timedelta(seconds=interval)
         cur.execute(
             """UPDATE cron_jobs
                SET next_run_at = %s, updated_at = %s
                WHERE name = %s""",
-            (_now() + timedelta(seconds=interval), _now(), name),
+            (nxt, _now(), name),
         )
     db.commit()
 

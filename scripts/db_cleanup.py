@@ -1,5 +1,7 @@
 """DB cleanup cron job — asset_prices downsampling + old rows purge + VACUUM.
-Runs inside the aitrader container via cron_orchestrator.
+
+Runs inside the aitrader container via cron_orchestrator (job: db-cleanup).
+Target wall time: ~05:00 Athens (next_run advanced to next 05:00 after each run).
 """
 
 from __future__ import annotations
@@ -7,15 +9,17 @@ from __future__ import annotations
 import sys
 import os
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.db import get_conn
 
 # Retention windows
-CRON_RUNS_RETENTION_DAYS = 30
+CRON_RUNS_RETENTION_HOURS = 24   # orchestrator history — keep 1 day only
 TRADE_LOG_RETENTION_DAYS = 180
 
+ATHENS = ZoneInfo("Europe/Athens")
 NOW = datetime.now(timezone.utc)
 TS = NOW.strftime("%d/%m/%Y %H:%M")
 
@@ -54,18 +58,18 @@ def _cleanup_asset_prices(cur) -> tuple[int, int]:
             cur.execute("DELETE FROM asset_prices WHERE id = ANY(%s)", (ids_to_delete,))
             deleted = cur.rowcount
             total_deleted += deleted
-            print(f"📊 {symbol}: διαγράφηκαν {deleted} εγγραφές | πρόσφατες (24h): {recent}")
+            print(f"📊 {symbol}: deleted {deleted} | recent 24h: {recent}")
         else:
-            print(f"✅ {symbol}: καθαρό | πρόσφατες (24h): {recent}")
+            print(f"✅ {symbol}: clean | recent 24h: {recent}")
 
     cur.execute("SELECT COUNT(*) FROM asset_prices")
     remaining = cur.fetchone()[0]
     return total_deleted, remaining
 
 
-def _delete_older_than(cur, table: str, days: int, ts_col: str) -> tuple[int, int, int]:
-    """Delete rows older than `days`, return (before, deleted, after)."""
-    cutoff = NOW - timedelta(days=days)
+def _delete_older_than_hours(cur, table: str, hours: int, ts_col: str) -> tuple[int, int, int]:
+    """Delete rows older than `hours`, return (before, deleted, after)."""
+    cutoff = NOW - timedelta(hours=hours)
     cur.execute(f"SELECT COUNT(*) FROM {table}")
     before = cur.fetchone()[0]
     cur.execute(f"DELETE FROM {table} WHERE {ts_col} < %s", (cutoff,))
@@ -75,31 +79,40 @@ def _delete_older_than(cur, table: str, days: int, ts_col: str) -> tuple[int, in
     return before, deleted, after
 
 
+def _delete_older_than_days(cur, table: str, days: int, ts_col: str) -> tuple[int, int, int]:
+    return _delete_older_than_hours(cur, table, days * 24, ts_col)
+
+
 def main() -> int:
     try:
         with get_conn() as conn:
             conn.autocommit = False
 
             with conn.cursor() as cur:
-                # ── Header ──────────────────────────────────────
                 print(f"🗓️  DB Cleanup — {TS} UTC")
                 print("-" * 50)
 
                 # ── asset_prices: downsampling ──────────────────
-                print("\n📊 **asset_prices** (downsampling)")
+                print("\n📊 **asset_prices** (downsample >24h to 1/hour)")
                 prices_deleted, prices_remaining = _cleanup_asset_prices(cur)
 
-                # ── cron_runs ────────────────────────────────────
-                before, deleted, after = _delete_older_than(
-                    cur, "cron_runs", CRON_RUNS_RETENTION_DAYS, "started_at"
+                # ── cron_runs: 24h retention ────────────────────
+                before, deleted, after = _delete_older_than_hours(
+                    cur, "cron_runs", CRON_RUNS_RETENTION_HOURS, "started_at"
                 )
-                print(f"\n📋 **cron_runs**: {before} → {after} (διαγράφηκαν {deleted} > {CRON_RUNS_RETENTION_DAYS}d)")
+                print(
+                    f"\n📋 **cron_runs**: {before} → {after} "
+                    f"(deleted {deleted} older than {CRON_RUNS_RETENTION_HOURS}h)"
+                )
 
                 # ── trade_log ───────────────────────────────────
-                before, deleted, after = _delete_older_than(
+                before, deleted, after = _delete_older_than_days(
                     cur, "trade_log", TRADE_LOG_RETENTION_DAYS, "timestamp"
                 )
-                print(f"📋 **trade_log**: {before} → {after} (διαγράφηκαν {deleted} > {TRADE_LOG_RETENTION_DAYS}d)")
+                print(
+                    f"📋 **trade_log**: {before} → {after} "
+                    f"(deleted {deleted} older than {TRADE_LOG_RETENTION_DAYS}d)"
+                )
 
             conn.commit()
 
@@ -111,10 +124,9 @@ def main() -> int:
                     cur.execute(f"VACUUM ANALYZE {table}")
                     print(f"  ✅ {table}")
 
-            # ── Summary ─────────────────────────────────────────
             print("-" * 50)
-            print(f"🧹 asset_prices: διαγράφηκαν {prices_deleted:,} | εναπομένουν {prices_remaining:,}")
-            print("✅ Ολοκληρώθηκε")
+            print(f"🧹 asset_prices: deleted {prices_deleted:,} | remaining {prices_remaining:,}")
+            print("✅ Done")
 
             return 0
 
