@@ -16,9 +16,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from app.notify import send_telegram
+from app.logging_setup import append_job_log, setup_logging
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+
+log = setup_logging("cron")
 
 # name → (script_path, interval_seconds, default_mode)
 JOB_REGISTRY: dict[str, tuple[str, int, str]] = {
@@ -118,6 +121,7 @@ def run_job(db, name: str) -> dict:
     env = os.environ.copy()
     env["AITRADER_MODE"] = mode
 
+    output = ""
     try:
         result = subprocess.run(
             [sys.executable, str(full_path)],
@@ -136,9 +140,19 @@ def run_job(db, name: str) -> dict:
     except subprocess.TimeoutExpired:
         status = "error"
         summary = f"timeout after {interval * 2}s"
+        output = summary
     except Exception as e:
         status = "error"
         summary = f"{type(e).__name__}: {e}"
+        output = summary
+
+    # Durable full transcript (DB summary is truncated)
+    header = (
+        f"=== {started.isoformat()} job={name} mode={mode} "
+        f"status={status} run_id={run_id} ==="
+    )
+    append_job_log(name, header, output)
+    log.info("job=%s status=%s run_id=%s", name, status, run_id)
 
     return _finish_run(db, run_id, name, status, summary, started, interval)
 

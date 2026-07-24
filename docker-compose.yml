@@ -1,6 +1,8 @@
+# Local/dev compose. Production: ~/homeserver/docker-compose/aitrader/
 services:
   aitrader:
     build: .
+    image: dockerhub.pkatopodis.me/pank85/aitrader:latest
     container_name: aitrader
     restart: unless-stopped
     ports:
@@ -14,3 +16,20 @@ services:
       - /home/pank/docker-data/aitrader:/state
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:9237/healthz', timeout=3)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"

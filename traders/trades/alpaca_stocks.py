@@ -28,7 +28,7 @@ from db_prices import (
                        load_notify_state, save_notify_state as db_save_notify_state,
                        log_trade as db_log_trade)
 from traders.common.config import (
-    ALPACA_BASE_URL, ALPACA_DATA_URL, DRY_RUN, ROOT_DIR, ensure_log_dir,
+    ALPACA_BASE_URL, ALPACA_DATA_URL, DRY_RUN, ROOT_DIR, LOG_DIR, ensure_log_dir,
 )
 from traders.common.gates import check_gate, load_ai_gates
 
@@ -74,9 +74,6 @@ INTRADAY_ENTRY_PCT = 1.5    # OR intraday change (vs open) >= 1.5% qualifies
 MAX_TRADES_PER_DAY = 3      # hard cap on entries per UTC day (PDT protection)
 MAX_OPEN_POSITIONS = 5
 
-LOG_DIR = os.path.join(ROOT_DIR, "logs")
-os.makedirs(LOG_DIR, exist_ok=True)
-
 EXCHANGE_NAME = "alpaca-stocks"
 
 # Paper mode: prefix + skip real API calls
@@ -87,7 +84,7 @@ if _ALPACA_PAPER:
 # --- Concurrency guard ------------------------------------------------------
 # Overlapping crons would double entries and race trading_state. A single flock
 # makes any second concurrent run exit.
-LOCK_FILE = os.path.join(ROOT_DIR, "logs/alpaca_stocks.lock")
+LOCK_FILE = os.path.join(LOG_DIR, "alpaca_stocks.lock")
 
 def log_trade(db_conn, action, ticker, signal_strength, momentum_pct, entry_price,
               current_price, unrealized_plpc, order_id, client_order_id, quantity,

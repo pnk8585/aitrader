@@ -6,7 +6,7 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 STATE_DIR="/home/pank/docker-data/aitrader"
 
-mkdir -p "$STATE_DIR/logs"
+mkdir -p "$STATE_DIR/logs" "$STATE_DIR/logs/jobs" "$STATE_DIR/ai_overseer"
 
 # Copy old-style registry
 if [ -f "$REPO_DIR/aitrader_orchestrator.json" ]; then

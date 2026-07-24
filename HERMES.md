@@ -64,6 +64,13 @@ docker compose up -d --build
 # Health: curl http://localhost:9237/healthz
 ```
 
-The container mounts `/home/pank/docker-data/aitrader` as `/state`. Jobs are driven
-by DB `cron_jobs` / `JOB_REGISTRY` in `app/cron_orchestrator.py`. Scheduler stdout
-must inherit (not PIPE) so ticks never block.
+The container mounts `/home/pank/docker-data/aitrader` as `/state` (`AITRADER_STATE_DIR`).
+Jobs are driven by DB `cron_jobs` / `JOB_REGISTRY` in `app/cron_orchestrator.py`.
+Scheduler stdout must inherit (not PIPE) so ticks never block.
+
+**Logs (durable under `/state/logs`):**
+- `scheduler.log` / `cron.log` — tick + job status (also in `docker logs aitrader`)
+- `jobs/<job-name>.log` — full job stdout/stderr per run
+- lock files (`kraken_*.lock`, etc.) live here too
+
+Production compose: `~/homeserver/docker-compose/aitrader/docker-compose.yml`
