@@ -11,7 +11,7 @@ stages:
 
 variables:
   CI_REGISTRY: "dockerhub.pkatopodis.me"
-  CI_REGISTRY_IMAGE: "dockerhub.pkatopodis.me/pank85/aitrader"
+  CI_REGISTRY_IMAGE: "dockerhub.pkatopodis.me/aiagents/aitrader"
   CI_SERVER_HOST: "gitlab-ce:8080"
   GITLAB_REGISTRY_IMAGE: "gitlab-ce:5050/$CI_PROJECT_PATH"
   MAJOR_MINOR_VERSION: ""
@@ -63,7 +63,7 @@ docker-build:
     - name: docker:dind
       alias: docker
       entrypoint: ["dockerd"]
-      command: ["--host=tcp://0.0.0.0:2375", "--insecure-registry=gitlab-ce:5050", "--insecure-registry=dockerhub.pkatopodis.me"]
+      command: ["--host=tcp://0.0.0.0:2375", "--insecure-registry=gitlab-ce:5050"]
   variables:
     DOCKER_HOST: tcp://docker:2375
     DOCKER_TLS_CERTDIR: ""
