@@ -6,6 +6,9 @@ Sinks under AITRADER_STATE_DIR/logs (or ./logs):
   aitrader.log / named *.log             — app loggers
   llm.jsonl                              — one JSON object per LLM call
 
+App and LLM files roll at midnight (UTC) and keep 5 days of backups
+(``*.log.YYYY-MM-DD``, ``llm.jsonl.YYYY-MM-DD``). Job logs are purged by mtime.
+
 Log level (default INFO) from app_settings ``logging.level`` (or env LOG_LEVEL).
 uvicorn.access HTTP lines are forced to DEBUG so they stay quiet at INFO
 (same behaviour as bettips-ai).
@@ -15,6 +18,7 @@ Env:
   LOG_DIR             — override log directory
   LOG_LLM_PROMPTS     — "0"/"false"/"no" disables llm.jsonl (default: on)
   LOG_LEVEL           — fallback if DB setting missing (DEBUG|INFO|WARNING|ERROR)
+  LOG_RETENTION_DAYS  — days of rolled logs to keep (default 5)
 """
 
 from __future__ import annotations
@@ -24,7 +28,9 @@ import logging
 import os
 import sys
 import threading
+import time
 from datetime import datetime, timezone
+from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from typing import Any
 
@@ -37,15 +43,18 @@ _LEVEL_NAMES = {
     "CRITICAL": logging.CRITICAL,
 }
 
+_DEFAULT_RETENTION_DAYS = 5
+
 _CONFIGURED = False
 _llm_lock = threading.Lock()
 _llm_path: str | None = None
 _log_llm_prompts = True
 _current_level = logging.INFO
 _current_level_name = "INFO"
-# Track handlers we created so apply_log_level can retarget them
 _managed_handlers: list[logging.Handler] = []
 _named_loggers: set[str] = set()
+_retention_days = _DEFAULT_RETENTION_DAYS
+_purged_once = False
 
 
 class _AccessAsDebugFilter(logging.Filter):
@@ -62,6 +71,16 @@ def _env_truthy(name: str, default: bool = True) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() not in ("0", "false", "no", "off", "")
+
+
+def _get_retention_days() -> int:
+    raw = os.getenv("LOG_RETENTION_DAYS")
+    if raw is None:
+        return _DEFAULT_RETENTION_DAYS
+    try:
+        return max(1, int(raw.strip()))
+    except ValueError:
+        return _DEFAULT_RETENTION_DAYS
 
 
 def logs_dir() -> Path:
@@ -82,12 +101,62 @@ def _parse_level(level_name: str | None) -> tuple[int, str]:
     return _LEVEL_NAMES[name], name
 
 
+def _make_timed_handler(path: Path | str, *, backup_count: int) -> TimedRotatingFileHandler:
+    """Daily UTC rotation; keep ``backup_count`` previous days."""
+    fh = TimedRotatingFileHandler(
+        str(path),
+        when="midnight",
+        interval=1,
+        backupCount=backup_count,
+        encoding="utf-8",
+        utc=True,
+    )
+    fh.suffix = "%Y-%m-%d"
+    return fh
+
+
+def purge_old_logs(days: int | None = None) -> int:
+    """Delete log files (and jobs/*) older than ``days`` by mtime. Returns count removed."""
+    days = days if days is not None else _get_retention_days()
+    cutoff = time.time() - days * 86400
+    removed = 0
+    root = logs_dir()
+    if not root.is_dir():
+        return 0
+
+    candidates: list[Path] = []
+    try:
+        for p in root.rglob("*"):
+            if not p.is_file():
+                continue
+            name = p.name
+            if (
+                name.endswith(".log")
+                or ".log." in name
+                or name.endswith(".jsonl")
+                or ".jsonl." in name
+            ):
+                candidates.append(p)
+    except OSError:
+        return 0
+
+    for path in candidates:
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink(missing_ok=True)
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
+
 def _ensure_llm_path() -> None:
-    """Resolve llm.jsonl path once (lazy)."""
-    global _llm_path, _log_llm_prompts, _CONFIGURED
+    """Resolve llm.jsonl path + timed handler once (lazy)."""
+    global _llm_path, _log_llm_prompts, _CONFIGURED, _retention_days
     if _llm_path is not None or (_CONFIGURED and not _log_llm_prompts):
         return
     _log_llm_prompts = _env_truthy("LOG_LLM_PROMPTS", default=True)
+    _retention_days = _get_retention_days()
     if not _log_llm_prompts:
         _CONFIGURED = True
         return
@@ -95,6 +164,16 @@ def _ensure_llm_path() -> None:
         d = logs_dir()
         d.mkdir(parents=True, exist_ok=True)
         _llm_path = str(d / "llm.jsonl")
+        llm_log = logging.getLogger("aitrader.llm.audit")
+        if not any(isinstance(h, TimedRotatingFileHandler) for h in llm_log.handlers):
+            llm_fh = _make_timed_handler(_llm_path, backup_count=_retention_days)
+            llm_fh.setLevel(logging.INFO)
+            llm_fh.setFormatter(logging.Formatter("%(message)s"))
+            llm_log.handlers.clear()
+            llm_log.addHandler(llm_fh)
+            llm_log.setLevel(logging.INFO)
+            llm_log.propagate = False
+            _managed_handlers.append(llm_fh)
     except OSError:
         _llm_path = None
     _CONFIGURED = True
@@ -133,14 +212,16 @@ def apply_log_level(level_name: str | None = None) -> str:
     _current_level = level
     _current_level_name = name
 
-    # Named aitrader loggers (scheduler, cron, aitrader, …)
     for n in list(_named_loggers) + ["aitrader", "aitrader.llm"]:
         logging.getLogger(n).setLevel(level)
 
     for h in _managed_handlers:
-        h.setLevel(level)
+        # Keep llm audit handler at INFO always (structured JSON sink)
+        if getattr(h, "baseFilename", "").endswith("llm.jsonl"):
+            h.setLevel(logging.INFO)
+        else:
+            h.setLevel(level)
 
-    # uvicorn.error: lifecycle visible at INFO+
     err = logging.getLogger("uvicorn.error")
     err.setLevel(logging.INFO if level > logging.DEBUG else logging.DEBUG)
 
@@ -165,6 +246,7 @@ def apply_log_level_from_settings() -> str:
     level_name = None
     try:
         from app.settings import get_setting
+
         level_name = get_setting("logging.level")
     except Exception:
         pass
@@ -180,13 +262,14 @@ def apply_log_level_from_settings() -> str:
 
 
 def setup_logging(name: str = "aitrader", *, level: int | None = None) -> logging.Logger:
-    """Named logger: StreamHandler + file under logs_dir/{name}.log.
+    """Named logger: StreamHandler + daily-rotating file under logs_dir/{name}.log.
 
     Level defaults to current app level (from apply_log_level / settings).
     """
-    global _CONFIGURED
+    global _CONFIGURED, _retention_days, _purged_once
     log = logging.getLogger(name)
     _named_loggers.add(name)
+    _retention_days = _get_retention_days()
 
     use_level = level if level is not None else _current_level
 
@@ -214,7 +297,13 @@ def setup_logging(name: str = "aitrader", *, level: int | None = None) -> loggin
     try:
         d = logs_dir()
         d.mkdir(parents=True, exist_ok=True)
-        fh = logging.FileHandler(d / f"{name}.log", encoding="utf-8")
+        if not _purged_once:
+            n = purge_old_logs(_retention_days)
+            _purged_once = True
+            if n:
+                log.info("Purged %d log file(s) older than %dd", n, _retention_days)
+
+        fh = _make_timed_handler(d / f"{name}.log", backup_count=_retention_days)
         fh.setFormatter(fmt)
         fh.setLevel(use_level)
         log.addHandler(fh)
@@ -222,7 +311,6 @@ def setup_logging(name: str = "aitrader", *, level: int | None = None) -> loggin
     except OSError as e:
         log.warning("Could not open file log under %s: %s", logs_dir(), e)
 
-    # Quiet access + libs once (first setup_logging call)
     apply_log_level(logging.getLevelName(use_level))
 
     _ensure_llm_path()
@@ -245,7 +333,10 @@ def configure_logging() -> str | None:
 
 
 def append_job_log(job_name: str, header: str, body: str) -> Path | None:
-    """Append one job run's full stdout/stderr to logs/jobs/{job}.log."""
+    """Append one job run's full stdout/stderr to logs/jobs/{job}.log.
+
+    Also purges job log files older than retention by mtime.
+    """
     try:
         d = logs_dir() / "jobs"
         d.mkdir(parents=True, exist_ok=True)
@@ -255,6 +346,15 @@ def append_job_log(job_name: str, header: str, body: str) -> Path | None:
             if body:
                 f.write(body.rstrip() + "\n")
             f.write("\n")
+        # Opportunistic purge of old job logs (mtime)
+        days = _get_retention_days()
+        cutoff = time.time() - days * 86400
+        for p in d.glob("*.log*"):
+            try:
+                if p.stat().st_mtime < cutoff:
+                    p.unlink(missing_ok=True)
+            except OSError:
+                continue
         return path
     except OSError:
         return None
@@ -301,7 +401,6 @@ def log_llm_call(
     line = json.dumps(record, ensure_ascii=False, default=str)
     try:
         with _llm_lock:
-            with open(_llm_path, "a", encoding="utf-8") as f:
-                f.write(line + "\n")
-    except OSError as e:
+            logging.getLogger("aitrader.llm.audit").info(line)
+    except Exception as e:
         logging.getLogger("aitrader.llm").warning("Failed to write llm.jsonl: %s", e)
