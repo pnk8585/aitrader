@@ -355,6 +355,48 @@ async def cron_db_table(request: Request, sort: str = "", dir: str = "asc"):
     return HTMLResponse(html)
 
 
+@app.post("/ui/admin/cron-jobs/{name}/toggle-mode", response_class=HTMLResponse)
+async def cron_job_toggle_mode(name: str, request: Request):
+    from app.cron_orchestrator import list_jobs
+    from app.db import get_conn
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT mode FROM cron_jobs WHERE name=%s", (name,))
+        row = cur.fetchone()
+        if not row:
+            return HTMLResponse(
+                f'<div class="flash flash-err">Job not found: {name}</div>', status_code=404)
+        new_mode = "paper" if row[0] == "live" else "live"
+        cur.execute(
+            "UPDATE cron_jobs SET mode=%s, updated_at=NOW() WHERE name=%s",
+            (new_mode, name))
+        conn.commit()
+        jobs = list_jobs(conn)
+    html = partial(request, "_admin_cron_db_table.html", jobs=jobs, sort="", dir="asc")
+    return HTMLResponse(html)
+
+
+@app.post("/ui/admin/cron-jobs/{name}/toggle-enabled", response_class=HTMLResponse)
+async def cron_job_toggle_enabled(name: str, request: Request):
+    from app.cron_orchestrator import list_jobs
+    from app.db import get_conn
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT enabled FROM cron_jobs WHERE name=%s", (name,))
+        row = cur.fetchone()
+        if not row:
+            return HTMLResponse(
+                f'<div class="flash flash-err">Job not found: {name}</div>', status_code=404)
+        new_enabled = not row[0]
+        cur.execute(
+            "UPDATE cron_jobs SET enabled=%s, updated_at=NOW() WHERE name=%s",
+            (new_enabled, name))
+        conn.commit()
+        jobs = list_jobs(conn)
+    html = partial(request, "_admin_cron_db_table.html", jobs=jobs, sort="", dir="asc")
+    return HTMLResponse(html)
+
+
 @app.post("/ui/admin/cron-jobs/{name}/run", response_class=HTMLResponse)
 async def cron_job_run(name: str, request: Request):
     from app.cron_orchestrator import list_jobs, run_job

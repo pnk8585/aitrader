@@ -9,16 +9,30 @@
         <th>Enabled</th>
         <th>Next Run</th>
         <th>Updated</th>
-        <th>Run</th>
+        <th>Actions</th>
       </tr>
     </thead>
     <tbody>
       {% for j in jobs %}
       <tr>
         <td><strong>{{ j.name }}</strong></td>
-        <td><span class="badge badge-{{ j.mode }}">{{ j.mode }}</span></td>
+        <td>
+          <button class="btn-action btn-mode-{{ j.mode }}"
+                  hx-post="/ui/admin/cron-jobs/{{ j.name }}/toggle-mode"
+                  hx-target="#cron-db-table" hx-swap="outerHTML"
+                  title="Click to switch to {{ 'paper' if j.mode == 'live' else 'live' }}">
+            {{ j.mode }}
+          </button>
+        </td>
         <td>{{ (j.schedule_seconds // 3600) if j.schedule_seconds >= 3600 else (j.schedule_seconds // 60) }}{{ "h" if j.schedule_seconds >= 3600 else "m" }}</td>
-        <td>{{ "✅" if j.enabled else "⏸️" }}</td>
+        <td>
+          <button class="btn-action btn-enabled-{{ j.enabled | lower }}"
+                  hx-post="/ui/admin/cron-jobs/{{ j.name }}/toggle-enabled"
+                  hx-target="#cron-db-table" hx-swap="outerHTML"
+                  title="Click to {{ 'disable' if j.enabled else 'enable' }}">
+            {{ "✅" if j.enabled else "⏸️" }}
+          </button>
+        </td>
         <td class="text-muted">{{ j.next_run_at.strftime("%d/%m %H:%M") if j.next_run_at else "—" }}</td>
         <td class="text-muted">{{ j.updated_at.strftime("%d/%m %H:%M") if j.updated_at else "—" }}</td>
         <td>
