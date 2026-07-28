@@ -48,12 +48,11 @@ _PAPER_MODE = os.environ.get("AITRADER_MODE", "") == "paper"
 EXCHANGE_NAME = _PAPER_MODE and "paper-position-monitor" or "position-monitor"
 
 # trading_state rows are written by the strategies under their own keys
-# (kraken-momentum / kraken-pullback), paper-prefixed in paper mode — NOT "kraken".
-# This is the exact set of exchange keys that can appear for the current mode.
+# "kraken" is also used (direct positions, e.g. manual buys via the dashboard)
 _STATE_EXCHANGES = (
-    ("paper-kraken-momentum", "paper-kraken-pullback")
+    ("paper-kraken-momentum", "paper-kraken-pullback", "kraken")
     if _PAPER_MODE
-    else ("kraken-momentum", "kraken-pullback")
+    else ("kraken-momentum", "kraken-pullback", "kraken")
 )
 
 # ── DB helpers ──────────────────────────────────────────────────────

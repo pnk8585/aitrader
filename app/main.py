@@ -375,17 +375,56 @@ async def cron_job_run(name: str, request: Request):
 async def position_sell(exchange: str, symbol: str, request: Request):
     from app.db import get_conn
     from app.notify import send_telegram
+
+    # Load env vars (same pattern as position_monitor.py)
+    import os
+    for p in ["/home/pank/projects/aitrader/.env", "/home/pank/.hermes/.env"]:
+        if os.path.exists(p):
+            load_dotenv(p, override=False)
+
     with get_conn() as conn:
         cur = conn.cursor()
         cur.execute(
-            "SELECT 1 FROM trading_state WHERE exchange=%s AND symbol=%s",
+            "SELECT exchange, symbol, quantity FROM trading_state WHERE exchange=%s AND symbol=%s",
             (exchange, symbol))
-        if cur.fetchone() is None:
+        row = cur.fetchone()
+        if row is None:
             return HTMLResponse(
                 '<div class="flash flash-err">Position not found</div>', status_code=404)
-    send_telegram(f"🔴 SELL REQUEST: {exchange} {symbol} @ market")
-    return HTMLResponse(
-        f'<div class="flash">Sell request sent for {exchange} {symbol}</div>')
+        _, _, qty = row
+
+    # Only kraken is supported for now
+    if exchange != "kraken":
+        return HTMLResponse(
+            f'<div class="flash flash-err">Sell not implemented for {exchange}</div>',
+            status_code=501)
+
+    import ccxt
+    kraken = ccxt.kraken({
+        "apiKey": os.environ.get("KRAKEN_API_KEY"),
+        "secret": os.environ.get("KRAKEN_SECRET"),
+        "enableRateLimit": True,
+    })
+
+    try:
+        res = kraken.create_market_sell_order(symbol, float(qty))
+        order_id = res.get("id", "unknown")
+        send_telegram(f"✅ SOLD {symbol} qty={qty} order={order_id}")
+
+        # Clean up trading_state
+        with get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "DELETE FROM trading_state WHERE exchange=%s AND symbol=%s",
+                (exchange, symbol))
+            conn.commit()
+
+        return HTMLResponse(
+            f'<div class="flash">Sold {symbol} @ market, order={order_id}</div>')
+    except Exception as e:
+        send_telegram(f"❌ SELL FAILED {exchange} {symbol}: {e}")
+        return HTMLResponse(
+            f'<div class="flash flash-err">Sell failed: {e}</div>', status_code=500)
 
 
 @app.get("/ui/admin/cron-jobs")
