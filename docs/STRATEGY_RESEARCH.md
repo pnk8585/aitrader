@@ -347,6 +347,120 @@ We could potentially **integrate FreqAI** as a replacement for our current LLM-b
 
 ---
 
+## Concrete Code Ideas (Extracted from Open-Source Bots)
+
+### From Jesse: ATR Stop-Loss Pattern
+```python
+# Simple ATR stop (adapt to our pullback strategy)
+def compute_stop(entry_price, candles, period=22):
+    atr = ta.atr(candles, period=period)
+    stop = entry_price - atr * 2
+    take_profit = entry_price + atr * 3
+    return stop, take_profit
+```
+**Apply to AITrader:** Replace fixed -2% stop in pullback config with `entry - 2×ATR(14)`
+
+### From Jesse: Trailing Stop Only When in Profit
+```python
+def update_position(self):
+    # Only trail if position is profitable
+    if self.position.pnl > 0:
+        if self.is_long:
+            self.stop_loss = self.position.qty, self.price - self.atr * 2
+```
+**Apply to AITrader:** Our trailing stop already activates on profit, but the distance is fixed. Use ATR distance instead.
+
+### From Jesse: Breakeven at 2×ATR Profit
+```python
+def update_position(self):
+    # Move stop to breakeven only after 2×ATR profit
+    if self.is_long and self.price > self.position.entry_price + ta.atr(self.candles) * 2:
+        self.stop_loss = self.position.qty, self.position.entry_price
+```
+**Apply to AITrader:** Our breakeven protection should use ATR threshold, not fixed percentage.
+
+### From Jesse: Kelly Criterion Position Sizing (Ready to Port!)
+```python
+def kelly_qty(self, entry, stop):
+    if not self.metrics or self.metrics['total'] < 20:
+        win_rate = 0.46  # default for first trades
+        avg_win_ratio = 1.1
+        avg_loss_ratio = 0.5
+    else:
+        win_rate = self.metrics['win_rate']
+        avg_win_ratio = self.metrics['avg_win_percentage'] / 100
+        avg_loss_ratio = self.metrics['avg_loss_percentage'] / 100
+    kc = utils.kelly_criterion(win_rate, avg_win_ratio, avg_loss_ratio) * 100
+    risk_qty = utils.risk_to_qty(self.available_margin, kc, entry, stop, self.fee_rate)
+    max_qty = utils.size_to_qty(0.25 * self.available_margin, entry, precision=6, fee_rate=self.fee_rate)
+    return min(risk_qty, max_qty)
+```
+**Apply to AITrader:** Query `trade_log` table for win_rate and avg_win/loss ratios, compute Kelly, use quarter-Kelly for sizing.
+
+### From Jesse: Risk-Based Position Sizing
+```python
+def position_size(self, entry, stop):
+    risk_qty = utils.risk_to_qty(self.balance, 10, entry, stop, fee_rate=self.fee_rate)
+    max_qty = utils.size_to_qty(0.25 * self.balance, entry, precision=6, fee_rate=self.fee_rate)
+    return min(risk_qty, max_qty)
+```
+**Apply to AITrader:** Size inversely proportional to stop distance. Tight stop = bigger position, wide stop = smaller.
+
+### From Jesse: Bollinger Band Crossover Entry
+```python
+@property
+def long_cross(self):
+    return self.price > self.bb.middleband[-1] and self.candles[:, 2][-2] <= self.bb.middleband[-2]
+
+@property
+def bb(self):
+    return ta.bollinger_bands(self.candles, sequential=True)
+```
+**Apply to AITrader:** New mean-reversion strategy for ranging markets (regime="ranging").
+
+### From Jesse: Special Exit Indicators to Explore
+- **safezonestop** — adaptive stop based on recent price action
+- **devstop** — deviation-based stop
+- **kaufmanstop** — Kaufman adaptive stop
+- **Keltner Channels** — volatility-based exit levels
+- **Donchian Channels** — breakout-based exits
+
+### From Freqtrade: Strategy Signal Pattern
+```python
+# Freqtrade uses dataframe columns for signals
+dataframe.loc[
+    (dataframe['rsi'] < 30) &  # oversold
+    (dataframe['volume'] > 0),  # has volume
+    'enter_long'] = 1
+
+dataframe.loc[
+    (dataframe['rsi'] > 70),  # overbought
+    'exit_long'] = 1
+```
+**Apply to AITrader:** Vectorized signal generation instead of per-candle loops. Could speed up our scan.
+
+### From Freqtrade: HyperOpt Parameter Optimization
+- Defines parameter search spaces: `IntParameter(20, 100, default=50, space="buy")`
+- Runs thousands of backtests with different parameters
+- Finds optimal values for each indicator threshold
+
+**Apply to AITrader:** We could optimize `TREND_3H_MIN_PCT`, `PULLBACK_MIN_PCT`, `BLOWOFF_GUARD_1H_PCT` via systematic backtesting.
+
+---
+
+## Quick Wins (Can Implement Today)
+
+| # | Idea | Source | Files to Change |
+|---|------|--------|----------------|
+| 1 | ATR-based stops | Jesse | `strategies/pullback/config.py`, `exits.py` |
+| 2 | Kelly sizing from trade_log | Jesse | `strategies/momentum/config.py`, new `kelly.py` |
+| 3 | Breakeven at 2×ATR | Jesse | `strategies/momentum/exits.py` |
+| 4 | Bollinger entry for ranging | Jesse | New `strategies/bollinger/signals.py` |
+| 5 | Risk-based sizing (stop distance) | Jesse | Both strategies' entry logic |
+| 6 | Regime detector | Waylandz | New `strategies/regime/detector.py` |
+
+---
+
 ## References
 
 ### Strategies
