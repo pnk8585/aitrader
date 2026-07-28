@@ -45,6 +45,7 @@ def get_connection():
             password=os.getenv("DB_PASSWORD"),
             connect_timeout=5,
         )
+        conn.autocommit = True  # Each statement auto-commits; no transaction accumulation
     except Exception as e:
         if DEBUG:
             raise
