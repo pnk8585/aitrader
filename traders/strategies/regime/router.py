@@ -15,13 +15,22 @@ def get_active_strategies(regime: str) -> dict:
 def should_enter(db_conn, symbol: str, strategy: str) -> tuple:
     """Check if a strategy should enter for this symbol right now.
     Returns (allowed, reason). Fail-open on missing data."""
+    try:
+        # Clear any failed transaction state from prior errors in this cycle
+        db_conn.rollback()
+    except Exception:
+        pass
     cur = db_conn.cursor()
-    cur.execute(
-        """SELECT regime FROM regime_state
-           WHERE symbol = %s ORDER BY updated_at DESC LIMIT 1""",
-        (symbol,))
-    row = cur.fetchone()
-    cur.close()
+    try:
+        cur.execute(
+            """SELECT regime FROM regime_state
+               WHERE symbol = %s ORDER BY updated_at DESC LIMIT 1""",
+            (symbol,))
+        row = cur.fetchone()
+    except Exception:
+        return True, "regime query failed (allow by default)"
+    finally:
+        cur.close()
 
     if not row:
         return True, "no regime data (allow by default)"
