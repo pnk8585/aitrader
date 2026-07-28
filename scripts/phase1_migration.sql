@@ -19,3 +19,9 @@ ALTER TABLE trading_state
 
 ALTER TABLE trading_state
     ADD COLUMN IF NOT EXISTS tp_sold_qty NUMERIC DEFAULT 0;
+
+ALTER TABLE trading_state
+    ADD COLUMN IF NOT EXISTS dca_level INT DEFAULT 0;
+
+ALTER TABLE trading_state
+    ADD COLUMN IF NOT EXISTS signal_price NUMERIC;

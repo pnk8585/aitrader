@@ -45,6 +45,7 @@ from db_prices import (
 from traders.common.config import DRY_RUN, ROOT_DIR, ensure_log_dir
 from traders.common.exchange import extract_fill, market_buy, market_sell, spread_ok
 from traders.common.gates import check_gate, load_ai_gates
+from traders.common.kelly import kelly_position_size
 from traders.strategies.pullback import config as PB
 from traders.strategies.pullback.exits import compute_effective_stop, should_exit_pullback
 from traders.strategies.pullback.signals import scan_pullback_candidates
@@ -93,6 +94,7 @@ DEPLOY_FRACTION = 0.12
 RISK_PER_TRADE_PCT = PB.RISK_PER_TRADE_PCT
 CONSULT_DEPLOY_FRACTION = PB.CONSULT_DEPLOY_FRACTION
 CONSULT_MIN_SCORE = PB.CONSULT_MIN_SCORE
+USE_KELLY_SIZING = PB.USE_KELLY_SIZING
 MIN_TRADE_EUR = PB.MIN_TRADE_EUR
 MAX_OPEN_SMALL = PB.MAX_OPEN_SMALL
 MAX_OPEN_LARGE = PB.MAX_OPEN_LARGE
@@ -540,6 +542,12 @@ def run_cycle():
     if risk_cap_eur < order_size_eur:
         order_size_eur = risk_cap_eur
     order_size_eur = min(order_size_eur, cash_eur)
+
+    if USE_KELLY_SIZING:
+        stop_price = current_price * (1 - stop_pct / 100)
+        kelly_size = kelly_position_size(db_conn, EXCHANGE_NAME, current_price, stop_price, portfolio_value)
+        if kelly_size > 0:
+            order_size_eur = kelly_size
 
     if order_size_eur < MIN_TRADE_EUR:
         report["action_taken"] = "SKIP"
