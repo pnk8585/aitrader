@@ -15,6 +15,14 @@ EXCHANGE = "kraken"
 DEBUG = os.getenv("DEBUG", "").lower() in ("1", "true", "yes")
 
 
+def _safe_rollback(conn):
+    """Rollback a failed transaction so subsequent queries can proceed."""
+    try:
+        conn.rollback()
+    except Exception:
+        pass
+
+
 def base_symbol(pair):
     """Extract base coin from a CCXT pair, e.g. 'BTC/EUR' -> 'BTC'."""
     return pair.split('/')[0].upper()
@@ -267,6 +275,7 @@ def get_one_hour_momentum(conn, symbol):
     except Exception as e:
         if DEBUG:
             raise
+        _safe_rollback(conn)
         print(f"get_one_hour_momentum failed: {e}", file=sys.stderr)
         return None
 
@@ -325,6 +334,7 @@ def get_momentum_over(conn, symbol, minutes, price_exchange="kraken"):
     except Exception as e:
         if DEBUG:
             raise
+        _safe_rollback(conn)
         print(f"get_momentum_over failed: {e}", file=sys.stderr)
         return None
     if past_price == 0:
@@ -348,6 +358,7 @@ def get_range_pct(conn, symbol, minutes, price_exchange="kraken"):
     except Exception as e:
         if DEBUG:
             raise
+        _safe_rollback(conn)
         print(f"get_range_pct failed: {e}", file=sys.stderr)
         return None
     if not row or row[0] is None or row[2] < 6:
@@ -415,6 +426,7 @@ def last_exit_time(conn, symbol, exchange_name):
     except Exception as e:
         if DEBUG:
             raise
+        _safe_rollback(conn)
         print(f"last_exit_time failed: {e}", file=sys.stderr)
         return None
     return row[0] if row else None
