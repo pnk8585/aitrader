@@ -31,10 +31,11 @@ def get_next_tp_level(tp_level, ladders=None):
     return TpLevel(threshold_pct=threshold, sell_fraction=fraction)
 
 
-def should_take_partial_profit(unrealized_plpc, tp_level, ladders=None):
+def should_take_partial_profit(unrealized_plpc, tp_level, total_qty, already_sold_qty=0.0, ladders=None):
     """Check if we should take partial profit at current P&L.
 
-    Returns (should_sell, fraction, reason).
+    Returns (should_sell, qty_to_sell, reason).
+    qty_to_sell is the exact amount to sell, clamped so we never exceed total_qty.
     """
     if ladders is None:
         ladders = DEFAULT_LADDERS
@@ -42,9 +43,14 @@ def should_take_partial_profit(unrealized_plpc, tp_level, ladders=None):
     if nxt is None:
         return False, 0.0, ""
     if unrealized_plpc >= nxt.threshold_pct:
+        sell_qty = total_qty * nxt.sell_fraction
+        max_sellable = total_qty - already_sold_qty
+        if max_sellable <= 0:
+            return False, 0.0, ""
+        sell_qty = min(sell_qty, max_sellable)
         return (
             True,
-            nxt.sell_fraction,
-            f"Ladder TP +{nxt.threshold_pct}% (sell {nxt.sell_fraction * 100:.0f}%)",
+            sell_qty,
+            f"Ladder TP +{nxt.threshold_pct}% (sell {sell_qty:.6f})",
         )
     return False, 0.0, ""

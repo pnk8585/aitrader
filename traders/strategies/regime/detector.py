@@ -32,31 +32,31 @@ def detect_regime(db_conn, symbol):
     vol20 = _volatility(prices, C.VOL_WINDOW)
     ret20 = _return_pct(prices, C.RET_WINDOW)
 
+    regime = "uncertain"
+
+    if adx is None:
+        regime = "uncertain"
+    elif vol20 is not None and vol20 >= C.VOL_CRISIS_THRESHOLD:
+        regime = "crisis"
+    elif adx >= C.ADX_TREND_THRESHOLD:
+        regime = "trending"
+    elif adx <= C.ADX_RANGE_THRESHOLD and vol20 is not None and vol20 <= C.VOL_RANGE_THRESHOLD:
+        regime = "ranging"
+    elif ret20 is not None and abs(ret20) >= C.RET_TREND_THRESHOLD:
+        regime = "trending"
+
     cur = db_conn.cursor()
     cur.execute(
         """INSERT INTO regime_state (symbol, regime, adx_14, vol_20d, ret_20d)
            VALUES (%s, %s, %s, %s, %s)""",
-        (symbol, "", round(adx, 2) if adx else None,
+        (symbol, regime,
+         round(adx, 2) if adx else None,
          round(vol20, 2) if vol20 else None,
          round(ret20, 2) if ret20 else None),
     )
     cur.close()
 
-    if adx is None:
-        return "uncertain"
-
-    if vol20 is not None and vol20 >= C.VOL_CRISIS_THRESHOLD:
-        return "crisis"
-
-    if adx >= C.ADX_TREND_THRESHOLD:
-        return "trending"
-    if adx <= C.ADX_RANGE_THRESHOLD and vol20 is not None and vol20 <= C.VOL_RANGE_THRESHOLD:
-        return "ranging"
-
-    if ret20 is not None and abs(ret20) >= C.RET_TREND_THRESHOLD:
-        return "trending"
-
-    return "uncertain"
+    return regime
 
 
 def _approx_adx(prices, period):
@@ -93,15 +93,21 @@ def _approx_adx(prices, period):
 
 
 def _volatility(prices, window):
-    """Annualized volatility over the last `window` periods, in percent."""
+    """Annualized volatility over the last `window` periods, in percent.
+
+    Prices are ~5-min intervals. Scale period returns to daily first,
+    then annualize: daily = period * sqrt(288), annual = daily * sqrt(365).
+    """
     if len(prices) < window + 1:
         return None
     segment = prices[-window - 1:]
     returns = [(segment[i] - segment[i - 1]) / segment[i - 1] for i in range(1, len(segment))]
     mean_r = sum(returns) / len(returns)
     var = sum((r - mean_r) ** 2 for r in returns) / (len(returns) - 1)
-    # ponytail: daily vol from any-period returns, scale by sqrt(365) — close enough
-    return (var ** 0.5) * 100 * (365 ** 0.5)
+    period_vol = var ** 0.5
+    # 288 five-minute periods per day, 365 days per year
+    daily_vol = period_vol * (288 ** 0.5)
+    return daily_vol * 100 * (365 ** 0.5)
 
 
 def _return_pct(prices, window):

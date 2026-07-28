@@ -17,7 +17,7 @@ def should_exit_momentum(
         return True, f"ATR stop ({round(unrealized_plpc, 2)}% <= {round(atr_stop_pct, 2)}%)"
     if C.USE_LADDERED_TP:
         from traders.common.laddered_tp import should_take_partial_profit
-        take, fraction, reason = should_take_partial_profit(unrealized_plpc, tp_level)
+        take, _, reason = should_take_partial_profit(unrealized_plpc, tp_level, total_qty=1.0, already_sold_qty=tp_sold_qty)
         if take:
             return True, reason
     if peak_plpc >= C.TTP_PEAK_PCT and unrealized_plpc <= (peak_plpc - C.TTP_GIVEBACK_PCT):

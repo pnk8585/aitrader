@@ -43,6 +43,8 @@ from traders.common.config import ROOT_DIR, ensure_log_dir
 from traders.common.exchange import extract_fill, market_buy, market_sell, spread_ok
 from traders.common.gates import check_gate, load_ai_gates
 from traders.strategies.momentum import config as MO
+from traders.common.atr_stops import compute_atr_from_prices, compute_atr_stop
+from traders.common.laddered_tp import should_take_partial_profit as check_ladder_tp
 from traders.strategies.momentum.exits import is_stale_rotation_candidate, should_exit_momentum
 from traders.strategies.regime import detect_regime
 
@@ -411,10 +413,18 @@ def run_cycle():
         sell = False
         reason = ""
 
+        atr_stop = None
+        if MO.USE_ATR_STOPS:
+            raw_atr = atr_pct(symbol)
+            if raw_atr is not None:
+                atr_stop = -(raw_atr * MO.ATR_STOP_MULTIPLIER)
         sell, reason = should_exit_momentum(
             unrealized_plpc=unrealized_plpc,
             peak_plpc=peak_plpc,
             age_hours=age_hours,
+            atr_stop_pct=atr_stop,
+            tp_level=ss.get("tp_level", 0),
+            tp_sold_qty=ss.get("tp_sold_qty", 0.0),
         )
 
         pos_report = {"symbol": symbol, "unrealized_plpc": round(unrealized_plpc, 2),
