@@ -187,8 +187,11 @@ async def dashboard(request: Request, tsearch: str = "", tdate: str = "all", rse
             row = cur.fetchone()
             if row and row[0]:
                 last_orch_run = row[0].strftime("%d/%m %H:%M")
+            # Cron jobs list for dashboard toggle
+            from app.cron_orchestrator import list_jobs as _list_cron_jobs
+            cron_jobs = _list_cron_jobs(conn)
     except Exception:
-        pass
+        cron_jobs = []
 
     # Compute truly free cash (subtract open position values from wallet)
     kraken_positions_value = sum(p.get("position_value", 0) or 0 for p in open_positions if p.get("exchange") == "kraken")
@@ -209,6 +212,7 @@ async def dashboard(request: Request, tsearch: str = "", tdate: str = "all", rse
         "rdate": rdate,
         "kraken": kraken,
         "alpaca": alpaca,
+        "cron_jobs": cron_jobs,
     }
     return templates.TemplateResponse(request, "dashboard.html", ctx)
 
@@ -417,6 +421,68 @@ async def cron_job_run(name: str, request: Request):
         jobs = list_jobs(conn)
     html = partial(request, "_admin_cron_db_table.html", jobs=jobs, sort="", dir="asc")
     return HTMLResponse(html)
+
+
+def _dash_cron_html(request, conn) -> str:
+    """Render the dashboard cron jobs table partial."""
+    from app.cron_orchestrator import list_jobs
+    jobs = list_jobs(conn)
+    rows = []
+    for j in jobs:
+        mode_cls = "btn-live" if j["mode"] == "live" else "btn-paper"
+        en_cls = "btn-on" if j["enabled"] else "btn-off"
+        en_text = "ON" if j["enabled"] else "OFF"
+        opacity = ' style="opacity:0.5"' if not j["enabled"] else ""
+        nxt = j["next_run_at"].strftime("%H:%M") if j.get("next_run_at") else "—"
+        interval_m = (j.get("schedule_seconds", 0) or 0) // 60
+        rows.append(
+            f'<tr{opacity}>'
+            f'<td>{j["name"]}</td>'
+            f'<td><button class="btn-action {mode_cls}" '
+            f'hx-post="/ui/admin/cron-jobs/{j["name"]}/toggle-mode-dash" '
+            f'hx-target="#cron-jobs-table" hx-swap="innerHTML" title="Click to switch">'
+            f'{j["mode"]}</button></td>'
+            f'<td class="text-muted">{interval_m}m</td>'
+            f'<td class="text-muted" style="font-size:12px">{nxt}</td>'
+            f'<td><button class="btn-action {en_cls}" '
+            f'hx-post="/ui/admin/cron-jobs/{j["name"]}/toggle-enabled-dash" '
+            f'hx-target="#cron-jobs-table" hx-swap="innerHTML">'
+            f'{en_text}</button></td></tr>'
+        )
+    body = "".join(rows) if rows else '<tr><td colspan="5" class="text-muted">No cron jobs.</td></tr>'
+    return (
+        '<table><thead><tr><th>Job</th><th>Mode</th><th>Interval</th><th>Next Run</th><th></th></tr></thead>'
+        f'<tbody>{body}</tbody></table>'
+    )
+
+
+@app.post("/ui/admin/cron-jobs/{name}/toggle-mode-dash", response_class=HTMLResponse)
+async def cron_toggle_mode_dash(name: str, request: Request):
+    from app.db import get_conn
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT mode FROM cron_jobs WHERE name=%s", (name,))
+        row = cur.fetchone()
+        if not row:
+            return HTMLResponse("")
+        new_mode = "paper" if row[0] == "live" else "live"
+        cur.execute("UPDATE cron_jobs SET mode=%s, updated_at=NOW() WHERE name=%s", (new_mode, name))
+        conn.commit()
+        return HTMLResponse(_dash_cron_html(request, conn))
+
+
+@app.post("/ui/admin/cron-jobs/{name}/toggle-enabled-dash", response_class=HTMLResponse)
+async def cron_toggle_enabled_dash(name: str, request: Request):
+    from app.db import get_conn
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT enabled FROM cron_jobs WHERE name=%s", (name,))
+        row = cur.fetchone()
+        if not row:
+            return HTMLResponse("")
+        cur.execute("UPDATE cron_jobs SET enabled=%s, updated_at=NOW() WHERE name=%s", (not row[0], name))
+        conn.commit()
+        return HTMLResponse(_dash_cron_html(request, conn))
 
 
 @app.post("/ui/admin/positions/{exchange}/{symbol}/sell", response_class=HTMLResponse)

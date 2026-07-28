@@ -62,6 +62,49 @@
   </div>
 </div>
 
+<!-- Cron Jobs — Mode Toggle -->
+<h2 style="font-size:15px;margin:24px 0 10px">Cron Jobs <a href="/ui/admin/cron" style="font-size:12px;color:var(--accent);text-decoration:none">⚙ admin</a></h2>
+<div id="cron-jobs-table">
+<table>
+  <thead><tr><th>Job</th><th>Mode</th><th>Interval</th><th>Next Run</th><th></th></tr></thead>
+  <tbody>
+  {% for j in cron_jobs %}
+    <tr style="{{ 'opacity:0.5' if not j.enabled }}">
+      <td>{{ j.name }}</td>
+      <td>
+        <button class="btn-action {{ 'btn-live' if j.mode == 'live' else 'btn-paper' }}"
+                hx-post="/ui/admin/cron-jobs/{{ j.name }}/toggle-mode-dash"
+                hx-target="#cron-jobs-table"
+                hx-swap="innerHTML"
+                title="Click to switch">
+          {{ j.mode }}
+        </button>
+      </td>
+      <td class="text-muted">{{ (j.schedule_seconds // 60) }}m</td>
+      <td class="text-muted" style="font-size:12px">{{ j.next_run_at.strftime('%H:%M') if j.next_run_at else '—' }}</td>
+      <td>
+        <button class="btn-action {{ 'btn-on' if j.enabled else 'btn-off' }}"
+                hx-post="/ui/admin/cron-jobs/{{ j.name }}/toggle-enabled-dash"
+                hx-target="#cron-jobs-table"
+                hx-swap="innerHTML">
+          {{ 'ON' if j.enabled else 'OFF' }}
+        </button>
+      </td>
+    </tr>
+  {% else %}
+    <tr><td colspan="5" class="text-muted">No cron jobs configured.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+<style>
+.btn-live { background: #27ae60; color: white; border: none; padding: 2px 10px; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: 600; }
+.btn-paper { background: #2980b9; color: white; border: none; padding: 2px 10px; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: 600; }
+.btn-on { background: var(--green, #27ae60); color: white; border: none; padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 11px; }
+.btn-off { background: #555; color: #999; border: none; padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 11px; }
+.btn-live:hover, .btn-paper:hover, .btn-on:hover, .btn-off:hover { opacity: 0.8; }
+</style>
+
 <!-- Open Positions -->
 {% if open_positions %}
 <h2 style="font-size:15px;margin:24px 0 10px">Open Positions</h2>
