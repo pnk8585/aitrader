@@ -51,6 +51,7 @@ from traders.strategies.pullback.exits import compute_effective_stop, should_exi
 from traders.strategies.pullback.signals import scan_pullback_candidates
 from traders.strategies.regime import detect_regime
 from traders.strategies.regime.router import should_enter
+from traders.common.dca_entry import dca_entry_decision, dca_buy_qty, MAX_DCA_LEVEL
 
 # ---------------------------------------------------------------------------
 # Config (from strategies.pullback.config)
@@ -351,6 +352,53 @@ def run_cycle():
                 pos_report["reason"] = f"Failed to sell: {e}"
                 print(f"Error selling {symbol}: {e}", file=sys.stderr)
 
+        # DCA follow-up for existing positions
+        if symbol in new_state:
+            dca_level = ss.get("dca_level", 0)
+            sig_price = ss.get("signal_price")
+            total_eur = ss.get("total_position_eur", 0)
+            if sig_price and dca_level < MAX_DCA_LEVEL and total_eur > 0:
+                deploy_pct = dca_entry_decision(sig_price, current_price, dca_level + 1)
+                if deploy_pct > 0:
+                    dca_qty = dca_buy_qty(total_eur, deploy_pct, current_price)
+                    is_paper = os.environ.get("AITRADER_MODE") == "paper"
+                    if is_paper:
+                        fill_p = current_price
+                        fill_q = dca_qty
+                    else:
+                        try:
+                            exchange.load_markets()
+                            fqty_dca = float(exchange.amount_to_precision(symbol, dca_qty))
+                            res_dca = market_buy(exchange, symbol, fqty_dca, current_price)
+                            _dca_res = res_dca or {}
+                            fill_p, fill_q = extract_fill(_dca_res, current_price)
+                            if fill_q is None:
+                                fill_q = fqty_dca
+                        except Exception as e:
+                            print(f"DCA buy failed for {symbol}: {e}", file=sys.stderr)
+                            fill_p, fill_q = None, None
+                    if fill_p and fill_q:
+                        old_qty = ss.get("quantity", 0)
+                        old_entry = ss.get("entry_price", fill_p)
+                        old_value = old_entry * old_qty
+                        new_value = fill_p * fill_q
+                        new_entry_price = (old_value + new_value) / (old_qty + fill_q)
+                        ss["entry_price"] = new_entry_price
+                        ss["quantity"] = old_qty + fill_q
+                        ss["dca_level"] = dca_level + 1
+                        new_state[symbol] = ss
+                        pos_report["action"] = "DCA_BUY"
+                        pos_report["reason"] = f"DCA level {dca_level} → {dca_level + 1} @ {fill_p}"
+                        log_trade(db_conn, action="BUY", ticker=symbol,
+                                  signal_strength="DCA", momentum_pct=0.0,
+                                  entry_price=fill_p, current_price=fill_p,
+                                  unrealized_plpc=0.0,
+                                  order_id=_dca_res.get("id") if not is_paper else "paper-dca",
+                                  quantity=fill_q,
+                                  estimated_value_eur=fill_q * fill_p,
+                                  position_size_pct=0.0, portfolio_equity=portfolio_value,
+                                  reason=f"DCA level {dca_level} for {symbol} @ {fill_p}")
+
         report["positions_managed"].append(pos_report)
 
     save_trading_state(db_conn, EXCHANGE_NAME, new_state)
@@ -561,7 +609,7 @@ def run_cycle():
 
     exchange.load_markets()
     mkt = exchange.market(symbol)
-    qty = order_size_eur / current_price
+    qty = dca_buy_qty(order_size_eur, 0.50, current_price)
     min_amt = mkt['limits']['amount']['min']
     if min_amt and qty < min_amt:
         report["action_taken"] = "SKIP"
@@ -597,6 +645,9 @@ def run_cycle():
             "entry_time": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "peak_plpc": 0.0,
             "quantity": fill_qty,
+            "signal_price": fill_price,
+            "dca_level": 0,
+            "total_position_eur": order_size_eur,
         }
         save_trading_state(db_conn, EXCHANGE_NAME, new_state)
         positions.append({"symbol": symbol, "coin": symbol.split('/')[0],

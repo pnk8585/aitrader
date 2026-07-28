@@ -95,6 +95,15 @@ def ensure_schema(conn):
             "ALTER TABLE trading_state ADD COLUMN IF NOT EXISTS quantity NUMERIC DEFAULT 0"
         )
         cur.execute(
+            "ALTER TABLE trading_state ADD COLUMN IF NOT EXISTS dca_level INT DEFAULT 0"
+        )
+        cur.execute(
+            "ALTER TABLE trading_state ADD COLUMN IF NOT EXISTS signal_price NUMERIC"
+        )
+        cur.execute(
+            "ALTER TABLE trading_state ADD COLUMN IF NOT EXISTS total_position_eur NUMERIC"
+        )
+        cur.execute(
             """
             CREATE UNIQUE INDEX IF NOT EXISTS trading_state_exchange_symbol_key
             ON trading_state (exchange, symbol)
@@ -449,17 +458,22 @@ def load_trading_state(conn, exchange):
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT symbol, entry_price, entry_time, peak_plpc, quantity FROM trading_state WHERE exchange = %s",
+                "SELECT symbol, entry_price, entry_time, peak_plpc, quantity, "
+                "dca_level, signal_price, total_position_eur "
+                "FROM trading_state WHERE exchange = %s",
                 (exchange,),
             )
             rows = cur.fetchall()
         state = {}
-        for symbol, ep, et, peak, qty in rows:
+        for symbol, ep, et, peak, qty, dca_lvl, sig_px, tot_eur in rows:
             state[symbol] = {
                 "entry_price": float(ep) if ep else 0.0,
                 "entry_time": et.isoformat().replace("+00:00", "Z") if et else None,
                 "peak_plpc": float(peak) if peak else 0.0,
                 "quantity": float(qty) if qty else 0.0,
+                "dca_level": int(dca_lvl) if dca_lvl is not None else 0,
+                "signal_price": float(sig_px) if sig_px else 0.0,
+                "total_position_eur": float(tot_eur) if tot_eur else 0.0,
             }
         return state
     except Exception as e:
@@ -490,13 +504,17 @@ def save_trading_state(conn, exchange, state):
                 for symbol, data in state.items():
                     cur.execute(
                         """INSERT INTO trading_state
-                               (exchange, symbol, entry_price, entry_time, peak_plpc, quantity, updated_at)
-                           VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                               (exchange, symbol, entry_price, entry_time, peak_plpc, quantity,
+                                dca_level, signal_price, total_position_eur, updated_at)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
                            ON CONFLICT (exchange, symbol) DO UPDATE SET
                                entry_price = EXCLUDED.entry_price,
                                entry_time  = EXCLUDED.entry_time,
                                peak_plpc   = EXCLUDED.peak_plpc,
                                quantity    = EXCLUDED.quantity,
+                               dca_level   = EXCLUDED.dca_level,
+                               signal_price = EXCLUDED.signal_price,
+                               total_position_eur = EXCLUDED.total_position_eur,
                                updated_at  = CURRENT_TIMESTAMP""",
                         (
                             exchange,
@@ -505,6 +523,9 @@ def save_trading_state(conn, exchange, state):
                             data.get("entry_time"),
                             data.get("peak_plpc", 0.0),
                             data.get("quantity", 0.0),
+                            data.get("dca_level", 0),
+                            data.get("signal_price"),
+                            data.get("total_position_eur"),
                         ),
                     )
                 # Prune positions that are no longer held (closed since last save).
