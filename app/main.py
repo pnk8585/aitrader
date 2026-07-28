@@ -25,6 +25,7 @@ from app.settings import get_ai_config, get_setting, set_setting  # noqa: E402
 configure_logging()
 
 app = FastAPI(title="AITrader")
+app.mount("/static", StaticFiles(directory="app/static"), name="static")
 templates = Jinja2Templates("app/templates")
 
 
