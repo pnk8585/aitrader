@@ -6,7 +6,14 @@
 <div id="loader" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(15,17,23,0.85);z-index:9999;display:none;align-items:center;justify-content:center">
   <div style="width:40px;height:40px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin 0.8s linear infinite"></div>
 </div>
-<style>@keyframes spin{to{transform:rotate(360deg)}}#loader.show{display:flex!important}</style>
+<style>@keyframes spin{to{transform:rotate(360deg)}}#loader.show{display:flex!important}
+.badge { padding: 2px 8px; border-radius: 4px; font-size: 0.85em; display: inline-block; }
+.regime-trending { background: #27ae60; color: white; }
+.regime-ranging { background: #2980b9; color: white; }
+.regime-crisis { background: #e74c3c; color: white; }
+.regime-uncertain { background: #95a5a6; color: white; }
+.regime-unknown { background: #bdc3c7; color: #333; }
+</style>
 
 <div class="cards">
   <div class="card">
@@ -60,11 +67,12 @@
 <h2 style="font-size:15px;margin:24px 0 10px">Open Positions</h2>
 <div id="sell-flash"></div>
 <table>
-  <thead><tr><th>Exch</th><th>Symbol</th><th>Entry</th><th>Now</th><th>P/L %</th><th>Qty</th><th>Value</th><th>Since</th><th></th></tr></thead>
+  <thead><tr><th>Exch</th><th>Symbol</th><th>Regime</th><th>Entry</th><th>Now</th><th>P/L %</th><th>Qty</th><th>Value</th><th>Since</th><th></th></tr></thead>
   <tbody>
   {% for p in open_positions %}
     <tr>
       <td>{{ p.exchange }}</td><td>{{ p.symbol }}</td>
+      <td><span class="badge regime-{{ p.regime }}">{{ p.regime }}</span></td>
       <td>{{ p.entry_price }}</td>
       <td>{{ p.current_price if p.current_price is not none else '—' }}</td>
       <td style="color:{{ 'var(--green)' if (p.current_pl or 0) >= 0 else 'var(--red)' }}">{{ "%.2f%%"|format(p.current_pl) if p.current_pl is not none else '—' }}</td>

@@ -171,6 +171,12 @@ async def dashboard(request: Request, tsearch: str = "", tdate: str = "all", rse
                             p["current_pl"] = round((cp - float(p["entry_price"])) / float(p["entry_price"]) * 100, 2)
                             qty = float(p.get("quantity", 0) or 0)
                             p["position_value"] = round(cp * qty, 2)
+                sym_base = p["symbol"].split("/")[0] if "/" in str(p["symbol"]) else p["symbol"]
+                cur.execute(
+                    "SELECT regime FROM regime_state WHERE symbol = %s ORDER BY updated_at DESC LIMIT 1",
+                    (sym_base,))
+                regime_row = cur.fetchone()
+                p["regime"] = regime_row[0] if regime_row else "unknown"
             # Cron jobs stats
             cur.execute("SELECT COUNT(*) FROM cron_jobs WHERE enabled = TRUE")
             script_count = cur.fetchone()[0]

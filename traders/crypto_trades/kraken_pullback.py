@@ -50,6 +50,7 @@ from traders.strategies.pullback import config as PB
 from traders.strategies.pullback.exits import compute_effective_stop, should_exit_pullback
 from traders.strategies.pullback.signals import scan_pullback_candidates
 from traders.strategies.regime import detect_regime
+from traders.strategies.regime.router import should_enter
 
 # ---------------------------------------------------------------------------
 # Config (from strategies.pullback.config)
@@ -436,6 +437,9 @@ def run_cycle():
             continue
         lx = last_exit_time(db_conn, sym, exchange_name=EXCHANGE_NAME)
         if lx is not None and (now - lx) < timedelta(minutes=COOLDOWN_MIN):
+            continue
+        allowed, reason = should_enter(db_conn, base_symbol(sym), "pullback")
+        if not allowed:
             continue
         scan_pairs.append(sym)
 

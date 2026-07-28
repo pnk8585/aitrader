@@ -21,6 +21,7 @@ from db_prices import get_connection, close_connection, base_symbol, insert_pric
 from traders.common.config import ensure_log_dir
 from traders.strategies.grid import config as GC
 from traders.strategies.grid.engine import create_grid, load_grid, save_grid, run_cycle
+from traders.strategies.regime.router import should_enter
 
 ensure_log_dir()
 
@@ -93,6 +94,11 @@ def run_cycle():
         grid = load_grid(db_conn, pair, EXCHANGE_NAME)
 
         if grid is None:
+            allowed, reason = should_enter(db_conn, base_symbol(pair), "grid")
+            if not allowed:
+                report_line = f"⏭️ {pair}: {reason}"
+                print(report_line)
+                continue
             if cash_eur < GC.MIN_TRADE_EUR * GC.NUM_GRIDS:
                 continue
             available = cash_eur - existing_allocated

@@ -48,6 +48,7 @@ from traders.common.kelly import kelly_position_size
 from traders.common.laddered_tp import should_take_partial_profit as check_ladder_tp
 from traders.strategies.momentum.exits import is_stale_rotation_candidate, should_exit_momentum
 from traders.strategies.regime import detect_regime
+from traders.strategies.regime.router import should_enter
 
 # ---------------------------------------------------------------------------
 # Config (from strategies.momentum.config)
@@ -571,6 +572,10 @@ def run_cycle():
         # cooldown
         lx = last_exit_time(db_conn, sym, exchange_name=EXCHANGE_NAME)
         if lx is not None and (now - lx) < timedelta(minutes=COOLDOWN_MIN):
+            continue
+
+        allowed, reason = should_enter(db_conn, base_symbol(sym), "momentum")
+        if not allowed:
             continue
 
         daily = get_momentum_over(db_conn, sym, DAILY_WINDOW_MIN, price_exchange=PRICE_EXCHANGE)
