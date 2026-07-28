@@ -167,6 +167,10 @@ def run_cycle():
     }
 
     db_conn = get_connection()
+    try:
+        db_conn.rollback()  # Clear any stale failed transaction from prior cycle
+    except Exception:
+        pass
     state = load_trading_state(db_conn, EXCHANGE_NAME)
     notify_state = load_notify_state(db_conn, EXCHANGE_NAME)
     should_notify = False

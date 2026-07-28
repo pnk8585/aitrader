@@ -57,6 +57,10 @@ def log_trade(db_conn, action, ticker, price, qty, value_eur, reason, **kwargs):
 
 def run_cycle():
     db_conn = get_connection()
+    try:
+        db_conn.rollback()  # Clear any stale failed transaction from prior cycle
+    except Exception:
+        pass
 
     try:
         tickers = exchange.fetch_tickers(GC.CRYPTO_PAIRS) or {}
