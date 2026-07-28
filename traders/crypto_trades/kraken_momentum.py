@@ -334,7 +334,10 @@ def run_cycle():
                         exchange.cancel_order(ord['id'], sym)
                         print(f"Reconciled stale order: {side} {sym}", file=sys.stderr)
         except Exception:
-            pass
+            try:
+                db_conn.rollback()
+            except Exception:
+                pass
 
         # --- Balance reconciliation ---
         try:
@@ -350,7 +353,10 @@ def run_cycle():
             if state:
                 save_trading_state(db_conn, EXCHANGE_NAME, state)
         except Exception:
-            pass
+            try:
+                db_conn.rollback()
+            except Exception:
+                pass
     except Exception as e:
         report["status"] = "error"
         report["details"] = f"Failed to fetch market/account data: {e}"
