@@ -26,6 +26,7 @@ log = setup_logging("cron")
 # name → (script_path, interval_seconds, default_mode)
 JOB_REGISTRY: dict[str, tuple[str, int, str]] = {
     "kraken-pullback":    ("traders/crypto_trades/kraken_pullback.py", 300,  "live"),
+    "kraken-grid":        ("traders/crypto_trades/kraken_grid.py",     300,  "paper"),
     "kraken-momentum":    ("traders/crypto_trades/kraken_momentum.py", 300,  "paper"),
     "position-monitor":   ("position_monitor.py",                       7200, "live"),
     "alpaca-stocks":      ("traders/trades/alpaca_stocks.py",           300,  "live"),

@@ -270,15 +270,23 @@ def main():
     # ── Collect positions ─────────────────────────────────────────
     positions = []
 
+    # Grid positions — grid manages its own exits, skip here.
+    cur = db.cursor()
+    cur.execute("SELECT symbol FROM grid_state")
+    _grid_symbols = {row[0] for row in cur.fetchall()}
+
     # Kraken
     try:
         bal = kraken.fetch_balance()
         for coin, qty in bal.get("total", {}).items():
             if coin in ("EUR", "USD", "USDT", "USDC") or float(qty) <= 0:
                 continue
+            sym = f"{coin}/EUR"
+            if sym in _grid_symbols:
+                continue
             qty_f = float(qty)
             try:
-                ticker = kraken.fetch_ticker(f"{coin}/EUR")
+                ticker = kraken.fetch_ticker(sym)
                 price = ticker.get("last", 0)
             except Exception:
                 continue
@@ -289,12 +297,12 @@ def main():
             cur = db.cursor()
             cur.execute(
                 "SELECT entry_price FROM trading_state WHERE exchange IN %s AND symbol=%s",
-                (_STATE_EXCHANGES, f"{coin}/EUR"))
+                (_STATE_EXCHANGES, sym))
             row = cur.fetchone()
             entry = float(row[0]) if row else price
             pnl = (price - entry) / entry * 100 if entry else 0
             positions.append({
-                "exchange": "kraken", "symbol": f"{coin}/EUR",
+                "exchange": "kraken", "symbol": sym,
                 "entry": entry, "current": price, "qty": qty_f,
                 "value": value, "pnl_pct": pnl,
             })
