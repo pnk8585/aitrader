@@ -302,6 +302,11 @@ def main():
     except Exception as e:
         log.append(f"Kraken balance error: {e}")
 
+    if not positions:
+        print(f"{now_str} | 0 positions — silent")
+        db.close()
+        return
+
     log.append(f"{now_str} | {len(positions)} positions found")
 
     # ── Evaluate each position ────────────────────────────────────
