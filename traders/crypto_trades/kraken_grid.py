@@ -43,7 +43,7 @@ if IS_PAPER:
     EXCHANGE_NAME = f"paper-{EXCHANGE_NAME}"
 
 
-def log_trade(db_conn, action, ticker, price, qty, value_eur, reason):
+def log_trade(db_conn, action, ticker, price, qty, value_eur, reason, **kwargs):
     db_log_trade(
         db_conn, EXCHANGE_NAME,
         action=action, ticker=ticker, signal_strength="GRID",
@@ -51,6 +51,7 @@ def log_trade(db_conn, action, ticker, price, qty, value_eur, reason):
         unrealized_plpc=0.0, order_id=None, quantity=qty,
         estimated_value=round(value_eur, 2), position_size_pct=0.0,
         portfolio_equity=0.0, reason=reason,
+        **kwargs,
     )
 
 

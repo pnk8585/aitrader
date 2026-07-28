@@ -148,9 +148,25 @@ def ensure_schema(conn):
                 estimated_value NUMERIC,
                 position_size_pct NUMERIC,
                 portfolio_equity NUMERIC,
-                reason TEXT
+                reason TEXT,
+                regime VARCHAR(20),
+                atr_at_entry NUMERIC(20,10),
+                kelly_fraction NUMERIC(10,6),
+                strategy_name VARCHAR(50)
             )
             """
+        )
+        cur.execute(
+            "ALTER TABLE trade_log ADD COLUMN IF NOT EXISTS regime VARCHAR(20)"
+        )
+        cur.execute(
+            "ALTER TABLE trade_log ADD COLUMN IF NOT EXISTS atr_at_entry NUMERIC(20,10)"
+        )
+        cur.execute(
+            "ALTER TABLE trade_log ADD COLUMN IF NOT EXISTS kelly_fraction NUMERIC(10,6)"
+        )
+        cur.execute(
+            "ALTER TABLE trade_log ADD COLUMN IF NOT EXISTS strategy_name VARCHAR(50)"
         )
         cur.execute(
             """
@@ -633,8 +649,10 @@ def log_trade(conn, exchange, **kwargs):
                    (exchange, action, ticker, signal_strength, momentum_pct,
                     entry_price, current_price, unrealized_plpc, order_id,
                     client_order_id, quantity, estimated_value,
-                    position_size_pct, portfolio_equity, reason)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    position_size_pct, portfolio_equity, reason,
+                    regime, atr_at_entry, kelly_fraction, strategy_name)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                           %s, %s, %s, %s)""",
                 (
                     exchange,
                     kwargs.get("action"),
@@ -651,6 +669,10 @@ def log_trade(conn, exchange, **kwargs):
                     kwargs.get("position_size_pct"),
                     kwargs.get("portfolio_equity"),
                     kwargs.get("reason"),
+                    kwargs.get("regime"),
+                    kwargs.get("atr_at_entry"),
+                    kwargs.get("kelly_fraction"),
+                    kwargs.get("strategy_name"),
                 ),
             )
         conn.commit()

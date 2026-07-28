@@ -114,7 +114,8 @@ CONSULT_MIN_SCORE = MO.CONSULT_MIN_SCORE
 # ---------------------------------------------------------------------------
 def log_trade(db_conn, action, ticker, signal_strength, momentum_pct, entry_price,
               current_price, unrealized_plpc, order_id, quantity,
-              estimated_value_eur, position_size_pct, portfolio_equity, reason):
+              estimated_value_eur, position_size_pct, portfolio_equity, reason,
+              **kwargs):
     db_log_trade(
         db_conn, EXCHANGE_NAME,
         action=action, ticker=ticker, signal_strength=signal_strength,
@@ -128,6 +129,7 @@ def log_trade(db_conn, action, ticker, signal_strength, momentum_pct, entry_pric
         position_size_pct=round(position_size_pct, 4) if position_size_pct else 0.0,
         portfolio_equity=round(portfolio_equity, 2) if portfolio_equity else 0.0,
         reason=reason,
+        **kwargs,
     )
 
 
