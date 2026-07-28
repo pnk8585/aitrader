@@ -74,6 +74,18 @@ def run_cycle():
     notify_lines = []
     active_grids = 0
 
+    # query capital already committed to active grids
+    try:
+        with db_conn.cursor() as cur:
+            cur.execute(
+                "SELECT COALESCE(SUM(capital_allocated), 0) FROM grid_state "
+                "WHERE status = 'active' AND exchange = %s",
+                (EXCHANGE_NAME,),
+            )
+            existing_allocated = float(cur.fetchone()[0])
+    except Exception:
+        existing_allocated = 0.0
+
     for pair in GC.CRYPTO_PAIRS:
         if active_grids >= GC.MAX_OPEN_GRIDS:
             break
@@ -83,9 +95,13 @@ def run_cycle():
         if grid is None:
             if cash_eur < GC.MIN_TRADE_EUR * GC.NUM_GRIDS:
                 continue
-            grid = create_grid(db_conn, pair, cash_eur)
+            available = cash_eur - existing_allocated
+            if available < GC.MIN_TRADE_EUR * GC.NUM_GRIDS:
+                continue
+            grid = create_grid(db_conn, pair, cash_eur, available_cash=available)
             if grid is None:
                 continue
+            existing_allocated += grid["capital_allocated"]
             save_grid(db_conn, grid, EXCHANGE_NAME)
             notify_lines.append(
                 f"🔲 Grid created: {pair} €{grid['grid_low']}-€{grid['grid_high']}, "
@@ -108,13 +124,9 @@ def run_cycle():
             print(action)
             if action.startswith("💰"):
                 notify_lines.append(action)
-                # Log completed cycle
-                for lvl in grid["levels"]:
-                    if lvl.get("status") == "idle":
-                        continue
-                log_trade(db_conn, "SELL", pair, 0, 0,
-                          grid.get("realized_pnl", 0),
-                          f"Grid cycle: {action}")
+                for trade in grid.pop("_cycle_trades", []):
+                    log_trade(db_conn, "SELL", pair, trade["price"], trade["qty"],
+                              trade["pnl"], f"Grid cycle: {pair}")
             elif action.startswith("🛑"):
                 notify_lines.append(action)
             elif action.startswith("📏"):

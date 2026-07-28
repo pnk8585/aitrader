@@ -3,6 +3,8 @@
 import uuid
 from datetime import datetime, timezone
 
+import psycopg2.extras
+
 from traders.strategies.grid import config as GC
 
 
@@ -92,14 +94,15 @@ def _compute_grid_spread(grid_low, grid_high, num_grids):
 
 # ── grid lifecycle ──────────────────────────────────────────────
 
-def create_grid(conn, pair, cash_eur):
+def create_grid(conn, pair, cash_eur, available_cash=None):
     """Create a new grid for `pair`. Returns grid dict or None if range unavailable."""
     rng = compute_grid_range(conn, pair)
     if rng is None:
         return None
     grid_low, grid_high = rng
 
-    capital = min(cash_eur * GC.CAPITAL_PER_GRID_PCT, cash_eur / GC.MAX_OPEN_GRIDS)
+    effective_cash = available_cash if available_cash is not None else cash_eur
+    capital = min(effective_cash * GC.CAPITAL_PER_GRID_PCT, effective_cash / GC.MAX_OPEN_GRIDS)
     if capital < GC.MIN_TRADE_EUR * GC.NUM_GRIDS:
         return None
 
@@ -179,7 +182,6 @@ def save_grid(conn, grid, exchange_name):
     """Upsert grid state to DB."""
     try:
         with conn.cursor() as cur:
-            import psycopg2.extras
             cur.execute(
                 """INSERT INTO grid_state
                    (symbol, exchange, grid_low, grid_high, num_grids, capital_allocated,
@@ -394,6 +396,9 @@ def run_cycle(conn, exchange, pair, grid, is_paper):
                 grid["realized_pnl"] = round(grid.get("realized_pnl", 0) + pnl, 6)
                 modified = True
                 report.append(f"💰 Cycle complete {pair}: bought @{buy_price} sold @{fill_price} (+{round(pnl, 4)}€)")
+                grid.setdefault("_cycle_trades", []).append({
+                    "qty": buy_qty, "price": fill_price, "pnl": pnl
+                })
             else:
                 level["cycles_since_placed"] = cycles + 1
                 if level["cycles_since_placed"] >= GC.LIMIT_ORDER_CYCLES:
@@ -410,6 +415,9 @@ def run_cycle(conn, exchange, pair, grid, is_paper):
                         grid["realized_pnl"] = round(grid.get("realized_pnl", 0) + pnl, 6)
                         modified = True
                         report.append(f"💰 Market sell (fallback) {pair}: bought @{buy_price} sold @{fill_price} (+{round(pnl, 4)}€)")
+                        grid.setdefault("_cycle_trades", []).append({
+                            "qty": buy_qty, "price": fill_price, "pnl": pnl
+                        })
                     except Exception as e:
                         report.append(f"❌ Market sell fallback failed {pair}: {e}")
                 modified = True
@@ -459,6 +467,8 @@ def _needs_rebalance(grid, current_price):
 
 def _rebalance(grid, pair, current_price):
     """Extend grid range when price exits bounds."""
+    original_num = grid["num_grids"]
+
     if current_price < grid["grid_low"]:
         extend = grid["grid_low"] * (GC.EXTEND_RANGE_PCT / 100.0)
         grid["grid_low"] = round(grid["grid_low"] - extend, 6)
@@ -466,31 +476,39 @@ def _rebalance(grid, pair, current_price):
         extend = grid["grid_high"] * (GC.EXTEND_RANGE_PCT / 100.0)
         grid["grid_high"] = round(grid["grid_high"] + extend, 6)
 
-    # recompute spread and add new idle levels in the extended region
     spread_pct, _ = _compute_grid_spread(grid["grid_low"], grid["grid_high"], grid["num_grids"])
     grid["spread_pct"] = round(spread_pct, 4)
 
     step = (grid["grid_high"] - grid["grid_low"]) / (grid["num_grids"] - 1) if grid["num_grids"] > 1 else 0
     capital_per_level = grid["capital_allocated"] / grid["num_grids"]
-    existing_prices = {l["price"] for l in grid["levels"]}
 
-    new_levels = []
+    # Keep ALL existing non-idle levels (they represent real positions)
+    preserved = [l for l in grid["levels"] if l.get("status") != "idle"]
+    preserved_prices = {l["price"] for l in preserved}
+
+    new_levels = list(preserved)
     for i in range(grid["num_grids"]):
         price = round(grid["grid_low"] + step * i, 6)
-        existing = next((l for l in grid["levels"] if abs(l["price"] - price) < 0.0001), None)
-        if existing:
-            new_levels.append(existing)
-        else:
-            qty = round(capital_per_level / price, 6) if price > 0 else 0
-            new_levels.append({
-                "price": price,
-                "status": "idle",
-                "buy_qty": qty,
-                "buy_price": None,
-                "sell_price": None,
-                "cycles_since_placed": 0,
-                "order_id": None,
-            })
+        if any(abs(lp - price) < 0.0001 for lp in preserved_prices):
+            continue
+        qty = round(capital_per_level / price, 6) if price > 0 else 0
+        new_levels.append({
+            "price": price,
+            "status": "idle",
+            "buy_qty": qty,
+            "buy_price": None,
+            "sell_price": None,
+            "cycles_since_placed": 0,
+            "order_id": None,
+        })
+
+    # Cap at 2× original num_grids — remove idle levels furthest from current price
+    max_levels = original_num * 2
+    if len(new_levels) > max_levels:
+        idle_idx = [(j, l) for j, l in enumerate(new_levels) if l.get("status") == "idle"]
+        idle_idx.sort(key=lambda x: abs(x[1]["price"] - current_price), reverse=True)
+        remove = {j for j, _ in idle_idx[:len(new_levels) - max_levels]}
+        new_levels = [l for j, l in enumerate(new_levels) if j not in remove]
 
     grid["levels"] = new_levels
     grid["num_grids"] = len(new_levels)
