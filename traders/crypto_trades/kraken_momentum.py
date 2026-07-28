@@ -44,6 +44,7 @@ from traders.common.exchange import extract_fill, market_buy, market_sell, sprea
 from traders.common.gates import check_gate, load_ai_gates
 from traders.strategies.momentum import config as MO
 from traders.strategies.momentum.exits import is_stale_rotation_candidate, should_exit_momentum
+from traders.strategies.regime import detect_regime
 
 # ---------------------------------------------------------------------------
 # Config (from strategies.momentum.config)
@@ -259,6 +260,7 @@ def run_cycle():
         "scanned_assets": [],
         "action_taken": "NONE",
         "details": "",
+        "regime": "unknown",
     }
 
     db_conn = get_connection()
@@ -600,6 +602,10 @@ def run_cycle():
     best = candidates[0]
     symbol = best["symbol"]
     current_price = best["price"]
+
+    # Regime detection — compute and log, no entry gating yet (USE_REGIME_ROUTING=False)
+    regime = detect_regime(db_conn, base_symbol(symbol))
+    report["regime"] = regime
 
     if consulting and best["score"] < CONSULT_MIN_SCORE:
         report["action_taken"] = "SKIP"

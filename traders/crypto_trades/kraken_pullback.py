@@ -48,6 +48,7 @@ from traders.common.gates import check_gate, load_ai_gates
 from traders.strategies.pullback import config as PB
 from traders.strategies.pullback.exits import compute_effective_stop, should_exit_pullback
 from traders.strategies.pullback.signals import scan_pullback_candidates
+from traders.strategies.regime import detect_regime
 
 # ---------------------------------------------------------------------------
 # Config (from strategies.pullback.config)
@@ -156,6 +157,7 @@ def run_cycle():
         "scanned_assets": [],
         "action_taken": "NONE",
         "details": "",
+        "regime": "unknown",
     }
 
     db_conn = get_connection()
@@ -463,6 +465,10 @@ def run_cycle():
     best = candidates[0]
     symbol = best["symbol"]
     current_price = best["price"]
+
+    # Regime detection — compute and log, no entry gating yet (USE_REGIME_ROUTING=False)
+    regime = detect_regime(db_conn, base_symbol(symbol))
+    report["regime"] = regime
 
     # AI consult_on_entry enforcement: only take higher-conviction setups.
     if consulting and best["score"] < CONSULT_MIN_SCORE:

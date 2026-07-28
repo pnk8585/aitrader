@@ -12,7 +12,6 @@ CRYPTO_PAIRS = [
 
 EXCHANGE_NAME = "kraken-pullback"
 PRICE_EXCHANGE = "kraken"
-import os
 
 LOCK_FILE = os.path.join(LOG_DIR, "kraken_pullback.lock")
 
@@ -52,4 +51,13 @@ EQUITY_TWO_POS = 400.0
 COOLDOWN_MIN = 90
 MAX_TRADES_PER_DAY = 4
 DAILY_LOSS_BREAKER_PCT = -4.0
+
+# Phase 1 feature flags
+USE_ATR_STOPS = True
+USE_KELLY_SIZING = True
+USE_LADDERED_TP = True
+USE_REGIME_ROUTING = False
+USE_DCA_ENTRY = False
+ATR_STOP_MULTIPLIER = 2.0
+ATR_TP_MULTIPLIER = 3.0
 
