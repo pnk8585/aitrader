@@ -43,7 +43,11 @@ from traders.common.config import ROOT_DIR, ensure_log_dir
 from traders.common.exchange import extract_fill, market_buy, market_sell, spread_ok
 from traders.common.gates import check_gate, load_ai_gates
 from traders.strategies.momentum import config as MO
+from traders.common.atr_stops import compute_atr_from_prices, compute_atr_stop
+from traders.common.kelly import kelly_position_size
+from traders.common.laddered_tp import should_take_partial_profit as check_ladder_tp
 from traders.strategies.momentum.exits import is_stale_rotation_candidate, should_exit_momentum
+from traders.strategies.regime import detect_regime
 
 # ---------------------------------------------------------------------------
 # Config (from strategies.momentum.config)
@@ -259,6 +263,7 @@ def run_cycle():
         "scanned_assets": [],
         "action_taken": "NONE",
         "details": "",
+        "regime": "unknown",
     }
 
     db_conn = get_connection()
@@ -409,10 +414,18 @@ def run_cycle():
         sell = False
         reason = ""
 
+        atr_stop = None
+        if MO.USE_ATR_STOPS:
+            raw_atr = atr_pct(symbol)
+            if raw_atr is not None:
+                atr_stop = -(raw_atr * MO.ATR_STOP_MULTIPLIER)
         sell, reason = should_exit_momentum(
             unrealized_plpc=unrealized_plpc,
             peak_plpc=peak_plpc,
             age_hours=age_hours,
+            atr_stop_pct=atr_stop,
+            tp_level=ss.get("tp_level", 0),
+            tp_sold_qty=ss.get("tp_sold_qty", 0.0),
         )
 
         pos_report = {"symbol": symbol, "unrealized_plpc": round(unrealized_plpc, 2),
@@ -601,6 +614,10 @@ def run_cycle():
     symbol = best["symbol"]
     current_price = best["price"]
 
+    # Regime detection — compute and log, no entry gating yet (USE_REGIME_ROUTING=False)
+    regime = detect_regime(db_conn, base_symbol(symbol))
+    report["regime"] = regime
+
     if consulting and best["score"] < CONSULT_MIN_SCORE:
         report["action_taken"] = "SKIP"
         report["details"] = (f"AI consult active: best score {round(best['score'],2)} "
@@ -723,6 +740,16 @@ def run_cycle():
     if risk_cap_eur < order_size_eur:
         order_size_eur = risk_cap_eur
     order_size_eur = min(order_size_eur, cash_eur)
+
+    # Kelly sizing (if enabled)
+    if MO.USE_KELLY_SIZING:
+        try:
+            stop_price = current_price * (1 + MO.STOP_LOSS_PCT / 100)  # STOP_LOSS_PCT is negative
+            kelly_qty = kelly_position_size(db_conn, EXCHANGE_NAME, current_price, stop_price, cash_eur)
+            if kelly_qty > 0:
+                order_size_eur = kelly_qty * current_price
+        except Exception:
+            pass  # fallback to existing sizing
 
     if order_size_eur < MIN_TRADE_EUR:
         report["action_taken"] = "SKIP"
