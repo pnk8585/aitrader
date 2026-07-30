@@ -232,8 +232,13 @@ def run_cycle():
 
         age_hours = get_position_age_hours(symbol)
 
-        # Track peak P&L
+        # Track peak P&L and persist live position data so the row survives
+        # the ON CONFLICT upsert in save_trading_state.
         sym_state = new_state.get(symbol, {"peak_plpc": 0.0})
+        sym_state["entry_price"] = entry_price
+        sym_state["quantity"] = qty
+        if not sym_state.get("entry_time"):
+            sym_state["entry_time"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         peak_plpc = max(unrealized_plpc, sym_state.get("peak_plpc", 0.0))
         sym_state["peak_plpc"] = peak_plpc
         new_state[symbol] = sym_state

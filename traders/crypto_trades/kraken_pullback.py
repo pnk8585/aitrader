@@ -245,7 +245,7 @@ def run_cycle():
                 if qty > 0 and coin not in [base_symbol(s) for s in state.keys()] and coin.upper() not in others:
                     ticker = tickers.get(sym)
                     if ticker and ticker.get('last'):
-                        state[sym] = {'peak_plpc': 0.0, 'quantity': float(qty)}
+                        state[sym] = {'entry_price': float(ticker['last']), 'entry_time': datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), 'peak_plpc': 0.0, 'quantity': float(qty)}
                         print(f"Recovered orphan: {sym} ({qty})", file=sys.stderr)
             if state:
                 save_trading_state(db_conn, EXCHANGE_NAME, state)
