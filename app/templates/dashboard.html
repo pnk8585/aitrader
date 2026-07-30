@@ -43,7 +43,7 @@
 <!-- Wallets -->
 <div class="cards" style="margin-bottom:16px">
   <div class="card">
-    <div class="label">🦅 Alpaca</div>
+    <div class="label">&#129413; Alpaca</div>
     {% if alpaca.error %}
     <div class="value" style="font-size:14px;color:var(--red)">{{ alpaca.error }}</div>
     {% else %}
@@ -52,7 +52,7 @@
     {% endif %}
   </div>
   <div class="card">
-    <div class="label">🐙 Kraken</div>
+    <div class="label">&#128025; Kraken</div>
     {% if kraken.error %}
     <div class="value" style="font-size:14px;color:var(--red)">{{ kraken.error }}</div>
     {% else %}
@@ -61,6 +61,30 @@
     {% endif %}
   </div>
 </div>
+
+<!-- Open Positions -->
+<h2 style="font-size:15px;margin:24px 0 10px">Open Positions</h2>
+<div id="sell-flash"></div>
+<table>
+  <thead><tr><th>Exch</th><th>Symbol</th><th>Regime</th><th>Entry</th><th>Now</th><th>P/L %</th><th>Qty</th><th>Value</th><th>Since</th><th></th></tr></thead>
+  <tbody>
+  {% for p in open_positions %}
+    <tr>
+      <td>{{ p.exchange }}</td><td>{{ p.symbol }}</td>
+      <td><span class="badge regime-{{ p.regime }}">{{ p.regime }}</span></td>
+      <td>{{ p.entry_price }}</td>
+      <td>{{ p.current_price if p.current_price is not none else '—' }}</td>
+      <td style="color:{{ 'var(--green)' if (p.current_pl or 0) >= 0 else 'var(--red)' }}">{{ "%.2f%%"|format(p.current_pl) if p.current_pl is not none else '—' }}</td>
+      <td>{{ p.quantity }}</td>
+      <td>€{{ "%.2f"|format(p.position_value) if p.position_value is not none else '—' }}</td>
+      <td class="text-muted">{{ p.entry_time.strftime('%m-%d %H:%M') if p.entry_time else '—' }}</td>
+      <td><button class="btn-action btn-danger" hx-post="/ui/admin/positions/{{ p.exchange }}/{{ p.symbol }}/sell" hx-target="#sell-flash" hx-swap="innerHTML">Sell</button></td>
+    </tr>
+  {% else %}
+    <tr><td colspan="10" class="text-muted">No open positions.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
 
 <!-- Cron Jobs — Mode Toggle -->
 <h2 style="font-size:15px;margin:24px 0 10px">Cron Jobs <a href="/ui/admin/cron" style="font-size:12px;color:var(--accent);text-decoration:none">⚙ admin</a></h2>
@@ -104,30 +128,6 @@
 .btn-off { background: #555; color: #999; border: none; padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 11px; }
 .btn-live:hover, .btn-paper:hover, .btn-on:hover, .btn-off:hover { opacity: 0.8; }
 </style>
-
-<!-- Open Positions -->
-{% if open_positions %}
-<h2 style="font-size:15px;margin:24px 0 10px">Open Positions</h2>
-<div id="sell-flash"></div>
-<table>
-  <thead><tr><th>Exch</th><th>Symbol</th><th>Regime</th><th>Entry</th><th>Now</th><th>P/L %</th><th>Qty</th><th>Value</th><th>Since</th><th></th></tr></thead>
-  <tbody>
-  {% for p in open_positions %}
-    <tr>
-      <td>{{ p.exchange }}</td><td>{{ p.symbol }}</td>
-      <td><span class="badge regime-{{ p.regime }}">{{ p.regime }}</span></td>
-      <td>{{ p.entry_price }}</td>
-      <td>{{ p.current_price if p.current_price is not none else '—' }}</td>
-      <td style="color:{{ 'var(--green)' if (p.current_pl or 0) >= 0 else 'var(--red)' }}">{{ "%.2f%%"|format(p.current_pl) if p.current_pl is not none else '—' }}</td>
-      <td>{{ p.quantity }}</td>
-      <td>€{{ "%.2f"|format(p.position_value) if p.position_value is not none else '—' }}</td>
-      <td class="text-muted">{{ p.entry_time.strftime('%m-%d %H:%M') if p.entry_time else '—' }}</td>
-      <td><button class="btn-action btn-danger" hx-post="/ui/admin/positions/{{ p.exchange }}/{{ p.symbol }}/sell" hx-target="#sell-flash" hx-swap="innerHTML">Sell</button></td>
-    </tr>
-  {% endfor %}
-  </tbody>
-</table>
-{% endif %}
 
 <!-- Trades -->
 <h2 style="font-size:15px;margin:24px 0 10px">Trades</h2>
