@@ -113,9 +113,47 @@ def ensure_schema(conn):
             "ALTER TABLE trading_state ADD COLUMN IF NOT EXISTS total_position_eur NUMERIC"
         )
         cur.execute(
+            "ALTER TABLE trading_state ADD COLUMN IF NOT EXISTS tp_level INT DEFAULT 0"
+        )
+        cur.execute(
+            "ALTER TABLE trading_state ADD COLUMN IF NOT EXISTS tp_sold_qty NUMERIC DEFAULT 0"
+        )
+        cur.execute(
             """
             CREATE UNIQUE INDEX IF NOT EXISTS trading_state_exchange_symbol_key
             ON trading_state (exchange, symbol)
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS regime_state (
+                id SERIAL PRIMARY KEY,
+                symbol VARCHAR(20) NOT NULL,
+                regime VARCHAR(20),
+                adx_14 NUMERIC,
+                vol_20d NUMERIC,
+                ret_20d NUMERIC,
+                computed_at TIMESTAMPTZ DEFAULT NOW()
+            )
+            """
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_regime_symbol ON regime_state (symbol, computed_at DESC)"
+        )
+        cur.execute(
+            "ALTER TABLE regime_state ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()"
+        )
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS grid_state (
+                id SERIAL PRIMARY KEY,
+                exchange VARCHAR(50) NOT NULL,
+                symbol VARCHAR(20) NOT NULL,
+                grid JSONB,
+                UNIQUE (symbol, exchange)
+            )
             """
         )
 
@@ -488,13 +526,14 @@ def load_trading_state(conn, exchange):
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT symbol, entry_price, entry_time, peak_plpc, quantity, "
-                "dca_level, signal_price, total_position_eur "
+                "dca_level, signal_price, total_position_eur, "
+                "tp_level, tp_sold_qty "
                 "FROM trading_state WHERE exchange = %s",
                 (exchange,),
             )
             rows = cur.fetchall()
         state = {}
-        for symbol, ep, et, peak, qty, dca_lvl, sig_px, tot_eur in rows:
+        for symbol, ep, et, peak, qty, dca_lvl, sig_px, tot_eur, tp_lvl, tp_sold in rows:
             state[symbol] = {
                 "entry_price": float(ep) if ep else 0.0,
                 "entry_time": et.isoformat().replace("+00:00", "Z") if et else None,
@@ -503,6 +542,8 @@ def load_trading_state(conn, exchange):
                 "dca_level": int(dca_lvl) if dca_lvl is not None else 0,
                 "signal_price": float(sig_px) if sig_px else 0.0,
                 "total_position_eur": float(tot_eur) if tot_eur else 0.0,
+                "tp_level": int(tp_lvl) if tp_lvl is not None else 0,
+                "tp_sold_qty": float(tp_sold) if tp_sold else 0.0,
             }
         return state
     except Exception as e:
@@ -534,8 +575,8 @@ def save_trading_state(conn, exchange, state):
                     cur.execute(
                         """INSERT INTO trading_state
                                (exchange, symbol, entry_price, entry_time, peak_plpc, quantity,
-                                dca_level, signal_price, total_position_eur, updated_at)
-                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                                dca_level, signal_price, total_position_eur, tp_level, tp_sold_qty, updated_at)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
                            ON CONFLICT (exchange, symbol) DO UPDATE SET
                                entry_price = EXCLUDED.entry_price,
                                entry_time  = EXCLUDED.entry_time,
@@ -544,6 +585,8 @@ def save_trading_state(conn, exchange, state):
                                dca_level   = EXCLUDED.dca_level,
                                signal_price = EXCLUDED.signal_price,
                                total_position_eur = EXCLUDED.total_position_eur,
+                               tp_level    = EXCLUDED.tp_level,
+                               tp_sold_qty = EXCLUDED.tp_sold_qty,
                                updated_at  = CURRENT_TIMESTAMP""",
                         (
                             exchange,
@@ -555,6 +598,8 @@ def save_trading_state(conn, exchange, state):
                             data.get("dca_level", 0),
                             data.get("signal_price"),
                             data.get("total_position_eur"),
+                            data.get("tp_level", 0),
+                            data.get("tp_sold_qty", 0.0),
                         ),
                     )
                 # Prune positions that are no longer held (closed since last save).

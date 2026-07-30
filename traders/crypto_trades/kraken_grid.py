@@ -137,7 +137,8 @@ def run_cycle():
                 notify_lines.append(action)
                 for trade in grid.pop("_cycle_trades", []):
                     log_trade(db_conn, "SELL", pair, trade["price"], trade["qty"],
-                              trade["pnl"], f"Grid cycle: {pair}")
+                              trade["pnl"], f"Grid cycle: {pair}",
+                              strategy_name=EXCHANGE_NAME)
             elif action.startswith("🛑"):
                 notify_lines.append(action)
             elif action.startswith("📏"):

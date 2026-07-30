@@ -174,7 +174,7 @@ async def dashboard(request: Request, tsearch: str = "", tdate: str = "all", rse
                             p["position_value"] = round(cp * qty, 2)
                 sym_base = p["symbol"].split("/")[0] if "/" in str(p["symbol"]) else p["symbol"]
                 cur.execute(
-                    "SELECT regime FROM regime_state WHERE symbol = %s ORDER BY updated_at DESC LIMIT 1",
+                    "SELECT regime FROM regime_state WHERE symbol = %s ORDER BY computed_at DESC LIMIT 1",
                     (sym_base,))
                 regime_row = cur.fetchone()
                 p["regime"] = regime_row[0] if regime_row else "unknown"

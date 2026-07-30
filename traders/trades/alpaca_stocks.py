@@ -311,7 +311,8 @@ def run_cycle():
                         estimated_value_usd=qty * current_price,
                         position_size_pct=0.0,
                         portfolio_equity=equity,
-                        reason=sell_reason
+                        reason=sell_reason,
+                        strategy_name=EXCHANGE_NAME,
                     )
                     if symbol in new_state:
                         del new_state[symbol]
@@ -509,7 +510,7 @@ def run_cycle():
                     )
                 except Exception as e:
                     print(f"LLM review failed: {e} — buying directly", file=sys.stderr)
-                    llm_result = {"verdict": "APPROVE", "reason": f"LLM unavailable: {e}", "confidence": 0}
+                    llm_result = {"verdict": "REJECT", "reason": f"LLM unavailable: {e}", "confidence": 0}
 
                 if llm_result["verdict"] != "APPROVE":
                     report["action_taken"] = "SKIP"
@@ -590,7 +591,8 @@ def run_cycle():
                         estimated_value_usd=order_size_usd,
                         position_size_pct=order_size_usd / equity * 100.0,
                         portfolio_equity=equity,
-                        reason=f"{momentum_desc} on {symbol}. Deployed ${round(order_size_usd, 2)} per {reason_rule}."
+                        reason=f"{momentum_desc} on {symbol}. Deployed ${round(order_size_usd, 2)} per {reason_rule}.",
+                        strategy_name=EXCHANGE_NAME,
                     )
                 else:
                     report["action_taken"] = "BUY_FAILED"

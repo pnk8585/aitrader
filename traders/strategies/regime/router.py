@@ -24,7 +24,7 @@ def should_enter(db_conn, symbol: str, strategy: str) -> tuple:
     try:
         cur.execute(
             """SELECT regime FROM regime_state
-               WHERE symbol = %s ORDER BY updated_at DESC LIMIT 1""",
+               WHERE symbol = %s ORDER BY computed_at DESC LIMIT 1""",
             (symbol,))
         row = cur.fetchone()
     except Exception:

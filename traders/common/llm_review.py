@@ -196,14 +196,14 @@ Rules:
             raw = raw[brace:]
         elif brace < 0:
             # No JSON found — empty or text-only response
-            raw = '{"verdict": "APPROVE", "reason": "LLM returned text, defaulting", "confidence": 5}'
+            raw = '{"verdict": "REJECT", "reason": "LLM returned text, defaulting", "confidence": 5}'
         try:
             result = json.loads(raw)
         except json.JSONDecodeError:
             print(f"LLM returned non-JSON: {raw[:200]}", file=sys.stderr)
-            result = {"verdict": "APPROVE", "reason": f"LLM parse error: {raw[:80]}", "confidence": 5}
+            result = {"verdict": "REJECT", "reason": f"LLM parse error: {raw[:80]}", "confidence": 5}
         final = {
-            "verdict": result.get("verdict", "APPROVE"),
+            "verdict": result.get("verdict", "REJECT"),
             "reason": result.get("reason", "No reason given"),
             "confidence": int(result.get("confidence", 5)),
         }
@@ -233,7 +233,7 @@ Rules:
         return final
     except Exception as e:
         latency_ms = (time.monotonic() - t0) * 1000
-        final = {"verdict": "APPROVE", "reason": f"LLM error: {str(e)[:80]}", "confidence": 5}
+        final = {"verdict": "REJECT", "reason": f"LLM error: {str(e)[:80]}", "confidence": 5}
         _log_llm_jsonl(
             kind="trade_review",
             model=model,

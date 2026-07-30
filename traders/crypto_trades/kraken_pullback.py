@@ -172,6 +172,7 @@ def run_cycle():
     except Exception:
         pass
     state = load_trading_state(db_conn, EXCHANGE_NAME)
+    cycle_regime = detect_regime(db_conn, "BTC") or "unknown"
     notify_state = load_notify_state(db_conn, EXCHANGE_NAME)
     should_notify = False
     msg_lines = []
@@ -356,7 +357,8 @@ def run_cycle():
                           order_id=res.get("id"), quantity=qty,
                           estimated_value_eur=qty * current_price,
                           position_size_pct=0.0, portfolio_equity=portfolio_value,
-                          reason=reason)
+                          reason=reason, regime=cycle_regime,
+                          strategy_name=EXCHANGE_NAME)
                 new_state.pop(symbol, None)
                 positions = [p for p in positions if p["symbol"] != symbol]
             except Exception as e:
@@ -409,7 +411,8 @@ def run_cycle():
                                   quantity=fill_q,
                                   estimated_value_eur=fill_q * fill_p,
                                   position_size_pct=0.0, portfolio_equity=portfolio_value,
-                                  reason=f"DCA level {dca_level} for {symbol} @ {fill_p}")
+                                  reason=f"DCA level {dca_level} for {symbol} @ {fill_p}",
+                                  regime=cycle_regime, strategy_name=EXCHANGE_NAME)
 
         report["positions_managed"].append(pos_report)
 
@@ -576,7 +579,7 @@ def run_cycle():
         except Exception as e:
             # LLM unavailable — fall back to aggressive (buy directly)
             print(f"LLM review failed: {e} — buying directly", file=sys.stderr)
-            result = {"verdict": "APPROVE", "reason": f"LLM unavailable: {e}", "confidence": 0}
+            result = {"verdict": "REJECT", "reason": f"LLM unavailable: {e}", "confidence": 0}
 
         if result["verdict"] == "APPROVE":
             execute_approved = True
@@ -673,7 +676,8 @@ def run_cycle():
                   estimated_value_eur=actual_value,
                   position_size_pct=actual_value / portfolio_value * 100.0,
                   portfolio_equity=portfolio_value,
-                  reason=f"{momentum_desc} on {symbol}. Deployed EUR {round(actual_value,2)}.")
+                  reason=f"{momentum_desc} on {symbol}. Deployed EUR {round(actual_value,2)}.",
+                  regime=cycle_regime, strategy_name=EXCHANGE_NAME)
     except Exception as e:
         report["action_taken"] = "BUY_FAILED"
         report["details"] = f"Failed to buy {symbol}: {e}"
