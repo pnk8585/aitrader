@@ -43,7 +43,7 @@ from traders.common.config import ROOT_DIR, ensure_log_dir
 from traders.common.exchange import extract_fill, market_buy, market_sell, spread_ok
 from traders.common.gates import check_gate, load_ai_gates
 from traders.strategies.momentum import config as MO
-from traders.common.atr_stops import compute_atr_from_prices, compute_atr_stop
+from traders.common.atr_stops import compute_atr_from_prices, compute_atr_stop, fetch_atr_pct
 from traders.common.pnl_notify import format_sell_pnl_auto
 from traders.common.kelly import kelly_position_size
 from traders.common.laddered_tp import should_take_partial_profit as check_ladder_tp
@@ -215,43 +215,13 @@ def _clear_atr_cache():
 
 
 def atr_pct(symbol):
-    """Return Wilder ATR(14) as % of current close via 1h candles.
-
-    Uses the exchange object already in scope. Cached per symbol per cycle.
-    Returns None on any failure (data too short, exchange error, zero close).
-    """
+    """Wilder ATR(14) as % of current close via 1h candles. Cached per cycle."""
     cached = _ATR_CACHE.get(symbol)
     if cached is not None:
         return cached
-    try:
-        candles = exchange.fetch_ohlcv(symbol, "1h", limit=ATR_PERIOD + 5)
-        if not candles or len(candles) < ATR_PERIOD + 1:
-            _ATR_CACHE[symbol] = None
-            return None
-        # True ranges
-        trs = []
-        for i in range(1, len(candles)):
-            h = float(candles[i][2])
-            lo = float(candles[i][3])
-            pc = float(candles[i - 1][4])
-            tr = max(h - lo, abs(h - pc), abs(lo - pc))
-            trs.append(tr)
-        # Wilder ATR: seed with simple mean, then smooth
-        seed = sum(trs[:ATR_PERIOD]) / ATR_PERIOD
-        atr = seed
-        for tr in trs[ATR_PERIOD:]:
-            atr = (atr * (ATR_PERIOD - 1) + tr) / ATR_PERIOD
-        close = float(candles[-1][4])
-        if close <= 0:
-            _ATR_CACHE[symbol] = None
-            return None
-        result = atr / close * 100.0
-        _ATR_CACHE[symbol] = result
-        return result
-    except Exception as e:
-        print(f"ATR calc failed for {symbol}: {e}", file=sys.stderr)
-        _ATR_CACHE[symbol] = None
-        return None
+    val = fetch_atr_pct(exchange, symbol, period=ATR_PERIOD)
+    _ATR_CACHE[symbol] = val
+    return val
 
 
 # ---------------------------------------------------------------------------

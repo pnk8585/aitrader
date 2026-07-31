@@ -56,3 +56,31 @@ def should_move_to_breakeven(current_price, entry_price, atr, threshold_mult=2.0
     if atr <= 0:
         return False
     return (current_price - entry_price) >= threshold_mult * atr
+
+
+def fetch_atr_pct(exchange, symbol, period=14, timeframe="1h"):
+    """Wilder ATR(period) as a percentage of the latest close, via OHLCV.
+
+    Returns None on any failure (short data, exchange error, zero close).
+    """
+    try:
+        candles = exchange.fetch_ohlcv(symbol, timeframe, limit=period + 5)
+        if not candles or len(candles) < period + 1:
+            return None
+        trs = []
+        prev_close = candles[0][4]
+        for c in candles[1:]:
+            high, low, close = c[2], c[3], c[4]
+            tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+            trs.append(tr)
+            prev_close = close
+        atr = sum(trs[:period]) / period
+        for tr in trs[period:]:
+            atr = (atr * (period - 1) + tr) / period
+        last_close = candles[-1][4]
+        if not last_close:
+            return None
+        return atr / last_close * 100.0
+    except Exception:
+        return None
+

@@ -47,6 +47,7 @@ from traders.common.exchange import extract_fill, market_buy, market_sell, sprea
 from traders.common.gates import check_gate, load_ai_gates
 from traders.common.pnl_notify import format_sell_pnl_auto
 from traders.common.kelly import kelly_position_size
+from traders.common.atr_stops import fetch_atr_pct
 from traders.strategies.pullback import config as PB
 from traders.strategies.pullback.exits import compute_effective_stop, should_exit_pullback
 from traders.strategies.pullback.signals import scan_pullback_candidates
@@ -328,12 +329,18 @@ def run_cycle():
             db_conn, exchange_name=EXCHANGE_NAME, round_trip_fee_pct=ROUND_TRIP_FEE_PCT)
         effective_stop = compute_effective_stop(rng_6h, rpnl_today)
         trend_3h = get_momentum_over(db_conn, symbol, TREND_3H_MIN, price_exchange=PRICE_EXCHANGE)
+        atr_stop = None
+        if PB.USE_ATR_STOPS:
+            raw_atr = fetch_atr_pct(exchange, symbol, period=PB.ATR_PERIOD)
+            if raw_atr is not None:
+                atr_stop = -(raw_atr * PB.ATR_STOP_MULTIPLIER)
         sell, reason = should_exit_pullback(
             unrealized_plpc=unrealized_plpc,
             peak_plpc=peak_plpc,
             age_hours=age_hours,
             effective_stop=effective_stop,
             trend_3h=trend_3h,
+            atr_stop_pct=atr_stop,
         )
         if sell and "Hard stop" in reason and rng_6h is not None:
             reason = f"{reason}, rng6h={round(rng_6h, 2)}%"
