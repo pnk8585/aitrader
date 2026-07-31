@@ -18,6 +18,7 @@ from openai import OpenAI
 
 from traders.common.exchange import market_sell
 from traders.common.gates import check_and_set_btc_pause
+from traders.common.pnl_notify import format_sell_pnl
 
 # ── Env ─────────────────────────────────────────────────────────────
 for p in ["/home/pank/projects/aitrader/.env", "/home/pank/.hermes/.env"]:
@@ -330,7 +331,8 @@ def main():
                 try:
                     fqty = float(kraken.amount_to_precision(sym, pos["qty"]))
                     res = market_sell(kraken, sym, fqty, pos["current"])
-                    log.append(f"    ✅ Sold {fqty} {sym} @ ~€{pos['current']:.4f}")
+                    pnl_suffix = format_sell_pnl(pos["entry"], pos["current"], pos["qty"])
+                    log.append(f"    ✅ Sold {fqty} {sym} @ ~€{pos['current']:.4f} {pnl_suffix}")
                     # Remove from trading_state
                     cur = db.cursor()
                     cur.execute("DELETE FROM trading_state WHERE exchange IN %s AND symbol=%s", (_STATE_EXCHANGES, sym))
@@ -365,7 +367,8 @@ def main():
             try:
                 fqty = float(kraken.amount_to_precision(sym, pos["qty"]))
                 res = market_sell(kraken, sym, fqty, pos["current"])
-                log.append(f"    ✅ Sold {fqty} {sym}")
+                pnl_suffix = format_sell_pnl(pos["entry"], pos["current"], fqty)
+                log.append(f"    ✅ Sold {fqty} {sym} {pnl_suffix}")
                 cur = db.cursor()
                 cur.execute("DELETE FROM trading_state WHERE exchange IN %s AND symbol=%s", (_STATE_EXCHANGES, sym))
                 db.commit()

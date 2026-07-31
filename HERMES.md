@@ -51,6 +51,10 @@ Docker: start.py
 - **Container**: Admin UI **and** scheduler inside Docker. Deploy via CI/CD only.
 - **Trade notifications**: Only BUY/SELL events → Telegram. No HOLD/SKIP spam.
 - **CI**: `dockerhub.pkatopodis.me` — image + homeserver compose pull/up.
+- **DB driver**: `psycopg2` must use `autocommit=True`. Without it, `InFailedSqlTransaction` cascades after the first error — `except` + `rollback()` alone is NOT enough.
+- **HTMX in admin UI**: Serve locally — CDN silently fails inside Docker (network policy), pages render blank with no console error.
+- **Paper ↔ live toggle**: Dashboard cron flips `cron_jobs.mode` via HTMX partial (`_paper_live.html`); UI polls at DEBUG only.
+- **Phases**: P1–P5 complete (cron registry, multi-strategy, gates, dashboard, paper/live switch). No open phase items.
 
 ## Docker
 

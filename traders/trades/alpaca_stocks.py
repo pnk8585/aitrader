@@ -31,6 +31,7 @@ from traders.common.config import (
     ALPACA_BASE_URL, ALPACA_DATA_URL, DRY_RUN, ROOT_DIR, LOG_DIR, ensure_log_dir,
 )
 from traders.common.gates import check_gate, load_ai_gates
+from traders.common.pnl_notify import format_sell_pnl_auto
 
 ensure_log_dir()
 
@@ -296,7 +297,8 @@ def run_cycle():
                     pos_report["reason"] = sell_reason
                     managed_any = True
                     should_notify = True
-                    msg_lines.append(f"🔄 **Πωλήθηκε {symbol}**: {sell_reason}")
+                    msg_lines.append(f"🔄 **Πωλήθηκε {symbol}**: {sell_reason}"
+                                     f"{format_sell_pnl_auto(entry_price, current_price, qty, prices_in='USD')}")
                     log_trade(db_conn,
                         action="SELL",
                         ticker=symbol,

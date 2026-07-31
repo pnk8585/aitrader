@@ -500,13 +500,13 @@ async def position_sell(exchange: str, symbol: str, request: Request):
     with get_conn() as conn:
         cur = conn.cursor()
         cur.execute(
-            "SELECT exchange, symbol, quantity FROM trading_state WHERE exchange=%s AND symbol=%s",
+            "SELECT exchange, symbol, quantity, entry_price FROM trading_state WHERE exchange=%s AND symbol=%s",
             (exchange, symbol))
         row = cur.fetchone()
         if row is None:
             return HTMLResponse(
                 '<div class="flash flash-err">Position not found</div>', status_code=404)
-        _, _, qty = row
+        _, _, qty, entry_price = row
 
     # Only kraken is supported for now
     if exchange != "kraken":
@@ -524,7 +524,21 @@ async def position_sell(exchange: str, symbol: str, request: Request):
     try:
         res = kraken.create_market_sell_order(symbol, float(qty))
         order_id = res.get("id", "unknown")
-        send_telegram(f"✅ SOLD {symbol} qty={qty} order={order_id}")
+
+        # Enrich with P&L suffix
+        from traders.common.pnl_notify import format_sell_pnl
+        msg = f"✅ SOLD {symbol} qty={qty} order={order_id}"
+        if entry_price and float(entry_price) > 0:
+            try:
+                ticker = kraken.fetch_ticker(symbol)
+                current_price = ticker.get("last", 0) if ticker else 0
+                if current_price and float(current_price) > 0:
+                    suffix = format_sell_pnl(float(entry_price), float(current_price), float(qty))
+                    if suffix:
+                        msg += f" {suffix}"
+            except Exception:
+                pass
+        send_telegram(msg)
 
         # Clean up trading_state
         with get_conn() as conn:

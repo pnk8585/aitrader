@@ -44,6 +44,7 @@ from traders.common.exchange import extract_fill, market_buy, market_sell, sprea
 from traders.common.gates import check_gate, load_ai_gates
 from traders.strategies.momentum import config as MO
 from traders.common.atr_stops import compute_atr_from_prices, compute_atr_stop
+from traders.common.pnl_notify import format_sell_pnl_auto
 from traders.common.kelly import kelly_position_size
 from traders.common.laddered_tp import should_take_partial_profit as check_ladder_tp
 from traders.strategies.momentum.exits import is_stale_rotation_candidate, should_exit_momentum
@@ -472,7 +473,8 @@ def run_cycle():
                 pos_report["action"] = "SELL"
                 managed_any = True
                 should_notify = True
-                msg_lines.append(f"🔄 **Πωλήθηκε {symbol} (Kraken momentum)**: {reason}")
+                msg_lines.append(f"🔄 **Πωλήθηκε {symbol} (Kraken momentum)**: {reason}"
+                                 f"{format_sell_pnl_auto(entry_price, current_price, fqty)}")
                 log_trade(db_conn, action="SELL", ticker=symbol,
                           signal_strength="EXIT", momentum_pct=0.0,
                           entry_price=entry_price, current_price=current_price,
@@ -774,7 +776,8 @@ def run_cycle():
             should_notify = True
             msg_lines.append(f"🔄 **Περιστροφή (Kraken momentum)**: Πωλήθηκε στάσιμο "
                              f"**{stale['symbol']}** (+{round(stale['unrealized_plpc'],2)}% "
-                             f"μετά {round(stale['age_hours'],2)}h) για {symbol}.")
+                             f"μετά {round(stale['age_hours'],2)}h) για {symbol}."
+                             f"{format_sell_pnl_auto(stale['entry_price'], stale['current_price'], stale['qty'])}")
             log_trade(db_conn, action="SELL", ticker=stale["symbol"],
                       signal_strength="ROTATION", momentum_pct=0.0,
                       entry_price=stale["entry_price"], current_price=stale["current_price"],

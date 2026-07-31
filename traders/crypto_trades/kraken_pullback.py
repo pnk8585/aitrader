@@ -45,6 +45,7 @@ from db_prices import (
 from traders.common.config import DRY_RUN, ROOT_DIR, ensure_log_dir
 from traders.common.exchange import extract_fill, market_buy, market_sell, spread_ok
 from traders.common.gates import check_gate, load_ai_gates
+from traders.common.pnl_notify import format_sell_pnl_auto
 from traders.common.kelly import kelly_position_size
 from traders.strategies.pullback import config as PB
 from traders.strategies.pullback.exits import compute_effective_stop, should_exit_pullback
@@ -349,7 +350,8 @@ def run_cycle():
                 pos_report["action"] = "SELL"
                 managed_any = True
                 should_notify = True
-                msg_lines.append(f"🔄 **Πωλήθηκε {symbol} (Kraken pullback)**: {reason}")
+                msg_lines.append(f"🔄 **Πωλήθηκε {symbol} (Kraken pullback)**: {reason}"
+                                 f"{format_sell_pnl_auto(entry_price, current_price, qty)}")
                 log_trade(db_conn, action="SELL", ticker=symbol,
                           signal_strength="EXIT", momentum_pct=0.0,
                           entry_price=entry_price, current_price=current_price,
