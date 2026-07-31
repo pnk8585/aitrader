@@ -34,7 +34,6 @@ FEATURE_FLAGS = {
     "USE_ATR_STOPS": True,
     "USE_KELLY_SIZING": True,
     "USE_LADDERED_TP": True,
-    "USE_REGIME_ROUTING": False,
     "USE_DCA_ENTRY": False,
 }
 
