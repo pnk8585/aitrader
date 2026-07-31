@@ -27,11 +27,13 @@ from db_prices import (
                        load_trading_state, save_trading_state,
                        load_notify_state, save_notify_state as db_save_notify_state,
                        log_trade as db_log_trade)
+from types import SimpleNamespace
 from traders.common.config import (
     ALPACA_BASE_URL, ALPACA_DATA_URL, DRY_RUN, ROOT_DIR, LOG_DIR, ensure_log_dir,
 )
 from traders.common.gates import check_gate, load_ai_gates
 from traders.common.pnl_notify import format_sell_pnl_auto
+from traders.strategies.momentum.exits import should_exit_momentum
 
 ensure_log_dir()
 
@@ -66,6 +68,15 @@ PLOCK_FLOOR_PCT = 3.0       # Sell if we drop below +3.0% after hitting +5.0%
 STOP_LOSS_PCT = -2.0        # Hard stop-loss
 BREAKEVEN_PEAK_PCT = 1.0    # Breakeven protection arms after +1.0% peak
 MAX_HOLD_HOURS = 8.0        # Hard time-stop (stocks mostly held intraday)
+
+# Shared momentum exit logic, parameterized with the stock constants above.
+STOCK_EXIT_CFG = SimpleNamespace(
+    USE_ATR_STOPS=False,
+    TTP_PEAK_PCT=TTP_PEAK_PCT, TTP_GIVEBACK_PCT=TTP_GIVEBACK_PCT,
+    PLOCK_PEAK_PCT=PLOCK_PEAK_PCT, PLOCK_FLOOR_PCT=PLOCK_FLOOR_PCT,
+    STOP_LOSS_PCT=STOP_LOSS_PCT, BREAKEVEN_PEAK_PCT=BREAKEVEN_PEAK_PCT,
+    ROUND_TRIP_FEE_PCT=ROUND_TRIP_FEE_PCT, MAX_HOLD_HOURS=MAX_HOLD_HOURS,
+)
 
 # --- Entry ----------------------------------------------------------------
 DAILY_ENTRY_PCT = 2.0       # daily change (vs prev close) >= 2.0% qualifies
@@ -244,29 +255,12 @@ def run_cycle():
         sym_state["peak_plpc"] = peak_plpc
         new_state[symbol] = sym_state
 
-        sell_triggered = False
-        sell_reason = ""
-
-        # Trailing Take Profit
-        if peak_plpc >= TTP_PEAK_PCT and unrealized_plpc <= (peak_plpc - TTP_GIVEBACK_PCT):
-            sell_triggered = True
-            sell_reason = f"Trailing Take Profit hit (Peak: +{round(peak_plpc, 2)}% | Sold at: +{round(unrealized_plpc, 2)}%)"
-        # Profit Lock
-        elif peak_plpc >= PLOCK_PEAK_PCT and unrealized_plpc < PLOCK_FLOOR_PCT:
-            sell_triggered = True
-            sell_reason = f"Profit lock protection (Peak: +{round(peak_plpc, 2)}% | Sold at: +{round(unrealized_plpc, 2)}%)"
-        # Stop-loss
-        elif unrealized_plpc <= STOP_LOSS_PCT:
-            sell_triggered = True
-            sell_reason = f"Stop-loss hit ({round(unrealized_plpc, 2)}% <= {STOP_LOSS_PCT}%)"
-        # Breakeven Protection (exit above fee floor so we lock NET-positive)
-        elif peak_plpc >= BREAKEVEN_PEAK_PCT and unrealized_plpc <= ROUND_TRIP_FEE_PCT:
-            sell_triggered = True
-            sell_reason = f"Breakeven protection (Peak was +{round(peak_plpc, 2)}% | Current: +{round(unrealized_plpc, 2)}% | fee floor +{ROUND_TRIP_FEE_PCT}%)"
-        # Hard max-hold time-stop
-        elif age_hours >= MAX_HOLD_HOURS and unrealized_plpc <= ROUND_TRIP_FEE_PCT:
-            sell_triggered = True
-            sell_reason = f"Max-hold time-stop ({round(age_hours, 1)}h)"
+        sell_triggered, sell_reason = should_exit_momentum(
+            unrealized_plpc=unrealized_plpc,
+            peak_plpc=peak_plpc,
+            age_hours=age_hours,
+            cfg=STOCK_EXIT_CFG,
+        )
 
         pos_report = {
             "symbol": symbol,

@@ -9,27 +9,32 @@ def should_exit_momentum(
     peak_plpc: float,
     age_hours: float,
     atr_stop_pct: float | None = None,
+    cfg=None,
 ) -> tuple[bool, str]:
-    """Return (sell, reason) for a momentum position. Full exits only —
-    laddered partial profit-taking is handled by the trader, not here."""
-    if C.USE_ATR_STOPS and atr_stop_pct is not None and unrealized_plpc <= atr_stop_pct:
+    """Return (sell, reason) for a momentum position. Full exits only.
+
+    cfg: any object with the momentum exit constants; defaults to the
+    crypto momentum config so existing callers are unchanged.
+    """
+    c = cfg or C
+    if c.USE_ATR_STOPS and atr_stop_pct is not None and unrealized_plpc <= atr_stop_pct:
         return True, f"ATR stop ({round(unrealized_plpc, 2)}% <= {round(atr_stop_pct, 2)}%)"
-    if peak_plpc >= C.TTP_PEAK_PCT and unrealized_plpc <= (peak_plpc - C.TTP_GIVEBACK_PCT):
+    if peak_plpc >= c.TTP_PEAK_PCT and unrealized_plpc <= (peak_plpc - c.TTP_GIVEBACK_PCT):
         return True, (
             f"Trailing TP (peak +{round(peak_plpc, 2)}% -> +{round(unrealized_plpc, 2)}%)"
         )
-    if peak_plpc >= C.PLOCK_PEAK_PCT and unrealized_plpc < C.PLOCK_FLOOR_PCT:
+    if peak_plpc >= c.PLOCK_PEAK_PCT and unrealized_plpc < c.PLOCK_FLOOR_PCT:
         return True, (
             f"Profit lock (peak +{round(peak_plpc, 2)}% -> +{round(unrealized_plpc, 2)}%)"
         )
-    if unrealized_plpc <= C.STOP_LOSS_PCT:
-        return True, f"Stop-loss ({round(unrealized_plpc, 2)}% <= {C.STOP_LOSS_PCT}%)"
-    if peak_plpc >= C.BREAKEVEN_PEAK_PCT and unrealized_plpc <= C.ROUND_TRIP_FEE_PCT:
+    if unrealized_plpc <= c.STOP_LOSS_PCT:
+        return True, f"Stop-loss ({round(unrealized_plpc, 2)}% <= {c.STOP_LOSS_PCT}%)"
+    if peak_plpc >= c.BREAKEVEN_PEAK_PCT and unrealized_plpc <= c.ROUND_TRIP_FEE_PCT:
         return True, (
             f"Breakeven protection (peak +{round(peak_plpc, 2)}% -> "
-            f"+{round(unrealized_plpc, 2)}%, fee floor +{C.ROUND_TRIP_FEE_PCT}%)"
+            f"+{round(unrealized_plpc, 2)}%, fee floor +{c.ROUND_TRIP_FEE_PCT}%)"
         )
-    if age_hours >= C.MAX_HOLD_HOURS and unrealized_plpc <= C.ROUND_TRIP_FEE_PCT:
+    if age_hours >= c.MAX_HOLD_HOURS and unrealized_plpc <= c.ROUND_TRIP_FEE_PCT:
         return True, f"Max-hold time-stop ({round(age_hours, 1)}h)"
     return False, ""
 
