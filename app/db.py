@@ -65,3 +65,14 @@ def init_schema():
                     duration_ms INTEGER
                 );
             """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS universe_symbols (
+                    asset_class TEXT NOT NULL,
+                    symbol      TEXT NOT NULL,
+                    enabled     BOOLEAN DEFAULT TRUE,
+                    created_at  TIMESTAMPTZ DEFAULT now(),
+                    PRIMARY KEY (asset_class, symbol),
+                    CONSTRAINT universe_asset_class_chk
+                        CHECK (asset_class IN ('stock', 'crypto'))
+                );
+            """)

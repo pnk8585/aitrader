@@ -38,6 +38,11 @@ async def _startup():
     except Exception as e:
         print(f"[startup] seed_default_settings: {e}")
     try:
+        from app.universe import ensure_universe_seeded
+        ensure_universe_seeded()
+    except Exception as e:
+        print(f"[startup] ensure_universe_seeded: {e}")
+    try:
         apply_log_level_from_settings()
     except Exception as e:
         print(f"[startup] apply_log_level: {e}")
@@ -567,6 +572,156 @@ async def cron_jobs_api(request: Request):
 @app.get("/healthz")
 async def healthz():
     return {"status": "ok"}
+
+
+# ── Universe (stocks + crypto watchlists) ─────────────────────
+
+def _universe_page_ctx():
+    from app.universe import ensure_universe_seeded, job_modes, list_symbols
+    try:
+        ensure_universe_seeded()
+    except Exception:
+        pass
+    return {
+        "stocks": list_symbols("stock"),
+        "crypto": list_symbols("crypto"),
+        "jobs": job_modes(),
+        "flash": None,
+        "flash_type": None,
+    }
+
+
+@app.get("/ui/admin/universe", response_class=HTMLResponse)
+async def universe_page(request: Request):
+    try:
+        ctx = _universe_page_ctx()
+    except Exception as e:
+        ctx = {
+            "stocks": [], "crypto": [], "jobs": [],
+            "flash": f"DB error: {e}", "flash_type": "err",
+        }
+    return templates.TemplateResponse(request, "admin_universe.html", ctx)
+
+
+@app.get("/ui/admin/universe/stocks-table", response_class=HTMLResponse)
+async def universe_stocks_table(request: Request):
+    from app.universe import list_symbols
+    html = partial(request, "_universe_stocks.html", stocks=list_symbols("stock"))
+    return HTMLResponse(html)
+
+
+@app.get("/ui/admin/universe/crypto-table", response_class=HTMLResponse)
+async def universe_crypto_table(request: Request):
+    from app.universe import list_symbols
+    html = partial(request, "_universe_crypto.html", crypto=list_symbols("crypto"))
+    return HTMLResponse(html)
+
+
+@app.get("/ui/admin/universe/jobs", response_class=HTMLResponse)
+async def universe_jobs_partial(request: Request):
+    from app.universe import job_modes
+    html = partial(request, "_universe_jobs.html", jobs=job_modes())
+    return HTMLResponse(html)
+
+
+@app.get("/ui/admin/universe/search/stocks", response_class=HTMLResponse)
+async def universe_search_stocks(request: Request, q: str = ""):
+    from app.universe import search_stocks
+    results = search_stocks(q) if q.strip() else []
+    html = partial(
+        request, "_universe_search.html",
+        results=results, asset_class="stock", q=q,
+    )
+    return HTMLResponse(html)
+
+
+@app.get("/ui/admin/universe/search/crypto", response_class=HTMLResponse)
+async def universe_search_crypto(request: Request, q: str = ""):
+    from app.universe import search_crypto
+    results = search_crypto(q) if q.strip() else []
+    html = partial(
+        request, "_universe_search.html",
+        results=results, asset_class="crypto", q=q,
+    )
+    return HTMLResponse(html)
+
+
+@app.post("/ui/admin/universe/add", response_class=HTMLResponse)
+async def universe_add(request: Request):
+    from app.universe import add_symbol, list_symbols
+    form = await request.form()
+    asset_class = (form.get("asset_class") or "").strip()
+    symbol = (form.get("symbol") or "").strip()
+    try:
+        add_symbol(asset_class, symbol)
+        flash = f"Added {symbol}"
+        flash_type = "ok"
+    except Exception as e:
+        flash = str(e)
+        flash_type = "err"
+    partial_name = "_universe_stocks.html" if asset_class == "stock" else "_universe_crypto.html"
+    key = "stocks" if asset_class == "stock" else "crypto"
+    try:
+        rows = list_symbols(asset_class if asset_class in ("stock", "crypto") else "stock")
+    except Exception:
+        rows = []
+    body = partial(request, partial_name, **{key: rows})
+    flash_html = f'<div class="flash flash-{flash_type}">{flash}</div>'
+    # Target is the whole section wrapper for stocks/crypto
+    wrap_id = "universe-stocks" if asset_class == "stock" else "universe-crypto"
+    return HTMLResponse(
+        f'<div id="{wrap_id}">{flash_html}{body}</div>'
+    )
+
+
+@app.post("/ui/admin/universe/remove", response_class=HTMLResponse)
+async def universe_remove(request: Request):
+    from app.universe import list_symbols, remove_symbol
+    form = await request.form()
+    asset_class = (form.get("asset_class") or "").strip()
+    symbol = (form.get("symbol") or "").strip()
+    try:
+        ok = remove_symbol(asset_class, symbol)
+        flash = f"Removed {symbol}" if ok else f"Not found: {symbol}"
+        flash_type = "ok" if ok else "err"
+    except Exception as e:
+        flash = str(e)
+        flash_type = "err"
+    partial_name = "_universe_stocks.html" if asset_class == "stock" else "_universe_crypto.html"
+    key = "stocks" if asset_class == "stock" else "crypto"
+    try:
+        rows = list_symbols(asset_class if asset_class in ("stock", "crypto") else "stock")
+    except Exception:
+        rows = []
+    body = partial(request, partial_name, **{key: rows})
+    flash_html = f'<div class="flash flash-{flash_type}">{flash}</div>'
+    wrap_id = "universe-stocks" if asset_class == "stock" else "universe-crypto"
+    return HTMLResponse(f'<div id="{wrap_id}">{flash_html}{body}</div>')
+
+
+@app.post("/ui/admin/universe/jobs/{name}/toggle-mode", response_class=HTMLResponse)
+async def universe_job_toggle_mode(name: str, request: Request):
+    from app.db import get_conn
+    from app.universe import CRYPTO_JOBS, STOCK_JOBS, job_modes
+    allowed = set(STOCK_JOBS) | set(CRYPTO_JOBS)
+    if name not in allowed:
+        return HTMLResponse(
+            '<div class="flash flash-err">Job not managed here</div>', status_code=400)
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT mode FROM cron_jobs WHERE name=%s", (name,))
+        row = cur.fetchone()
+        if not row:
+            return HTMLResponse(
+                f'<div class="flash flash-err">Job not found: {name}</div>', status_code=404)
+        new_mode = "paper" if row[0] == "live" else "live"
+        cur.execute(
+            "UPDATE cron_jobs SET mode=%s, updated_at=NOW() WHERE name=%s",
+            (new_mode, name),
+        )
+        conn.commit()
+    html = partial(request, "_universe_jobs.html", jobs=job_modes())
+    return HTMLResponse(html)
 
 
 # ── Data browser ─────────────────────────────────────────────

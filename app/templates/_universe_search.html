@@ -1,0 +1,22 @@
+{% if not q %}
+{% elif results and results[0].get('error') %}
+  <div class="flash flash-err">{{ results[0].name }}</div>
+{% elif results %}
+  {% for r in results %}
+  <div class="search-hit">
+    <div>
+      <strong>{{ r.symbol }}</strong>
+      <span class="text-muted"> · {{ r.name }}{% if r.exchange %} · {{ r.exchange }}{% endif %}</span>
+    </div>
+    <button class="btn-add"
+            hx-post="/ui/admin/universe/add"
+            hx-vals='{"asset_class":"{{ asset_class }}","symbol":"{{ r.symbol }}"}'
+            hx-target="#{{ 'universe-stocks' if asset_class == 'stock' else 'universe-crypto' }}"
+            hx-swap="outerHTML">
+      Add
+    </button>
+  </div>
+  {% endfor %}
+{% else %}
+  <p class="text-muted">No matches for “{{ q }}”</p>
+{% endif %}

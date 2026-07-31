@@ -75,7 +75,7 @@ EXCHANGE_NAME = MO.EXCHANGE_NAME
 if os.environ.get("AITRADER_MODE") == "paper":
     EXCHANGE_NAME = f"paper-{EXCHANGE_NAME}"
 PRICE_EXCHANGE = MO.PRICE_EXCHANGE
-CRYPTO_PAIRS = MO.CRYPTO_PAIRS
+from traders.common.universe import get_crypto_pairs
 ROUND_TRIP_FEE_PCT = MO.ROUND_TRIP_FEE_PCT
 DAILY_ENTRY_PCT = MO.DAILY_ENTRY_PCT
 HOURLY_ENTRY_PCT = MO.HOURLY_ENTRY_PCT
@@ -229,6 +229,7 @@ def atr_pct(symbol):
 # ---------------------------------------------------------------------------
 def run_cycle():
     _clear_atr_cache()
+    CRYPTO_PAIRS = get_crypto_pairs()
 
     report = {
         "timestamp": datetime.now(timezone.utc).isoformat(),

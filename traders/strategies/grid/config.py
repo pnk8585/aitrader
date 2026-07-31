@@ -4,11 +4,8 @@ import os
 
 from traders.common.config import LOG_DIR
 
-CRYPTO_PAIRS = [
-    "BTC/EUR", "ETH/EUR", "SOL/EUR", "AVAX/EUR", "LINK/EUR",
-    "XRP/EUR", "DOGE/EUR", "SUI/EUR", "NEAR/EUR", "RENDER/EUR",
-    "ADA/EUR", "DOT/EUR",
-]
+# Defaults only — runtime list is traders.common.universe.get_crypto_pairs()
+from traders.common.universe import DEFAULT_CRYPTO_PAIRS as CRYPTO_PAIRS  # noqa: E402
 
 EXCHANGE_NAME = "kraken-grid"
 PRICE_EXCHANGE = "kraken"

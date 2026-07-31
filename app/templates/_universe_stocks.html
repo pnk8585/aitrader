@@ -1,0 +1,36 @@
+<table>
+  <thead>
+    <tr>
+      <th>Symbol</th>
+      <th>Status</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for s in stocks %}
+    <tr>
+      <td><strong>{{ s.symbol }}</strong></td>
+      <td>
+        {% if s.enabled %}
+          <span class="badge badge-live">watch</span>
+        {% else %}
+          <span class="badge badge-paused">off</span>
+        {% endif %}
+      </td>
+      <td style="text-align:right">
+        <button class="btn-remove"
+                hx-post="/ui/admin/universe/remove"
+                hx-vals='{"asset_class":"stock","symbol":"{{ s.symbol }}"}'
+                hx-target="#universe-stocks"
+                hx-swap="outerHTML"
+                hx-confirm="Remove {{ s.symbol }} from universe?">
+          Remove
+        </button>
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="3" class="text-muted">Empty — defaults will seed on next restart, or add via search.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+<p class="text-muted" style="margin-top:8px">{{ stocks|length }} symbols · scanned by alpaca-stocks</p>

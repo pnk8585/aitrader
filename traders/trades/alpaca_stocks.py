@@ -52,8 +52,11 @@ headers = {
     "Content-Type": "application/json"
 }
 
-# US stock universe
-STOCK_SYMBOLS = ["NVDA", "PLTR", "TSLA", "AMD", "GOOGL", "META", "AAPL", "MSFT", "AMZN", "AVGO"]
+# Defaults for tests/docs; each cycle loads DB via get_stock_symbols().
+from traders.common.universe import (  # noqa: E402
+    DEFAULT_STOCK_SYMBOLS as STOCK_SYMBOLS,
+    get_stock_symbols,
+)
 
 
 # Stock commissions are effectively ~0.005% per side (mostly $0 + tiny SEC/TAF
@@ -370,7 +373,8 @@ def run_cycle():
         # --- STOCK MOMENTUM SCAN ---
         candidates = []
 
-        symbols_str = ",".join(STOCK_SYMBOLS)
+        stock_symbols = get_stock_symbols()
+        symbols_str = ",".join(stock_symbols)
         snap_url = f"{ALPACA_DATA_URL}/v2/stocks/snapshots?symbols={symbols_str}"
         snap_res = requests.get(snap_url, headers=headers, timeout=10)
         if snap_res.status_code == 200:
@@ -418,9 +422,9 @@ def run_cycle():
             return max(d, i)
 
         candidates = sorted(candidates, key=best_signal, reverse=True)
-        report["scanned_assets"] = candidates[:10]
+        report["scanned_assets"] = candidates[: max(len(stock_symbols), 1)]
 
-        # Candidate qualification: daily >= 1.5 OR intraday >= 1.0
+        # Candidate qualification: daily >= DAILY_ENTRY_PCT OR intraday >= INTRADAY_ENTRY_PCT
         signals = [
             c for c in candidates
             if (c["daily_change_pct"] is not None and c["daily_change_pct"] >= DAILY_ENTRY_PCT)
@@ -536,6 +540,10 @@ def run_cycle():
                 }
 
                 order_url = f"{ALPACA_BASE_URL}/v2/orders"
+                # `order` is set in every branch below; live uses order_res only on failure text.
+                order = None
+                order_res_status = 0
+                order_err_text = ""
                 if DRY_RUN:
                     print(f"DRY_RUN: BUY {symbol} ${round(order_size_usd, 2)}", file=sys.stderr)
                     order = {"id": f"dry-run-{client_order_id}", "status": "filled"}
@@ -548,10 +556,12 @@ def run_cycle():
                 else:
                     order_res = requests.post(order_url, headers=headers, json=order_data, timeout=10)
                     order_res_status = order_res.status_code
-                    order = order_res.json() if order_res_status in (200, 201) else {}
+                    if order_res_status in (200, 201):
+                        order = order_res.json()
+                    else:
+                        order_err_text = order_res.text
 
-                if order_res_status in [200, 201]:
-                    order = order_res.json()
+                if order_res_status in [200, 201] and order is not None:
                     report["action_taken"] = "BUY"
                     report["details"] = f"Successfully placed buy order for {symbol} of amount ${round(order_size_usd, 2)}."
                     report["order_id"] = order.get("id")
@@ -592,7 +602,7 @@ def run_cycle():
                     )
                 else:
                     report["action_taken"] = "BUY_FAILED"
-                    err = order_res.text if not DRY_RUN else "dry-run failed"
+                    err = order_err_text or ("dry-run failed" if DRY_RUN else "order rejected")
                     report["details"] = f"Failed to place buy order for {symbol}: {err}"
             else:
                 report["action_taken"] = "SKIP"

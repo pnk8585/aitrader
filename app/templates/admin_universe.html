@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}Universe — AITrader{% endblock %}
+{% block content %}
+<h1>Universe</h1>
+<p class="text-muted" style="margin-bottom:20px">
+  Stocks &amp; crypto that bots scan. Live/paper is per <strong>job</strong> (not per symbol).
+  Changes apply on the next 5‑minute cycle.
+</p>
+
+{% if flash %}
+<div class="flash flash-{{ flash_type or 'ok' }}">{{ flash }}</div>
+{% endif %}
+
+<section style="margin-bottom:32px">
+  <h2 style="font-size:16px;margin-bottom:12px">Job modes</h2>
+  <div id="universe-jobs">
+    {% include "_universe_jobs.html" %}
+  </div>
+</section>
+
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;align-items:start">
+  <section>
+    <h2 style="font-size:16px;margin-bottom:12px">Stocks (Alpaca)</h2>
+    <div class="card" style="margin-bottom:12px">
+      <label class="text-muted" style="display:block;margin-bottom:6px">Search Alpaca</label>
+      <input class="filter-input" style="width:100%;padding:8px;font-size:13px"
+             type="search" name="q" placeholder="NVDA, JPM, SPY…"
+             hx-get="/ui/admin/universe/search/stocks"
+             hx-trigger="keyup changed delay:300ms, search"
+             hx-target="#stock-search-results"
+             hx-swap="innerHTML"
+             autocomplete="off">
+      <div id="stock-search-results" style="margin-top:8px"></div>
+    </div>
+    <div id="universe-stocks">
+      {% include "_universe_stocks.html" %}
+    </div>
+  </section>
+
+  <section>
+    <h2 style="font-size:16px;margin-bottom:12px">Crypto (Kraken, shared)</h2>
+    <div class="card" style="margin-bottom:12px">
+      <label class="text-muted" style="display:block;margin-bottom:6px">Search Kraken</label>
+      <input class="filter-input" style="width:100%;padding:8px;font-size:13px"
+             type="search" name="q" placeholder="BTC, SOL, ETH…"
+             hx-get="/ui/admin/universe/search/crypto"
+             hx-trigger="keyup changed delay:300ms, search"
+             hx-target="#crypto-search-results"
+             hx-swap="innerHTML"
+             autocomplete="off">
+      <div id="crypto-search-results" style="margin-top:8px"></div>
+    </div>
+    <div id="universe-crypto">
+      {% include "_universe_crypto.html" %}
+    </div>
+  </section>
+</div>
+
+<style>
+  @media (max-width: 800px) {
+    div[style*="grid-template-columns:1fr 1fr"] {
+      grid-template-columns: 1fr !important;
+    }
+  }
+</style>
+{% endblock %}

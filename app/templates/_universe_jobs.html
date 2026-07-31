@@ -1,0 +1,38 @@
+<table>
+  <thead>
+    <tr>
+      <th>Job</th>
+      <th>Asset</th>
+      <th>Mode</th>
+      <th>Enabled</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for j in jobs %}
+    <tr>
+      <td><strong>{{ j.name }}</strong></td>
+      <td class="text-muted">
+        {% if j.name == 'alpaca-stocks' %}stocks{% else %}crypto{% endif %}
+      </td>
+      <td>
+        <button class="btn-action btn-mode-{{ j.mode }}"
+                hx-post="/ui/admin/universe/jobs/{{ j.name }}/toggle-mode"
+                hx-target="#universe-jobs"
+                hx-swap="innerHTML"
+                title="Click to switch live ↔ paper">
+          {{ j.mode }}
+        </button>
+      </td>
+      <td>
+        {% if j.enabled %}
+          <span class="badge badge-live">on</span>
+        {% else %}
+          <span class="badge badge-paused">off</span>
+        {% endif %}
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="4" class="text-muted">No trading jobs found — seed cron first.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>

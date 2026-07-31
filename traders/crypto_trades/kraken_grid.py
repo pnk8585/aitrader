@@ -56,6 +56,9 @@ def log_trade(db_conn, action, ticker, price, qty, value_eur, reason, **kwargs):
 
 
 def run_cycle():
+    from traders.common.universe import get_crypto_pairs
+    CRYPTO_PAIRS = get_crypto_pairs()
+
     db_conn = get_connection()
     try:
         db_conn.rollback()  # Clear any stale failed transaction from prior cycle
@@ -63,10 +66,10 @@ def run_cycle():
         pass
 
     try:
-        tickers = exchange.fetch_tickers(GC.CRYPTO_PAIRS) or {}
+        tickers = exchange.fetch_tickers(CRYPTO_PAIRS) or {}
         price_map = {
             base_symbol(sym): tickers[sym]["last"]
-            for sym in GC.CRYPTO_PAIRS
+            for sym in CRYPTO_PAIRS
             if tickers.get(sym) and tickers[sym].get("last") is not None
         }
         insert_prices(db_conn, price_map)
@@ -92,7 +95,7 @@ def run_cycle():
     except Exception:
         existing_allocated = 0.0
 
-    for pair in GC.CRYPTO_PAIRS:
+    for pair in CRYPTO_PAIRS:
         if active_grids >= GC.MAX_OPEN_GRIDS:
             break
 

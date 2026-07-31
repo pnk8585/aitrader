@@ -11,7 +11,7 @@ Docker: start.py
 │    └─ app/cron_orchestrator.py → JOB_REGISTRY / cron_jobs
 │       ├─ kraken-pullback (LIVE, 5m)
 │       ├─ kraken-momentum (PAPER, 5m)
-│       ├─ alpaca-stocks (LIVE, 5m)
+│       ├─ alpaca-stocks (PAPER, 5m)
 │       ├─ position-monitor (LIVE, 2h)
 │       ├─ end-of-day-review (LIVE, 24h)
 │       └─ db-cleanup (LIVE, ~05:00 Athens — prices downsample + cron_runs 24h)

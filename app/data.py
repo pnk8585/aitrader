@@ -13,6 +13,7 @@ TABLES = [
     "llm_review_log",
     "trade_log",
     "trading_state",
+    "universe_symbols",
 ]
 
 PAGE_SIZE = 20

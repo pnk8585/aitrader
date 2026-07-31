@@ -78,7 +78,7 @@ EXCHANGE_NAME = PB.EXCHANGE_NAME
 if os.environ.get("AITRADER_MODE") == "paper":
     EXCHANGE_NAME = f"paper-{EXCHANGE_NAME}"
 PRICE_EXCHANGE = PB.PRICE_EXCHANGE
-CRYPTO_PAIRS = PB.CRYPTO_PAIRS
+from traders.common.universe import get_crypto_pairs
 ROUND_TRIP_FEE_PCT = PB.ROUND_TRIP_FEE_PCT
 VOL_FLOOR_PCT = PB.VOL_FLOOR_PCT
 VOL_WINDOW_MIN = PB.VOL_WINDOW_MIN
@@ -157,6 +157,7 @@ def get_entry_price_and_time(symbol, current_price):
 # Main cycle
 # ---------------------------------------------------------------------------
 def run_cycle():
+    CRYPTO_PAIRS = get_crypto_pairs()
     report = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "status": "success",
