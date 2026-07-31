@@ -42,3 +42,26 @@ def test_stop_tightens_on_bleeding_day():
     loose = compute_effective_stop(rng_6h=4.0, rpnl_today=0.0)
     tight = compute_effective_stop(rng_6h=4.0, rpnl_today=-3.0)
     assert abs(tight) < abs(loose)
+
+
+def test_trailing_exit_config_is_net_positive_after_fees():
+    """Trailing TP must never be able to trigger below the fee floor.
+
+    Worst-case trailing exit for a given peak is peak - giveback; that must
+    stay above the 0.52% round-trip fee for every reachable peak >= arm level.
+    """
+    from traders.strategies.pullback import config as C
+
+    assert C.TRAIL_ARM_PCT >= C.ROUND_TRIP_FEE_PCT + C.TRAIL_GIVEBACK_MIN_PCT
+
+    for peak in [C.TRAIL_ARM_PCT, 3.0, 5.0, 10.0, 25.0, 50.0]:
+        giveback = max(C.TRAIL_GIVEBACK_MIN_PCT, peak * C.TRAIL_GIVEBACK_FRAC)
+        worst_exit = peak - giveback
+        assert worst_exit > C.ROUND_TRIP_FEE_PCT, (
+            f"peak +{peak}% can trail-exit at {worst_exit}% — below fees"
+        )
+
+
+def test_min_trade_meets_kraken_minimums():
+    from traders.strategies.pullback import config as C
+    assert C.MIN_TRADE_EUR >= 5.0

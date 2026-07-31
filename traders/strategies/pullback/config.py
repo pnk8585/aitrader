@@ -32,7 +32,7 @@ RR_MIN = 2.0
 
 MIN_HARD_STOP_PCT = 1.5
 MAX_HARD_STOP_PCT = 4.0
-TRAIL_ARM_PCT = 0.5
+TRAIL_ARM_PCT = 2.0            # was 0.5 — must clear fees (0.52%) + min giveback (1.0%)
 TRAIL_GIVEBACK_FRAC = 0.25
 TRAIL_GIVEBACK_MIN_PCT = 1.0
 HARD_TP_CAP_PCT = 5.0
@@ -43,7 +43,7 @@ DEPLOY_FRACTION = 0.1
 RISK_PER_TRADE_PCT = 4.0
 CONSULT_DEPLOY_FRACTION = 0.5
 CONSULT_MIN_SCORE = 3.0
-MIN_TRADE_EUR = 0.45
+MIN_TRADE_EUR = 5.0            # was 0.45 — below Kraken's real per-pair order minimums
 MAX_OPEN_SMALL = 1
 MAX_OPEN_LARGE = 2
 EQUITY_TWO_POS = 400.0
