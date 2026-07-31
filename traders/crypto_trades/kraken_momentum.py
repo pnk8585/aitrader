@@ -496,7 +496,7 @@ def run_cycle():
                 print(f"Error selling {symbol}: {e}", file=sys.stderr)
 
         # DCA follow-up for existing positions
-        if symbol in new_state:
+        if MO.USE_DCA_ENTRY and symbol in new_state:
             dca_level = ss.get("dca_level", 0)
             sig_price = ss.get("signal_price")
             total_eur = ss.get("total_position_eur", 0)
