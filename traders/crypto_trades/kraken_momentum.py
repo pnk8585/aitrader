@@ -410,8 +410,6 @@ def run_cycle():
             peak_plpc=peak_plpc,
             age_hours=age_hours,
             atr_stop_pct=atr_stop,
-            tp_level=ss.get("tp_level", 0),
-            tp_sold_qty=ss.get("tp_sold_qty", 0.0),
         )
 
         pos_report = {"symbol": symbol, "unrealized_plpc": round(unrealized_plpc, 2),
@@ -464,6 +462,44 @@ def run_cycle():
                 pos_report["action"] = "SELL_FAILED"
                 pos_report["reason"] = f"Failed to sell: {e}"
                 print(f"Error selling {symbol}: {e}", file=sys.stderr)
+
+        # Laddered partial take-profit (only when not fully exiting)
+        if not sell and MO.USE_LADDERED_TP:
+            take, ladder_qty, ladder_reason = check_ladder_tp(
+                unrealized_plpc,
+                ss.get("tp_level", 0),
+                total_qty=qty,
+                already_sold_qty=ss.get("tp_sold_qty", 0.0),
+            )
+            if take and ladder_qty > 0:
+                try:
+                    fqty = sellable_qty(symbol, ladder_qty)
+                    if fqty > 0:
+                        res = market_sell(exchange, symbol, fqty, current_price)
+                        _order_res = res or {}
+                        ss["tp_level"] = ss.get("tp_level", 0) + 1
+                        ss["tp_sold_qty"] = ss.get("tp_sold_qty", 0.0) + fqty
+                        ss["quantity"] = max(0.0, qty - fqty)
+                        new_state[symbol] = ss
+                        pos_report["action"] = "PARTIAL_SELL"
+                        pos_report["reason"] = ladder_reason
+                        managed_any = True
+                        should_notify = True
+                        msg_lines.append(
+                            f"🔄 **Μερική πώληση {symbol} (Kraken momentum)**: {ladder_reason}"
+                            f"{format_sell_pnl_auto(entry_price, current_price, fqty)}"
+                        )
+                        log_trade(db_conn, action="SELL", ticker=symbol,
+                                  signal_strength="LADDER_TP", momentum_pct=0.0,
+                                  entry_price=entry_price, current_price=current_price,
+                                  unrealized_plpc=unrealized_plpc / 100.0,
+                                  order_id=_order_res.get("id"), quantity=fqty,
+                                  estimated_value_eur=fqty * current_price,
+                                  position_size_pct=0.0, portfolio_equity=portfolio_value,
+                                  reason=ladder_reason, regime=cycle_regime,
+                                  strategy_name=EXCHANGE_NAME)
+                except Exception as e:
+                    print(f"Ladder TP sell failed for {symbol}: {e}", file=sys.stderr)
 
         # DCA follow-up for existing positions
         if MO.USE_DCA_ENTRY and symbol in new_state:
