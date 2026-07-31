@@ -15,8 +15,8 @@ def kelly_fraction(win_rate, avg_win, avg_loss):
 def kelly_position_size(db_conn, exchange_name, entry, stop, balance, fraction=0.25):
     """Compute position size in quote currency using quarter-Kelly.
 
-    Reads last 50 trades from trade_log to estimate win rate and R:R.
-    Falls back to fixed fraction of balance if fewer than 20 historical trades.
+    Reads last 200 trades from trade_log to estimate win rate and R:R.
+    Falls back to fixed fraction of balance if fewer than 100 historical trades.
     Caps at quarter-Kelly.
     """
     cur = db_conn.cursor()
@@ -25,13 +25,13 @@ def kelly_position_size(db_conn, exchange_name, entry, stop, balance, fraction=0
            FROM trade_log
            WHERE exchange = %s AND action = 'SELL'
            ORDER BY id DESC
-           LIMIT 50""",
+           LIMIT 200""",
         (exchange_name,),
     )
     rows = cur.fetchall()
     cur.close()
 
-    if len(rows) < 20:
+    if len(rows) < 100:
         return balance * fraction
 
     wins = [r[1] for r in rows if r[1] and r[1] > 0]
