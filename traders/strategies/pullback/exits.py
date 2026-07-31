@@ -11,17 +11,10 @@ def should_exit_pullback(
     effective_stop: float,
     trend_3h: float | None,
     atr_stop_pct: float | None = None,
-    tp_level: int = 0,
-    tp_sold_qty: float = 0.0,
 ) -> tuple[bool, str]:
     """Return (sell, reason) for a pullback position."""
     if C.USE_ATR_STOPS and atr_stop_pct is not None and unrealized_plpc <= atr_stop_pct:
         return True, f"ATR stop ({round(unrealized_plpc, 2)}% <= {round(atr_stop_pct, 2)}%)"
-    if C.USE_LADDERED_TP:
-        from traders.common.laddered_tp import should_take_partial_profit
-        take, _, reason = should_take_partial_profit(unrealized_plpc, tp_level, total_qty=1.0, already_sold_qty=tp_sold_qty)
-        if take:
-            return True, reason
     if unrealized_plpc <= effective_stop:
         return True, f"Hard stop ({round(unrealized_plpc, 2)}% <= {round(effective_stop, 2)}%)"
     if unrealized_plpc >= C.HARD_TP_CAP_PCT:

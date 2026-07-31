@@ -65,3 +65,27 @@ def test_trailing_exit_config_is_net_positive_after_fees():
 def test_min_trade_meets_kraken_minimums():
     from traders.strategies.pullback import config as C
     assert C.MIN_TRADE_EUR >= 5.0
+
+
+def test_no_ladder_params_in_pullback_exit():
+    """Pullback has a +5% hard TP cap; laddered TP was dead weight (fired a
+    misleading 'sell 25%' reason but caused a full sell). It must be gone."""
+    import inspect
+    from traders.strategies.pullback.exits import should_exit_pullback
+
+    params = inspect.signature(should_exit_pullback).parameters
+    assert "tp_level" not in params
+    assert "tp_sold_qty" not in params
+
+
+def test_full_tp_at_cap_has_honest_reason():
+    sell, reason = should_exit_pullback(
+        unrealized_plpc=5.5,
+        peak_plpc=5.5,
+        age_hours=1.0,
+        effective_stop=-2.0,
+        trend_3h=2.0,
+    )
+    assert sell is True
+    assert "Take-profit cap" in reason
+
