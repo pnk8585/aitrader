@@ -73,10 +73,13 @@ docker-build:
     - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
     - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "gitlab-ce:5050"
   script:
-    - docker build -t $CI_REGISTRY_IMAGE:${FULL_VERSION} -t $CI_REGISTRY_IMAGE:latest -t $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA .
+    - DOCKER_BUILDKIT=0 docker build -t $CI_REGISTRY_IMAGE:${FULL_VERSION} .
+    - docker tag $CI_REGISTRY_IMAGE:${FULL_VERSION} $CI_REGISTRY_IMAGE:latest
+    - docker tag $CI_REGISTRY_IMAGE:${FULL_VERSION} $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+    # Push all tags from same image object ensures all blobs are known
+    - docker push $CI_REGISTRY_IMAGE:${FULL_VERSION}
     - docker push $CI_REGISTRY_IMAGE:latest
     - docker push $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
-    - docker push $CI_REGISTRY_IMAGE:${FULL_VERSION}
     - docker tag $CI_REGISTRY_IMAGE:latest $GITLAB_REGISTRY_IMAGE:latest
     - docker tag $CI_REGISTRY_IMAGE:${FULL_VERSION} $GITLAB_REGISTRY_IMAGE:${FULL_VERSION}
     - docker push $GITLAB_REGISTRY_IMAGE:latest
