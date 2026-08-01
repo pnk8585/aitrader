@@ -37,7 +37,7 @@ JOB_REGISTRY: dict[str, tuple[str, int, str]] = {
 _RUNNING_STALE = timedelta(hours=3)
 
 # Jobs that only notify on real trade signals (not every run)
-_TRADE_SIGNAL_JOBS = frozenset({"kraken-pullback", "kraken-momentum", "alpaca-stocks"})
+_TRADE_SIGNAL_JOBS = frozenset({"kraken-pullback", "kraken-momentum", "kraken-grid", "alpaca-stocks"})
 _TRADE_SIGNAL_KEYWORDS = ("BUY", "SELL", "🛒", "🔄", "entry", "exit",
                            "trade placed", "order filled", "bought", "sold",
                            "opening", "closing", "⚠️", "PENDING_AI_REVIEW")

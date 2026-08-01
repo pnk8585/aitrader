@@ -104,8 +104,7 @@ def run_cycle():
         if grid is None:
             allowed, reason = should_enter(db_conn, base_symbol(pair), "grid")
             if not allowed:
-                report_line = f"⏭️ {pair}: {reason}"
-                print(report_line)
+                # Silent skip — regime not suitable, no need to spam logs
                 continue
             if cash_eur < GC.MIN_TRADE_EUR * GC.NUM_GRIDS:
                 continue
