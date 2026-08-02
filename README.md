@@ -13,6 +13,7 @@ start.py → scheduler.py (every 60s) + uvicorn :9237
               └─ app/cron_orchestrator.py  (JOB_REGISTRY / DB cron_jobs)
                  ├─ kraken-pullback     LIVE   5m
                  ├─ kraken-momentum     PAPER  5m
+                 ├─ kraken-high-risk    PAPER  5m
                  ├─ alpaca-stocks       PAPER  5m
                  ├─ position-monitor    LIVE   2h
                  ├─ end-of-day-review   LIVE   24h

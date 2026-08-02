@@ -1,0 +1,58 @@
+"""High-risk momentum strategy constants — twin of config.py with aggressive overrides."""
+
+import os
+
+from traders.common.config import LOG_DIR
+
+# Defaults only — runtime list is traders.common.universe.get_crypto_pairs()
+from traders.common.universe import DEFAULT_CRYPTO_PAIRS as CRYPTO_PAIRS  # noqa: E402
+
+EXCHANGE_NAME = "kraken-high-risk"
+PRICE_EXCHANGE = "kraken"
+LOCK_FILE = os.path.join(LOG_DIR, "kraken_high_risk.lock")
+
+HIGH_RISK_PAIRS = ["NEAR/EUR", "RENDER/EUR", "SUI/EUR", "DOGE/EUR", "AVAX/EUR", "SOL/EUR"]
+
+ROUND_TRIP_FEE_PCT = 0.52
+MAX_SPREAD_PCT = 0.40
+
+DAILY_ENTRY_PCT = 4.0
+HOURLY_ENTRY_PCT = 3.0
+DAILY_WINDOW_MIN = 1440
+ROT_DAILY_PCT = 4.0
+ROT_HOURLY_PCT = 3.0
+
+TTP_PEAK_PCT = 2.0
+TTP_GIVEBACK_PCT = 0.5
+HARD_TP_CAP_PCT = 9.0
+PLOCK_PEAK_PCT = 5.0
+PLOCK_FLOOR_PCT = 3.0
+STOP_LOSS_PCT = -1.5
+BREAKEVEN_PEAK_PCT = 2.0
+STALE_FLAT_HOURS = 0.75
+STALE_FLAT_PLPC = 1.0
+STALE_MAX_HOURS = 1.5
+MAX_HOLD_HOURS = 8.0
+
+ATR_PERIOD = 14
+MAX_ATR_PCT = 7.0
+
+DEPLOY_FRACTION = 0.18
+RISK_PER_TRADE_PCT = 4.0
+MIN_TRADE_EUR = 5.0
+MAX_OPEN_MOMENTUM = 1
+MAX_TOTAL_OPEN = 5
+
+COOLDOWN_MIN = 90
+MAX_TRADES_PER_DAY = 1
+DAILY_LOSS_BREAKER_PCT = -2.0
+CONSULT_DEPLOY_FRACTION = 0.15
+CONSULT_MIN_SCORE = 2.0
+
+# Phase 1 feature flags
+USE_ATR_STOPS = True
+USE_KELLY_SIZING = True
+USE_LADDERED_TP = False
+USE_DCA_ENTRY = False
+ATR_STOP_MULTIPLIER = 1.5
+ATR_TP_MULTIPLIER = 3.0

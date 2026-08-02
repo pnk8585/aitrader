@@ -11,6 +11,7 @@ Docker: start.py
 │    └─ app/cron_orchestrator.py → JOB_REGISTRY / cron_jobs
 │       ├─ kraken-pullback (LIVE, 5m)
 │       ├─ kraken-momentum (PAPER, 5m)
+│       ├─ kraken-high-risk (PAPER, 5m)
 │       ├─ alpaca-stocks (PAPER, 5m)
 │       ├─ position-monitor (LIVE, 2h)
 │       ├─ end-of-day-review (LIVE, 24h)
@@ -43,6 +44,7 @@ Docker: start.py
 | Weekly rethink | `traders/weekly_rethink.py` | Sunday strategy mining (read-only) |
 | Pullback | `traders/crypto_trades/kraken_pullback.py` | Entries |
 | Momentum | `traders/crypto_trades/kraken_momentum.py` | Entries |
+| High Risk | `traders/crypto_trades/kraken_high_risk.py` | Entries |
 | Alpaca | `traders/trades/alpaca_stocks.py` | Stock momentum |
 
 ## Guidelines

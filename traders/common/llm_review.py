@@ -133,6 +133,28 @@ def review_trade(
 
     sig_str = "\n".join(f"  {k}: {v}" for k, v in sorted(signals.items()))
 
+    # ── Rules: high-risk strategies get a stricter default-REJECT gate ───
+    if "high-risk" in strategy.lower():
+        rules_block = (
+            "Rules (HIGH-RISK STRATEGY — STRICT GATE):\n"
+            "- DEFAULT to REJECT. APPROVE only if the setup is unusually strong.\n"
+            "- APPROVE requires: clear multi-signal alignment, NOT chasing a parabolic spike,\n"
+            "  confidence-worthy momentum (6+ on at least 2 indicators), and a clean entry.\n"
+            "- REJECT ambiguous or balanced evidence — tie goes to REJECT.\n"
+            "- REJECT if the coin already pumped hard on short horizons (≥10% in 1h, ≥20% in 6h).\n"
+            "- REJECT if volume or momentum is fading even slightly.\n"
+            "- Bar is higher than normal momentum strategies. Only the clearest setups pass."
+        )
+    else:
+        rules_block = (
+            "Rules:\n"
+            "- Default to APPROVE when evidence is balanced; reject only for clear reasons.\n"
+            "- If score is negative or very low (< 2): lean REJECT.\n"
+            "- Reject only for clear reasons: extreme volatility, conflicting signals, tiny capital.\n"
+            "- Use price context: reject if the coin already pumped +15% in 6h (chasing top).\n"
+            "- Use the Market Strategy above to align with the macro view: if regime is bullish and pullback is aggressive, favor entries. If cautious/skip, be more selective."
+        )
+
     system_prompt = (
         f"You are an AI trade reviewer for a {strategy} crypto/stock strategy. "
         "Reply with JSON only."
@@ -161,12 +183,7 @@ NEWS:
 Evaluate this candidate. Return JSON:
 {{"verdict": "APPROVE"|"REJECT", "reason": "brief reason", "confidence": 1-10}}
 
-Rules:
-- Default to APPROVE when evidence is balanced; reject only for clear reasons.
-- If score is negative or very low (< 2): lean REJECT.
-- Reject only for clear reasons: extreme volatility, conflicting signals, tiny capital.
-- Use price context: reject if the coin already pumped +15% in 6h (chasing top).
-- Use the Market Strategy above to align with the macro view: if regime is bullish and pullback is aggressive, favor entries. If cautious/skip, be more selective."""
+{rules_block}"""
 
     t0 = time.monotonic()
     try:
