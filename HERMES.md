@@ -14,6 +14,7 @@ Docker: start.py
 │       ├─ alpaca-stocks (PAPER, 5m)
 │       ├─ position-monitor (LIVE, 2h)
 │       ├─ end-of-day-review (LIVE, 24h)
+│       ├─ weekly-rethink (LIVE, Sunday 09:00 Athens)
 │       └─ db-cleanup (LIVE, ~05:00 Athens — prices downsample + cron_runs 24h)
 └─ uvicorn app.main:app :9237  (admin UI)
 ```
@@ -39,6 +40,7 @@ Docker: start.py
 | Gates | `traders/common/gates.py` | Safety pause (BTC drawdown, manual halt) |
 | DB prices | `traders/extreme/db_prices.py` | asset_prices queries |
 | Position monitor | `position_monitor.py` | LLM exits |
+| Weekly rethink | `traders/weekly_rethink.py` | Sunday strategy mining (read-only) |
 | Pullback | `traders/crypto_trades/kraken_pullback.py` | Entries |
 | Momentum | `traders/crypto_trades/kraken_momentum.py` | Entries |
 | Alpaca | `traders/trades/alpaca_stocks.py` | Stock momentum |

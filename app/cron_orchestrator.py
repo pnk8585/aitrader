@@ -32,6 +32,7 @@ JOB_REGISTRY: dict[str, tuple[str, int, str]] = {
     "alpaca-stocks":      ("traders/trades/alpaca_stocks.py",           300,  "paper"),
     "end-of-day-review":  ("traders/eod_review.py",                    86400, "live"),
     "db-cleanup":         ("scripts/db_cleanup.py",                   86400, "live"),
+    "weekly-rethink":     ("traders/weekly_rethink.py",           7 * 86400, "live"),
 }
 
 _RUNNING_STALE = timedelta(hours=3)
@@ -63,6 +64,23 @@ _FIXED_ATHENS_HOUR: dict[str, int] = {
     "db-cleanup": 5,  # 05:00 Athens daily
 }
 
+# Jobs that should fire on a fixed Athens weekday (1=Mon..7=Sun) + hour
+_FIXED_ATHENS_WEEKDAY: dict[str, tuple[int, int]] = {
+    "weekly-rethink": (7, 9),  # Sunday 09:00 Athens
+}
+
+
+def _next_athens_weekday_hour(weekday: int, hour: int) -> datetime:
+    """Next wall-clock ``weekday`` (1=Mon..7=Sun) at ``hour``:00 Athens, as UTC-aware datetime."""
+    from zoneinfo import ZoneInfo
+    ath = ZoneInfo("Europe/Athens")
+    now_ath = datetime.now(timezone.utc).astimezone(ath)
+    target = now_ath.replace(hour=hour, minute=0, second=0, microsecond=0)
+    while True:
+        if target.isoweekday() == weekday and target > now_ath:
+            return target.astimezone(timezone.utc)
+        target += timedelta(days=1)
+
 
 # ── seed ──────────────────────────────────────────────────────
 
@@ -77,7 +95,10 @@ def seed_jobs(db) -> None:
     for name, (_path, interval, mode) in JOB_REGISTRY.items():
         if name in existing:
             continue
-        if name in _FIXED_ATHENS_HOUR:
+        if name in _FIXED_ATHENS_WEEKDAY:
+            wd, hr = _FIXED_ATHENS_WEEKDAY[name]
+            nxt = _next_athens_weekday_hour(wd, hr)
+        elif name in _FIXED_ATHENS_HOUR:
             nxt = _next_athens_hour(_FIXED_ATHENS_HOUR[name])
         else:
             nxt = _now() + timedelta(seconds=interval)
@@ -192,7 +213,10 @@ def _finish_run(db, run_id: int, name: str, status: str, summary: str,
                WHERE id = %s""",
             (status, finished, summary, duration_ms, run_id),
         )
-        if name in _FIXED_ATHENS_HOUR:
+        if name in _FIXED_ATHENS_WEEKDAY:
+            wd, hr = _FIXED_ATHENS_WEEKDAY[name]
+            nxt = _next_athens_weekday_hour(wd, hr)
+        elif name in _FIXED_ATHENS_HOUR:
             nxt = _next_athens_hour(_FIXED_ATHENS_HOUR[name])
         else:
             nxt = _now() + timedelta(seconds=interval)
