@@ -814,14 +814,23 @@ def run_cycle():
     deploy_fraction = CONSULT_DEPLOY_FRACTION if consulting else DEPLOY_FRACTION
     order_size_eur = cash_eur * deploy_fraction * best["mult"]
 
+    # Small Account Rule (< €100 equity): no risk caps / Kelly — deploy all cash.
+    small_account = portfolio_value < 100.0
+    if small_account:
+        order_size_eur = cash_eur
+        reason_rule = f"small account rule (< €100 equity) — full cash {round(cash_eur,2)}€"
+    else:
+        reason_rule = f"{best['signal']} level sizing"
+
     stop_pct = abs(STOP_LOSS_PCT)
-    risk_cap_eur = ((RISK_PER_TRADE_PCT * _risk_mult) / 100.0 * portfolio_value) / (stop_pct / 100.0)
-    if risk_cap_eur < order_size_eur:
-        order_size_eur = risk_cap_eur
+    if not small_account:
+        risk_cap_eur = ((RISK_PER_TRADE_PCT * _risk_mult) / 100.0 * portfolio_value) / (stop_pct / 100.0)
+        if risk_cap_eur < order_size_eur:
+            order_size_eur = risk_cap_eur
     order_size_eur = min(order_size_eur, cash_eur)
 
-    # Kelly sizing (if enabled)
-    if MO.USE_KELLY_SIZING:
+    # Kelly sizing (if enabled) — skipped for small accounts
+    if MO.USE_KELLY_SIZING and not small_account:
         try:
             stop_price = current_price * (1 + MO.STOP_LOSS_PCT / 100)  # STOP_LOSS_PCT is negative
             kelly_qty = kelly_position_size(db_conn, EXCHANGE_NAME, current_price, stop_price, cash_eur)
@@ -894,7 +903,7 @@ def run_cycle():
                   estimated_value_eur=actual_value,
                   position_size_pct=actual_value / portfolio_value * 100.0,
                   portfolio_equity=portfolio_value,
-                  reason=f"{momentum_desc} on {symbol}. Deployed EUR {round(actual_value,2)}.",
+                  reason=f"{momentum_desc} on {symbol}. Deployed EUR {round(actual_value,2)} ({reason_rule}).",
                   regime=cycle_regime, strategy_name=EXCHANGE_NAME)
     except Exception as e:
         report["action_taken"] = "BUY_FAILED"
