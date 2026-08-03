@@ -195,12 +195,18 @@ Evaluate this candidate. Return JSON:
             ],
             temperature=0.2,
             max_tokens=300,
-            response_format={"type": "json_object"},
             timeout=timeout,
         )
         latency_ms = (time.monotonic() - t0) * 1000
-        raw = (resp.choices[0].message.content or "").strip()
-        raw_full = raw
+        # DeepSeek/GLM upstreams via LiteLLM return empty `content` when
+        # response_format=json_object is set (and some put the answer in
+        # reasoning_content). Mirror bettips-ai predictor.py: no
+        # response_format, fall back to reasoning_content, robust brace search.
+        msg = resp.choices[0].message
+        raw_full = (msg.content or "").strip()
+        if not raw_full:
+            raw_full = (getattr(msg, "reasoning_content", "") or "").strip()
+        raw = raw_full
         # Strip markdown fences and leading/trailing noise
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[-1]

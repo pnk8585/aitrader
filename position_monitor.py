@@ -112,11 +112,14 @@ Guidelines:
             ],
             temperature=0.2,
             max_tokens=200,
-            response_format={"type": "json_object"},
             timeout=15,
         )
         latency_ms = (time.monotonic() - t0) * 1000
-        raw_full = (resp.choices[0].message.content or "").strip()
+        # Same DeepSeek response_format fix as llm_review.py — see there.
+        msg = resp.choices[0].message
+        raw_full = (msg.content or "").strip()
+        if not raw_full:
+            raw_full = (getattr(msg, "reasoning_content", "") or "").strip()
         raw = raw_full
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[-1]

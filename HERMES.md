@@ -51,6 +51,7 @@ Docker: start.py
 - **Write**: Save new info to the correct file — same one you found it in.
 - **Secrets/keys**: Never in project files — Bitwarden only.
 - **Job config**: DB `cron_jobs` / admin UI — not JSON orchestrator files.
+- **Job mode (live/paper) = DB-driven**: `SELECT name, mode FROM cron_jobs` — πάντα check από το container (`docker exec aitrader python -m app.cron_orchestrator list`), ΟΧΙ registry defaults/docs. Τα defaults στον κώδικα (π.χ. momentum/grid paper) ΔΕΝ ισχύουν αν το DB λέει αλλιώς — το DB υπερισχύει.
 - **LLM model**: `hermes-flash` via LiteLLM (`host.docker.internal:4000` from container).
 - **Container**: Admin UI **and** scheduler inside Docker. Deploy via CI/CD only.
 - **Trade notifications**: Only BUY/SELL events → Telegram. No HOLD/SKIP spam.
