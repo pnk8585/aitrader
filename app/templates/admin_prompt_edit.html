@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}Edit prompt — {{ prompt.label }}{% endblock %}
+{% block content %}
+
+<div style="display: flex; align-items: center; gap: 16px; margin-bottom: 24px;">
+  <h1 style="margin: 0;">{{ prompt.label }}</h1>
+  <a href="/ui/admin/prompts" class="btn-sm" style="text-decoration: none; background: var(--bg-card); color: var(--text); border: 1px solid var(--border); font-size: 12px;">← All prompts</a>
+</div>
+
+<div class="card" style="max-width: 960px; padding: 20px;">
+
+  <div style="margin-bottom: 4px;">
+    <code style="font-size: 12px; color: var(--text-muted);">{{ prompt.key }}</code>
+    {% if prompt.is_custom %}
+    <span class="badge badge-live" style="margin-left: 8px;">custom</span>
+    {% else %}
+    <span class="badge badge-paper" style="margin-left: 8px;">matches default</span>
+    {% endif %}
+  </div>
+
+  {% if prompt.description %}
+  <p class="text-muted" style="margin-bottom: 14px;">{{ prompt.description }}</p>
+  {% endif %}
+
+  <div id="prompt-save-flash"></div>
+
+  <form hx-post="/ui/admin/prompts/{{ prompt.key }}"
+        hx-target="#prompt-save-flash"
+        hx-swap="innerHTML">
+    <label style="display: block; font-size: 12px; color: var(--text-muted); margin-bottom: 6px;">
+      System prompt body (fixed instructions only)
+    </label>
+    <textarea name="body" rows="22"
+              style="width: 100%; padding: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.45; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 8px; resize: vertical;"
+              required>{{ prompt.body }}</textarea>
+    <div style="display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; align-items: center;">
+      <button type="submit" class="btn-action">Save</button>
+      <button type="button" class="btn-action"
+              style="background: var(--bg-card); color: var(--text); border: 1px solid var(--border);"
+              hx-post="/ui/admin/prompts/{{ prompt.key }}/reset"
+              hx-confirm="Reset this prompt to the built-in default? Your custom text will be overwritten."
+              hx-target="#prompt-save-flash"
+              hx-swap="innerHTML"
+              hx-on::after-request="if(event.detail.successful) setTimeout(() => location.reload(), 400)">
+        Reset to default
+      </button>
+      <span class="text-muted" style="font-size: 12px;">
+        Changes apply within ~15s (prompt cache TTL). No app restart required.
+      </span>
+    </div>
+  </form>
+</div>
+{% endblock %}

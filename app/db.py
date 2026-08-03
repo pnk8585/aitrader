@@ -76,3 +76,12 @@ def init_schema():
                         CHECK (asset_class IN ('stock', 'crypto'))
                 );
             """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS llm_prompts (
+                    key         TEXT PRIMARY KEY,
+                    label       TEXT NOT NULL,
+                    description TEXT,
+                    body        TEXT NOT NULL,
+                    updated_at  TIMESTAMPTZ DEFAULT now()
+                );
+            """)

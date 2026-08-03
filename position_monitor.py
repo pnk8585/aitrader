@@ -16,6 +16,7 @@ import ccxt
 from dotenv import load_dotenv
 from openai import OpenAI
 
+from app.llm_prompts import get_prompt
 from traders.common.exchange import market_sell
 from traders.common.gates import check_and_set_btc_pause
 from traders.common.pnl_notify import format_sell_pnl
@@ -77,30 +78,17 @@ def _llm_decide(position: dict, price_ctx: str) -> dict:
         return {"action": "HOLD", "reason": "no API key", "confidence": 0}
     client = OpenAI(api_key=api_key, base_url=base_url)
 
-    system_prompt = "You are a position monitor. Reply with JSON only: action SELL or HOLD."
-    prompt = f"""You are a position monitor for a crypto/stock portfolio.
-Decide whether to SELL or HOLD this position.
-
-POSITION:
-  Symbol: {position['symbol']}
-  Entry: €{position['entry']:.4f}
-  Current: €{position['current']:.4f}
-  P&L: {position['pnl_pct']:+.2f}%
-  Qty: {position['qty']:.6f}
-  Value: €{position['value']:.2f}
-  Exchange: {position['exchange']}
-
-PRICE CONTEXT:
-{price_ctx}
-
-Return JSON:
-{{"action": "SELL"|"HOLD", "reason": "brief reason", "confidence": 1-10}}
-
-Guidelines:
-- SELL if the trade thesis is clearly broken (e.g., -5%+ loss with no recovery signs).
-- HOLD if there's no clear reason to exit — small fluctuations are normal.
-- If price is near entry and signals are neutral, default to HOLD.
-- Be decisive — don't HOLD bleeding positions out of hope."""
+    system_prompt = get_prompt("position_monitor_system")
+    prompt = get_prompt("position_monitor_user").format(
+        symbol=position["symbol"],
+        entry=position["entry"],
+        current=position["current"],
+        pnl_pct=position["pnl_pct"],
+        qty=position["qty"],
+        value=position["value"],
+        exchange=position["exchange"],
+        price_ctx=price_ctx,
+    )
 
     t0 = time.monotonic()
     try:

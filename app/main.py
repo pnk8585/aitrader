@@ -46,6 +46,12 @@ async def _startup():
         apply_log_level_from_settings()
     except Exception as e:
         print(f"[startup] apply_log_level: {e}")
+    try:
+        from app.llm_prompts import seed_prompts
+        n = seed_prompts()
+        print(f"[startup] llm_prompts: seeded {n} missing defaults")
+    except Exception as e:
+        print(f"[startup] llm_prompts: {e}")
 
 
 # uvicorn attaches access handlers after import — re-apply once on first request
@@ -766,3 +772,49 @@ async def data_table_view(table: str, request: Request, page: int = 1, sort: str
         "total": total,
     }
     return templates.TemplateResponse(request, "data_table.html", ctx)
+
+
+# ── LLM Prompts ─────────────────────────────────────────────
+
+
+@app.get("/ui/admin/prompts", response_class=HTMLResponse)
+async def admin_prompts(request: Request):
+    from app.llm_prompts import list_prompts, seed_prompts
+    seed_prompts()
+    prompts = list_prompts()
+    return templates.TemplateResponse(request, "admin_prompts.html", {"prompts": prompts})
+
+
+@app.get("/ui/admin/prompts/{key}", response_class=HTMLResponse)
+async def admin_prompt_edit(key: str, request: Request):
+    from app.llm_prompts import DEFAULT_PROMPTS, list_prompts
+    if key not in DEFAULT_PROMPTS:
+        from fastapi import HTTPException
+        raise HTTPException(404)
+    prompts = list_prompts()
+    prompt = next((p for p in prompts if p["key"] == key), None)
+    return templates.TemplateResponse(request, "admin_prompt_edit.html", {"prompt": prompt})
+
+
+@app.post("/ui/admin/prompts/{key}")
+async def admin_prompt_save(key: str, request: Request):
+    from fastapi import HTTPException
+    from app.llm_prompts import DEFAULT_PROMPTS, save_prompt
+    if key not in DEFAULT_PROMPTS:
+        raise HTTPException(404)
+    form = await request.form()
+    body = (form.get("body") or "").strip()
+    if not body:
+        return HTMLResponse('<div class="flash flash-err">Prompt body cannot be empty.</div>')
+    save_prompt(key, body)
+    return HTMLResponse('<div class="flash flash-ok">Saved ✓ (applies within ~15s)</div>')
+
+
+@app.post("/ui/admin/prompts/{key}/reset")
+async def admin_prompt_reset(key: str, request: Request):
+    from fastapi import HTTPException
+    from app.llm_prompts import DEFAULT_PROMPTS, reset_prompt
+    if key not in DEFAULT_PROMPTS:
+        raise HTTPException(404)
+    reset_prompt(key)
+    return HTMLResponse('<div class="flash flash-ok">Reset to default ✓</div>')

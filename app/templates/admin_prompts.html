@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}LLM Prompts — AITrader{% endblock %}
+{% block content %}
+<h1>LLM System Prompts</h1>
+
+{% if prompts %}
+<div style="display: grid; gap: 12px;">
+  {% for p in prompts %}
+  <div class="card" style="margin: 0; padding: 16px;">
+    <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap;">
+      <div>
+        <div style="font-weight: 600;">{{ p.label }}</div>
+        <div class="text-muted" style="font-size: 12px; margin-top: 2px;">
+          <code>{{ p.key }}</code>
+          {% if p.is_custom %}
+          <span class="badge badge-live" style="margin-left: 6px;">custom</span>
+          {% else %}
+          <span class="badge badge-paper" style="margin-left: 6px;">default</span>
+          {% endif %}
+        </div>
+        {% if p.description %}
+        <div class="text-muted" style="font-size: 13px; margin-top: 6px;">{{ p.description }}</div>
+        {% endif %}
+      </div>
+      <a class="btn-action" href="/ui/admin/prompts/{{ p.key }}" style="text-decoration: none; flex-shrink: 0;">Edit</a>
+    </div>
+    <pre style="margin: 10px 0 0; padding: 10px; max-height: 120px; overflow: auto; font-size: 11px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; white-space: pre-wrap; word-break: break-word; color: var(--text-muted);">{{ p.body[:500] }}{% if p.body|length > 500 %}…{% endif %}</pre>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<p class="text-muted">No prompts found. Restart the app to seed defaults.</p>
+{% endif %}
+{% endblock %}

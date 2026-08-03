@@ -360,6 +360,7 @@
   {% set is_tg = path.startswith('/ui/admin/telegram') %}
   {% set is_admin_hub = path == '/ui/admin' %}
   {% set is_data = path.startswith('/ui/admin/data') %}
+  {% set is_prompts = path.startswith('/ui/admin/prompts') %}
   {% set is_admin = path.startswith('/ui/admin') and not is_data and not is_universe %}
   {% set is_trading = is_universe or is_cron %}
 
@@ -422,6 +423,10 @@
           <a href="/ui/admin/telegram" class="{% if is_tg %}active{% endif %}">
             <span class="mi-title">Telegram</span>
             <span class="mi-desc">Bot token · chat · test send</span>
+          </a>
+          <a href="/ui/admin/prompts" class="{% if is_prompts %}active{% endif %}">
+            <span class="mi-title">LLM Prompts</span>
+            <span class="mi-desc">Edit AI system prompts</span>
           </a>
           <a href="/ui/admin/cron" class="{% if is_cron %}active{% endif %}">
             <span class="mi-title">Cron jobs</span>
