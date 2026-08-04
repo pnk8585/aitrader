@@ -80,6 +80,37 @@ def _get_client():
     return OpenAI(api_key=api_key, base_url=base_url), model
 
 
+def _rules_key_for_strategy(strategy: str) -> str:
+    """Pick the DB/code prompt key for this strategy family."""
+    s = (strategy or "").lower()
+    if "high-risk" in s:
+        return "trade_review_rules_high_risk"
+    if "stock" in s:
+        return "trade_review_rules_stocks_momentum"
+    return "trade_review_rules_normal"
+
+
+def _price_context_from_signals(signals: dict) -> str:
+    """Fallback when asset_prices has no history (typical for US stocks)."""
+    if not signals:
+        return ""
+    lines = ["From scanner signals (no DB multi-horizon history):"]
+    mapping = (
+        ("daily_pct", "daily change"),
+        ("intraday_pct", "intraday change"),
+        ("strength", "strength"),
+        ("mult", "sizing mult"),
+    )
+    for key, label in mapping:
+        if key in signals and signals[key] is not None:
+            val = signals[key]
+            if isinstance(val, (int, float)) and key.endswith("pct"):
+                lines.append(f"  {label}: {float(val):+.2f}%")
+            else:
+                lines.append(f"  {label}: {val}")
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
 def _extract_json_object(text: str) -> str | None:
     """Pull a JSON object out of model text (bettips-ai predictor style).
 
@@ -123,13 +154,17 @@ def review_trade(
     """Call LLM to evaluate a trade candidate. Returns {verdict, reason, confidence}."""
     client, model = _get_client()
 
-    # ── Price context from DB ────────────────────────────────────────
+    # ── Price context from DB, else signals ──────────────────────────
     price_ctx = ""
     if db_conn:
         try:
             price_ctx = _build_price_context(db_conn, symbol, price)
         except Exception as e:
             price_ctx = f"(price context unavailable: {e})"
+    if not price_ctx or price_ctx.startswith("(no price") or price_ctx.startswith("(price context"):
+        fallback = _price_context_from_signals(signals)
+        if fallback:
+            price_ctx = fallback if not price_ctx else f"{price_ctx}\n{fallback}"
 
     # ── News context (parallel, 4s timeout) ───────────────────────────
     news_ctx = ""
@@ -163,12 +198,8 @@ def review_trade(
 
     sig_str = "\n".join(f"  {k}: {v}" for k, v in sorted(signals.items()))
 
-    # ── Rules: high-risk strategies get a stricter default-REJECT gate ───
-    rules_key = (
-        "trade_review_rules_high_risk"
-        if "high-risk" in strategy.lower()
-        else "trade_review_rules_normal"
-    )
+    # ── Rules by strategy family ───────────────────────────────────────
+    rules_key = _rules_key_for_strategy(strategy)
     rules_block = get_prompt(rules_key)
 
     system_prompt = get_prompt("trade_review_system").format(strategy=strategy)

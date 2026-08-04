@@ -20,16 +20,16 @@ DEFAULT_PROMPTS: dict[str, dict[str, str]] = {
         "description": "System prompt for the trade review LLM call (JSON-only, DeepSeek-friendly)",
         "body": (
             # Literal JSON braces doubled so str.format(strategy=...) is safe.
-            "You are a disciplined AI trade reviewer for a {strategy} crypto/stock strategy.\n"
-            "Decide APPROVE only when the setup has a real edge; otherwise REJECT.\n"
+            "You are a disciplined AI trade reviewer for a {strategy} strategy.\n"
+            "Match the strategy's edge: APPROVE setups that fit it, REJECT those that do not.\n"
             "Base the decision ONLY on the user message (signals, price context, news, "
             "portfolio, market strategy). Do NOT invent prices, news, or indicators.\n\n"
             "OUTPUT RULES:\n"
             "- Return ONLY a JSON object. No thinking, no explanation, no preamble, "
             "no markdown fences, no text before or after.\n"
             '- Schema: {{"verdict":"APPROVE"|"REJECT","reason":"max 25 words","confidence":1-10}}\n'
-            '- Correct: {{"verdict":"APPROVE","reason":"clean pullback in uptrend","confidence":7}}\n'
-            '- Correct: {{"verdict":"REJECT","reason":"chasing extended move","confidence":8}}\n'
+            '- Correct: {{"verdict":"APPROVE","reason":"extreme momentum still green intraday","confidence":7}}\n'
+            '- Correct: {{"verdict":"REJECT","reason":"momentum fading after extended move","confidence":8}}\n'
             "- Wrong: any prose outside the JSON object"
         ),
     },
@@ -64,13 +64,25 @@ No thinking. No markdown. No text outside the JSON object.""",
     },
     "trade_review_rules_normal": {
         "label": "Trade Review — Normal Rules",
-        "description": "Default evaluation rules for non-high-risk strategies",
-        "body": """Rules:
+        "description": "Default evaluation rules for crypto pullback/momentum (non-high-risk)",
+        "body": """Rules (crypto pullback / momentum):
 - Default to APPROVE when evidence is balanced; reject only for clear reasons.
 - If score is negative or very low (< 2): lean REJECT.
-- Reject only for clear reasons: extreme volatility, conflicting signals, tiny capital.
-- Use price context: reject if the coin already pumped +15% in 6h (chasing top).
-- Use the Market Strategy above to align with the macro view: if regime is bullish and pullback is aggressive, favor entries. If cautious/skip, be more selective.""",
+- Reject for clear reasons: extreme conflicting signals, broken thesis, or capital too small to place a valid order.
+- Crypto chase rule: REJECT only if already pumped hard on a SHORT horizon (≥15% in 6h) AND momentum is fading — not merely because daily % is large.
+- Use the Market Strategy above: bullish + aggressive pullback → favor entries; cautious/skip → more selective.""",
+    },
+    "trade_review_rules_stocks_momentum": {
+        "label": "Trade Review — Stocks Momentum Rules",
+        "description": "Rules for US stock momentum (alpaca stocks-momentum) — large daily % is the edge, not auto-reject",
+        "body": """Rules (STOCKS MOMENTUM — this strategy catches strong daily/intraday movers):
+- Large daily_pct is the ENTRY SIGNAL, not automatic REJECT. Do NOT reject only because the stock is up a lot today.
+- EXTREME_MOMENTUM or STRONG_MOMENTUM with still-positive intraday_pct → lean APPROVE (continuation / ride-the-wave).
+- APPROVE when strength is STRONG/EXTREME, intraday still green, and no clear fade or bad news.
+- REJECT when momentum is fading (e.g. big daily green but intraday flat/red = late chase), clear reversal news, or score very low (< 1.5).
+- Do NOT reject for "tiny capital" alone if available capital can still place a valid order.
+- Prefer short-hold mindset: early/continuing momentum OK; parabolic exhaustion + fade = REJECT.
+- When evidence is balanced on a valid momentum signal, default APPROVE.""",
     },
     "trade_review_rules_high_risk": {
         "label": "Trade Review — High-Risk Rules",
@@ -228,6 +240,28 @@ _LEGACY_DEFAULT_BODIES: dict[str, tuple[str, ...]] = {
     "trade_review_system": (
         "You are an AI trade reviewer for a {strategy} crypto/stock strategy. "
         "Reply with JSON only.",
+        # Intermediate DeepSeek default (pre stocks-momentum tuning)
+        (
+            "You are a disciplined AI trade reviewer for a {strategy} crypto/stock strategy.\n"
+            "Decide APPROVE only when the setup has a real edge; otherwise REJECT.\n"
+            "Base the decision ONLY on the user message (signals, price context, news, "
+            "portfolio, market strategy). Do NOT invent prices, news, or indicators.\n\n"
+            "OUTPUT RULES:\n"
+            "- Return ONLY a JSON object. No thinking, no explanation, no preamble, "
+            "no markdown fences, no text before or after.\n"
+            '- Schema: {{"verdict":"APPROVE"|"REJECT","reason":"max 25 words","confidence":1-10}}\n'
+            '- Correct: {{"verdict":"APPROVE","reason":"clean pullback in uptrend","confidence":7}}\n'
+            '- Correct: {{"verdict":"REJECT","reason":"chasing extended move","confidence":8}}\n'
+            "- Wrong: any prose outside the JSON object"
+        ),
+    ),
+    "trade_review_rules_normal": (
+        """Rules:
+- Default to APPROVE when evidence is balanced; reject only for clear reasons.
+- If score is negative or very low (< 2): lean REJECT.
+- Reject only for clear reasons: extreme volatility, conflicting signals, tiny capital.
+- Use price context: reject if the coin already pumped +15% in 6h (chasing top).
+- Use the Market Strategy above to align with the macro view: if regime is bullish and pullback is aggressive, favor entries. If cautious/skip, be more selective.""",
     ),
     "trade_review_user": (
         """You are an AI trade reviewer for a {strategy} crypto strategy.
@@ -383,7 +417,7 @@ if __name__ == "__main__":
     assert get_prompt("trade_review_system") == default
 
     prompts = list_prompts()
-    assert len(prompts) == 6, f"expected 6 prompts, got {len(prompts)}"
+    assert len(prompts) == 7, f"expected 7 prompts, got {len(prompts)}"
     for p in prompts:
         assert p["body"], f"{p['key']} has empty body"
 

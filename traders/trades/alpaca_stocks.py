@@ -507,6 +507,7 @@ def run_cycle():
                         portfolio_euro=equity * 0.92,  # EUR approx
                         available_euro=order_size_usd * 0.92,
                         open_positions=len(positions),
+                        db_conn=db_conn,
                     )
                 except Exception as e:
                     print(f"LLM review failed: {e} — buying directly", file=sys.stderr)
