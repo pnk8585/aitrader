@@ -302,7 +302,10 @@ def main():
         log.append(f"Kraken balance error: {e}")
 
     if not positions:
-        print(f"{now_str} | 0 positions — silent")
+        # Empty stdout = silent Telegram (cron_orchestrator only notifies on summary).
+        # Print only errors if any — never a "silent" heartbeat line.
+        for line in log:
+            print(line)
         db.close()
         return
 

@@ -70,6 +70,16 @@ bash scripts/init_state_dir.sh
 # Deploy: GitLab CI (do not manual-deploy from agents)
 ```
 
+### Deploy flow (gitlab remote)
+
+- **Push στο `gitlab` remote** (`gitlab.pkatopodis.me/aiagents/aitrader`) — είναι το
+  πραγματικό CI/CD. Το `origin` (GitHub) είναι mirror **χωρίς CI/CD** — μην κάνεις
+  deploy από εκεί (check πάντα `git remote -v`).
+- `git push gitlab main` → pipeline ~5 λεπτά → deploy στο homeserver.
+- **Verify**: `docker inspect aitrader --format '{{.Created}}'` (νέο timestamp) +
+  startup log `"llm_prompts: seeded"`.
+- `GITLAB_TOKEN` διαθέσιμο στο hermes env.
+
 **State volume** `/home/pank/docker-data/aitrader` → `/state`:
 - logs: `scheduler.log`, `cron.log`, `jobs/<name>.log`, `llm.jsonl` (structured LLM audit), locks
 - `.env`, gates under `ai_overseer/`
