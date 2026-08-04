@@ -17,6 +17,7 @@ from pathlib import Path
 
 from app.notify import send_telegram
 from app.logging_setup import append_job_log, setup_logging
+from app.market_schedule import alpaca_market_status, deferred_next_run
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -250,6 +251,18 @@ def _finish_run(db, run_id: int, name: str, status: str, summary: str,
     return {"name": name, "status": status, "summary": summary, "duration_ms": duration_ms}
 
 
+def _defer_job(db, name: str, next_run_at: datetime, reason: str) -> dict:
+    """Move a conditionally-scheduled job forward without creating a run."""
+    with db.cursor() as cur:
+        cur.execute(
+            "UPDATE cron_jobs SET next_run_at=%s, updated_at=%s WHERE name=%s",
+            (next_run_at, _now(), name),
+        )
+    db.commit()
+    log.info("job=%s deferred until=%s reason=%s", name, next_run_at.isoformat(), reason)
+    return {"name": name, "status": "skipped", "summary": reason, "duration_ms": 0}
+
+
 # ── tick ──────────────────────────────────────────────────────
 
 def tick(db) -> dict:
@@ -268,6 +281,12 @@ def tick(db) -> dict:
 
     for name in jobs:
         try:
+            if name == "alpaca-stocks":
+                market_open, next_open, reason = alpaca_market_status()
+                if not market_open:
+                    interval = JOB_REGISTRY[name][1]
+                    res = _defer_job(db, name, deferred_next_run(next_open, interval), reason)
+                    continue
             res = run_job(db, name)
             if res.get("status") != "skipped":
                 ran.append(name)
