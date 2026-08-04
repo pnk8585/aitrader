@@ -80,6 +80,34 @@ def _get_client():
     return OpenAI(api_key=api_key, base_url=base_url), model
 
 
+def _extract_json_object(text: str) -> str | None:
+    """Pull a JSON object out of model text (bettips-ai predictor style).
+
+    Handles empty content, markdown fences, preamble, and trailing junk.
+    Returns the raw object substring or None if nothing looks like JSON.
+    """
+    if not text or not str(text).strip():
+        return None
+    content = str(text).strip()
+    # Fenced ```json ... ``` (non-greedy body)
+    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", content, re.DOTALL | re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    # Any object span (greedy — last closing brace wins for trailing notes)
+    m = re.search(r"(\{.*\})", content, re.DOTALL)
+    if m:
+        return m.group(1).strip()
+    return None
+
+
+def _message_text(msg) -> str:
+    """content first, then reasoning_content (GLM/DeepSeek via LiteLLM)."""
+    raw = (getattr(msg, "content", None) or "").strip()
+    if raw:
+        return raw
+    return (getattr(msg, "reasoning_content", None) or "").strip()
+
+
 def review_trade(
     symbol: str,
     strategy: str,
@@ -168,41 +196,46 @@ def review_trade(
                 {"role": "user", "content": prompt},
             ],
             temperature=0.2,
-            max_tokens=300,
+            # 300 was too tight when models leak a short preamble before JSON
+            max_tokens=600,
             timeout=timeout,
         )
         latency_ms = (time.monotonic() - t0) * 1000
-        # DeepSeek/GLM upstreams via LiteLLM return empty `content` when
-        # response_format=json_object is set (and some put the answer in
-        # reasoning_content). Mirror bettips-ai predictor.py: no
-        # response_format, fall back to reasoning_content, robust brace search.
+        # DeepSeek/GLM via LiteLLM: never use response_format=json_object (empty
+        # content). Mirror bettips-ai predictor.py — content → reasoning_content,
+        # then regex-extract the JSON object.
         msg = resp.choices[0].message
-        raw_full = (msg.content or "").strip()
-        if not raw_full:
-            raw_full = (getattr(msg, "reasoning_content", "") or "").strip()
-        raw = raw_full
-        # Strip markdown fences and leading/trailing noise
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[-1]
-            if raw.endswith("```"):
-                raw = raw[:-3]
-        raw = raw.strip()
-        # Some models prepend newlines — find the first '{'
-        brace = raw.find("{")
-        if brace > 0:
-            raw = raw[brace:]
-        elif brace < 0:
-            # No JSON found — empty or text-only response
-            raw = '{"verdict": "REJECT", "reason": "LLM returned text, defaulting", "confidence": 5}'
+        raw_full = _message_text(msg)
+        extracted = _extract_json_object(raw_full)
+        if extracted is None:
+            print(f"LLM returned text (no JSON): {raw_full[:200]!r}", file=sys.stderr)
+            result = {
+                "verdict": "REJECT",
+                "reason": "LLM returned text, defaulting",
+                "confidence": 5,
+            }
+        else:
+            try:
+                result = json.loads(extracted)
+            except json.JSONDecodeError:
+                print(f"LLM returned non-JSON: {extracted[:200]}", file=sys.stderr)
+                result = {
+                    "verdict": "REJECT",
+                    "reason": f"LLM parse error: {extracted[:80]}",
+                    "confidence": 5,
+                }
+        # Normalize verdict casing from sloppy models
+        verdict = str(result.get("verdict", "REJECT")).strip().upper()
+        if verdict not in ("APPROVE", "REJECT"):
+            verdict = "REJECT"
         try:
-            result = json.loads(raw)
-        except json.JSONDecodeError:
-            print(f"LLM returned non-JSON: {raw[:200]}", file=sys.stderr)
-            result = {"verdict": "REJECT", "reason": f"LLM parse error: {raw[:80]}", "confidence": 5}
+            conf = int(result.get("confidence", 5))
+        except (TypeError, ValueError):
+            conf = 5
         final = {
-            "verdict": result.get("verdict", "REJECT"),
-            "reason": result.get("reason", "No reason given"),
-            "confidence": int(result.get("confidence", 5)),
+            "verdict": verdict,
+            "reason": str(result.get("reason", "No reason given"))[:200],
+            "confidence": max(1, min(10, conf)),
         }
         _log_llm_jsonl(
             kind="trade_review",

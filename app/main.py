@@ -49,7 +49,7 @@ async def _startup():
     try:
         from app.llm_prompts import seed_prompts
         n = seed_prompts()
-        print(f"[startup] llm_prompts: seeded {n} missing defaults")
+        print(f"[startup] llm_prompts: seeded/upgraded {n} defaults")
     except Exception as e:
         print(f"[startup] llm_prompts: {e}")
 

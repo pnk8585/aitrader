@@ -77,7 +77,11 @@ bash scripts/init_state_dir.sh
   deploy από εκεί (check πάντα `git remote -v`).
 - `git push gitlab main` → pipeline ~5 λεπτά → deploy στο homeserver.
 - **Verify**: `docker inspect aitrader --format '{{.Created}}'` (νέο timestamp) +
-  startup log `"llm_prompts: seeded"`.
+  startup log `"llm_prompts: seeded/upgraded N defaults"`.
+- `llm_prompts` source of truth = `DEFAULT_PROMPTS` in `app/llm_prompts.py`.
+  Startup `seed_prompts()` inserts missing keys and upgrades known legacy weak
+  defaults (JSON-only one-liners) → DeepSeek-style OUTPUT RULES. Does **not**
+  overwrite admin customizations. Force full reset: `resync_prompts()`.
 - `GITLAB_TOKEN` διαθέσιμο στο hermes env.
 
 **State volume** `/home/pank/docker-data/aitrader` → `/state`:

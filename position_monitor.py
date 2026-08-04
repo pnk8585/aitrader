@@ -19,6 +19,7 @@ from openai import OpenAI
 from app.llm_prompts import get_prompt
 from traders.common.exchange import market_sell
 from traders.common.gates import check_and_set_btc_pause
+from traders.common.llm_review import _extract_json_object, _message_text
 from traders.common.pnl_notify import format_sell_pnl
 
 # ── Env ─────────────────────────────────────────────────────────────
@@ -99,31 +100,32 @@ def _llm_decide(position: dict, price_ctx: str) -> dict:
                 {"role": "user", "content": prompt},
             ],
             temperature=0.2,
-            max_tokens=200,
+            max_tokens=400,
             timeout=15,
         )
         latency_ms = (time.monotonic() - t0) * 1000
-        # Same DeepSeek response_format fix as llm_review.py — see there.
+        # Same DeepSeek/JSON extract path as llm_review.py (bettips-ai style).
         msg = resp.choices[0].message
-        raw_full = (msg.content or "").strip()
-        if not raw_full:
-            raw_full = (getattr(msg, "reasoning_content", "") or "").strip()
-        raw = raw_full
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[-1]
-            if raw.endswith("```"):
-                raw = raw[:-3]
-        raw = raw.strip()
-        brace = raw.find("{")
-        if brace > 0:
-            raw = raw[brace:]
-        elif brace < 0:
-            raw = '{"action": "HOLD", "reason": "LLM returned text", "confidence": 5}'
-        result = json.loads(raw)
+        raw_full = _message_text(msg)
+        extracted = _extract_json_object(raw_full)
+        if extracted is None:
+            result = {"action": "HOLD", "reason": "LLM returned text", "confidence": 5}
+        else:
+            try:
+                result = json.loads(extracted)
+            except json.JSONDecodeError:
+                result = {"action": "HOLD", "reason": f"LLM parse error: {extracted[:80]}", "confidence": 5}
+        action = str(result.get("action", "HOLD")).strip().upper()
+        if action not in ("SELL", "HOLD"):
+            action = "HOLD"
+        try:
+            conf = int(result.get("confidence", 5))
+        except (TypeError, ValueError):
+            conf = 5
         final = {
-            "action": result.get("action", "HOLD"),
-            "reason": result.get("reason", ""),
-            "confidence": int(result.get("confidence", 5)),
+            "action": action,
+            "reason": str(result.get("reason", ""))[:200],
+            "confidence": max(1, min(10, conf)),
         }
         _log_position_llm(
             model=model,
