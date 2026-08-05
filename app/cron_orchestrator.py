@@ -34,6 +34,7 @@ JOB_REGISTRY: dict[str, tuple[str, int, str]] = {
     "alpaca-stocks":      ("traders/trades/alpaca_stocks.py",           300,  "paper"),
     "end-of-day-review":  ("traders/eod_review.py",                    86400, "live"),
     "health-check":       ("scripts/health_check.py",                 86400, "live"),
+    "hourly-report":      ("scripts/hourly_report.py",                3600,  "live"),
     "db-cleanup":         ("scripts/db_cleanup.py",                   86400, "live"),
     "weekly-rethink":     ("traders/weekly_rethink.py",           7 * 86400, "live"),
 }
@@ -43,7 +44,7 @@ _RUNNING_STALE = timedelta(hours=3)
 # Jobs that only notify on real trade signals (not every run)
 _TRADE_SIGNAL_JOBS = frozenset({
     "kraken-pullback", "kraken-momentum", "kraken-grid", "kraken-high-risk",
-    "alpaca-stocks", "position-monitor",
+    "alpaca-stocks", "position-monitor", "hourly-report",
 })
 _TRADE_SIGNAL_KEYWORDS = ("BUY", "SELL", "🛒", "🔄", "entry", "exit",
                            "trade placed", "order filled", "bought", "sold",
