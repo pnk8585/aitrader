@@ -33,6 +33,7 @@ JOB_REGISTRY: dict[str, tuple[str, int, str]] = {
     "position-monitor":   ("position_monitor.py",                       7200, "live"),
     "alpaca-stocks":      ("traders/trades/alpaca_stocks.py",           300,  "paper"),
     "end-of-day-review":  ("traders/eod_review.py",                    86400, "live"),
+    "health-check":       ("scripts/health_check.py",                 86400, "live"),
     "db-cleanup":         ("scripts/db_cleanup.py",                   86400, "live"),
     "weekly-rethink":     ("traders/weekly_rethink.py",           7 * 86400, "live"),
 }
@@ -68,6 +69,7 @@ def _next_athens_hour(hour: int = 5) -> datetime:
 # Jobs that should fire at a fixed Athens hour (not pure interval-from-now)
 _FIXED_ATHENS_HOUR: dict[str, int] = {
     "db-cleanup": 5,  # 05:00 Athens daily
+    "health-check": 21,  # 21:00 Athens — after end-of-day-review (20:00)
 }
 
 # Jobs that should fire on a fixed Athens weekday (1=Mon..7=Sun) + hour
