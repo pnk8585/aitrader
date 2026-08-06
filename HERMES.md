@@ -56,6 +56,10 @@ Docker: start.py
 - **Job mode (live/paper) = DB-driven**: `SELECT name, mode FROM cron_jobs` — πάντα check από το container (`docker exec aitrader python -m app.cron_orchestrator list`), ΟΧΙ registry defaults/docs. Τα defaults στον κώδικα (π.χ. momentum/grid paper) ΔΕΝ ισχύουν αν το DB λέει αλλιώς — το DB υπερισχύει.
 - **LLM model**: `hermes-flash` via LiteLLM (`host.docker.internal:4000` from container).
 - **Container**: Admin UI **and** scheduler inside Docker. Deploy via CI/CD only.
+- **Container AUTONOMOUS (2026-08-06):** 11 jobs — incl `health-check` (24h, 21:00
+  Athens) + `hourly-report` (3600s, silent unless trade signals). Host Hermes crons:
+  **μόνο** `Crypto News Analyst` (LLM). **ΠΟΤΕ μην τσεκάρεις host crons** — query το
+  container DB (`cron_runs`/`cron_jobs`) ή `docker exec aitrader python -m app.cron_orchestrator list`.
 - **Trade notifications**: Only BUY/SELL events → Telegram. No HOLD/SKIP spam.
 - **CI**: `dockerhub.pkatopodis.me` — image + homeserver compose pull/up.
 - **DB driver**: `psycopg2` must use `autocommit=True`. Without it, `InFailedSqlTransaction` cascades after the first error — `except` + `rollback()` alone is NOT enough.
@@ -77,6 +81,9 @@ bash scripts/init_state_dir.sh
 - **Push στο `gitlab` remote** (`gitlab.pkatopodis.me/aiagents/aitrader`) — είναι το
   πραγματικό CI/CD. Το `origin` (GitHub) είναι mirror **χωρίς CI/CD** — μην κάνεις
   deploy από εκεί (check πάντα `git remote -v`).
+- **Pank rule (2026-08):** όταν ζητηθεί push, κάνε σε **και τα δύο remotes** —
+  `git push gitlab main` + `git push origin main` (GitHub mirror δεν έχει CI/CD,
+  αλλά ο pank θέλει πάντα συγχρονισμένο).
 - `git push gitlab main` → pipeline ~5 λεπτά → deploy στο homeserver.
 - **Verify**: `docker inspect aitrader --format '{{.Created}}'` (νέο timestamp) +
   startup log `"llm_prompts: seeded/upgraded N defaults"`.

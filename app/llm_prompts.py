@@ -27,9 +27,10 @@ DEFAULT_PROMPTS: dict[str, dict[str, str]] = {
             "OUTPUT RULES:\n"
             "- Return ONLY a JSON object. No thinking, no explanation, no preamble, "
             "no markdown fences, no text before or after.\n"
-            '- Schema: {{"verdict":"APPROVE"|"REJECT","reason":"max 25 words","confidence":1-10}}\n'
+            '- Schema: {{"verdict":"APPROVE"|"REJECT"|"ROTATE","reason":"max 25 words","confidence":1-10,"sell_symbol":"SYM"}}\n'
             '- Correct: {{"verdict":"APPROVE","reason":"extreme momentum still green intraday","confidence":7}}\n'
             '- Correct: {{"verdict":"REJECT","reason":"momentum fading after extended move","confidence":8}}\n'
+            '- Correct: {{"verdict":"ROTATE","reason":"new setup stronger than stale ADA","confidence":7,"sell_symbol":"ADA/EUR"}}\n'
             "- Wrong: any prose outside the JSON object"
         ),
     },
@@ -48,6 +49,8 @@ DEFAULT_PROMPTS: dict[str, dict[str, str]] = {
 SIGNALS:
 {sig_str}
 
+{positions_ctx}
+
 PRICE CONTEXT:
 {price_ctx}
 
@@ -59,7 +62,13 @@ NEWS:
 
 Evaluate this candidate.
 Return ONLY valid JSON matching:
-{{"verdict": "APPROVE"|"REJECT", "reason": "max 25 words", "confidence": 1-10}}
+{{"verdict": "APPROVE"|"REJECT"|"ROTATE", "reason": "max 25 words", "confidence": 1-10, "sell_symbol": "SYM"}}
+- APPROVE: buy now.
+- REJECT: do not buy.
+- ROTATE: buy this AND sell ONE existing open position first (name it in sell_symbol) because the new opportunity is clearly better than holding it.
+- Only use ROTATE when available EUR is insufficient to buy (or position cap is reached) and one of the listed open positions is clearly weaker than this candidate.
+- NEVER ROTATE out of a strongly profitable position (unrealized >= +5%). A winner with positive momentum is more valuable than a new entry; prefer holding it.
+- sell_symbol must be exactly one symbol from the OPEN POSITIONS list, or empty string if not rotating.
 No thinking. No markdown. No text outside the JSON object.""",
     },
     "trade_review_rules_normal": {

@@ -150,8 +150,9 @@ def review_trade(
     open_positions: int = 0,
     timeout: int = 15,
     db_conn=None,  # optional — for price history enrichment
+    positions_held: list | None = None,  # optional — [{symbol, unrealized_plpc, age_hours}] for rotation decisions
 ) -> dict:
-    """Call LLM to evaluate a trade candidate. Returns {verdict, reason, confidence}."""
+    """Call LLM to evaluate a trade candidate. Returns {verdict, reason, confidence, sell_symbol}."""
     client, model = _get_client()
 
     # ── Price context from DB, else signals ──────────────────────────
@@ -198,6 +199,26 @@ def review_trade(
 
     sig_str = "\n".join(f"  {k}: {v}" for k, v in sorted(signals.items()))
 
+    # ── Held positions context (rotation decisions) ───────────────────
+    positions_ctx = ""
+    if positions_held:
+        try:
+            lines = []
+            for p in positions_held:
+                lines.append(
+                    f"  - {p.get('symbol', '?')}: "
+                    f"unrealized {p.get('unrealized_plpc', 0):+.2f}%, "
+                    f"age {p.get('age_hours', 0):.1f}h"
+                )
+            if lines:
+                positions_ctx = (
+                    "OPEN POSITIONS (candidate for rotation — if this buy is strong "
+                    "enough, you may name ONE symbol from this list to SELL first):\n"
+                    + "\n".join(lines)
+                )
+        except Exception:
+            positions_ctx = ""
+
     # ── Rules by strategy family ───────────────────────────────────────
     rules_key = _rules_key_for_strategy(strategy)
     rules_block = get_prompt(rules_key)
@@ -211,6 +232,7 @@ def review_trade(
         portfolio_euro=portfolio_euro,
         available_euro=available_euro,
         open_positions=open_positions,
+        positions_ctx=positions_ctx,
         sig_str=sig_str,
         price_ctx=price_ctx,
         news_ctx=news_ctx,
@@ -257,16 +279,18 @@ def review_trade(
                 }
         # Normalize verdict casing from sloppy models
         verdict = str(result.get("verdict", "REJECT")).strip().upper()
-        if verdict not in ("APPROVE", "REJECT"):
+        if verdict not in ("APPROVE", "REJECT", "ROTATE"):
             verdict = "REJECT"
         try:
             conf = int(result.get("confidence", 5))
         except (TypeError, ValueError):
             conf = 5
+        raw_sell = result.get("sell_symbol")
         final = {
             "verdict": verdict,
             "reason": str(result.get("reason", "No reason given"))[:200],
             "confidence": max(1, min(10, conf)),
+            "sell_symbol": str(raw_sell).strip().upper() if raw_sell else None,
         }
         _log_llm_jsonl(
             kind="trade_review",
@@ -286,6 +310,7 @@ def review_trade(
                 "portfolio_euro": portfolio_euro,
                 "available_euro": available_euro,
                 "open_positions": open_positions,
+                "positions_held": positions_held,
             },
         )
         _log_review(symbol, strategy, price, score, signals,
@@ -294,7 +319,7 @@ def review_trade(
         return final
     except Exception as e:
         latency_ms = (time.monotonic() - t0) * 1000
-        final = {"verdict": "REJECT", "reason": f"LLM error: {str(e)[:80]}", "confidence": 5}
+        final = {"verdict": "REJECT", "reason": f"LLM error: {str(e)[:80]}", "confidence": 5, "sell_symbol": None}
         _log_llm_jsonl(
             kind="trade_review",
             model=model,
@@ -324,7 +349,7 @@ def _notify_verdict(verdict: dict, symbol: str, strategy: str, price: float) -> 
     try:
         v = verdict.get("verdict", "?")
         conf = verdict.get("confidence", "?")
-        emoji = "✅" if v == "APPROVE" else "❌" if v == "REJECT" else "⚠️"
+        emoji = "✅" if v == "APPROVE" else "❌" if v == "REJECT" else "🔄" if v == "ROTATE" else "⚠️"
         msg = f"{emoji} {v}: {symbol} ({strategy}) @ €{price:.4f} conf={conf}"
         send_telegram(msg)
     except Exception:

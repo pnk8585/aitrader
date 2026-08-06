@@ -603,13 +603,10 @@ def run_cycle():
     effective_max_momentum = MAX_OPEN_MOMENTUM
     if _aggressive_mode:
         effective_max_momentum += 1
+    # Hard caps that still block entry (no rotation can save these):
     skip, skip_reason = False, ""
     if not skip and len(all_positions) >= MAX_TOTAL_OPEN:
         skip, skip_reason = True, f"Global open-position cap reached ({MAX_TOTAL_OPEN})."
-    elif not skip and len(my_positions) >= effective_max_momentum and not can_rotate:
-        skip, skip_reason = True, f"Momentum position cap reached ({effective_max_momentum})."
-    elif not skip and cash_eur < MIN_TRADE_EUR and not can_rotate:
-        skip, skip_reason = True, "No buying power."
     elif not skip and trades_today(db_conn, exchange_name=EXCHANGE_NAME) >= MAX_TRADES_PER_DAY:
         skip, skip_reason = True, f"Daily trade cap reached ({MAX_TRADES_PER_DAY})."
     else:
@@ -620,6 +617,18 @@ def run_cycle():
                 should_notify = True
                 msg_lines.append(f"🚨 **Kraken momentum daily loss breaker**: {round(rpnl,2)}% "
                                  f"today — entries halted until 00:00 UTC.")
+
+    # Soft caps: cash / momentum-cap can be overcome by rotation. If we are at
+    # a soft cap we still scan; the LLM decides whether a ROTATE (sell-to-buy)
+    # is justified. We only hard-skip when there is no stale candidate to rotate.
+    soft_capped = False
+    if len(my_positions) >= effective_max_momentum:
+        soft_capped = True
+    elif cash_eur < MIN_TRADE_EUR:
+        soft_capped = True
+    if soft_capped and not can_rotate:
+        # No rotation candidate available → nothing to do this tick.
+        skip, skip_reason = True, "No buying power and no stale position to rotate."
 
     if skip:
         report["action_taken"] = "SKIP"
@@ -706,6 +715,7 @@ def run_cycle():
     # AI PER-TRADE REVIEW — synchronous LLM call, no Overseer needed
     # (skipped in aggressive mode — buy directly)
     # ---------------------------------------------------------------
+    result = None
     if _aggressive_mode:
         execute_approved = True
     else:
@@ -718,6 +728,26 @@ def run_cycle():
             "mult": best.get("mult", 1.0),
             "score": round(best.get("score", 0) or 0, 3),
         }
+        # Held positions context — lets the LLM decide which one to rotate.
+        _held = []
+        try:
+            for p in my_positions:
+                ss = new_state.get(p["symbol"], {})
+                entry = ss.get("entry_price") or 0.0
+                cur = p.get("current_price") or 0.0
+                upl = ((cur - entry) / entry * 100.0) if entry else 0.0
+                age_h = 0.0
+                et = ss.get("entry_time")
+                if et:
+                    try:
+                        age_h = (datetime.now(timezone.utc) - datetime.fromisoformat(
+                            et.replace('Z', '+00:00'))).total_seconds() / 3600.0
+                    except Exception:
+                        age_h = 0.0
+                _held.append({"symbol": p["symbol"], "unrealized_plpc": round(upl, 2),
+                              "age_hours": round(age_h, 1)})
+        except Exception:
+            _held = []
         try:
             result = review_trade(
                 symbol=symbol,
@@ -729,12 +759,13 @@ def run_cycle():
                 available_euro=cash_eur,
                 open_positions=len(all_positions),
                 db_conn=db_conn,
+                positions_held=_held,
             )
         except Exception as e:
             print(f"LLM review failed: {e} — buying directly", file=sys.stderr)
             result = {"verdict": "REJECT", "reason": f"LLM unavailable: {e}", "confidence": 0}
 
-        if result["verdict"] == "APPROVE":
+        if result["verdict"] in ("APPROVE", "ROTATE"):
             execute_approved = True
             should_notify = True
             msg_lines.append(
@@ -747,27 +778,61 @@ def run_cycle():
             should_notify = True
             finalize()
             return
-        # Safety net: only skip when nothing was approved. Without this guard an
-        # APPROVE verdict (execute_approved=True) fell through to an unconditional
-        # SKIP, killing every non-aggressive momentum trade. Mirrors pullback flow.
-        if not execute_approved:
-            report["action_taken"] = "SKIP"
-            report["details"] = "No approved trade to execute (safety guard)."
-            finalize()
-            return
 
     # If we are out of cash / at the momentum cap but flagged a stale position,
     # only rotate when the fresh signal is clearly stronger than a plain entry.
-    need_rotation = (cash_eur < MIN_TRADE_EUR or len(my_positions) >= MAX_OPEN_MOMENTUM)
+    need_rotation = (cash_eur < MIN_TRADE_EUR or len(my_positions) >= effective_max_momentum)
+    # LLM-directed rotation: verdict ROTATE names exactly which position to sell.
+    llm_rotate_symbol = None
+    if result is not None and not _aggressive_mode and result.get("verdict") == "ROTATE":
+        if not need_rotation:
+            # LLM said ROTATE but there is no rotation pressure — treat as plain
+            # APPROVE (buy with existing cash). No misleading rotation message.
+            result["verdict"] = "APPROVE"
+        else:
+            cand = result.get("sell_symbol") or ""
+            for p in my_positions:
+                if p["symbol"].upper() == cand.upper() or p["symbol"] == cand:
+                    llm_rotate_symbol = p["symbol"]
+                    break
+            if llm_rotate_symbol is None:
+                # LLM named something we don't hold — fall back to stale rotation logic
+                msg_lines.append(f"⚠️ LLM ROTATE χωρίς έγκυρο sell_symbol ({cand!r}) — stale rotation fallback.")
     if need_rotation:
         strong_enough = ((best["daily"] is not None and best["daily"] >= ROT_DAILY_PCT)
                          or (best["hourly"] is not None and best["hourly"] >= ROT_HOURLY_PCT))
-        if not (can_rotate and strong_enough):
+        rotate_ok = False
+        if llm_rotate_symbol:
+            # LLM explicitly wants to sell a named position — respect it.
+            for p in my_positions:
+                if p["symbol"] == llm_rotate_symbol:
+                    ss = new_state.get(p["symbol"], {})
+                    stale = {"symbol": p["symbol"], "qty": p["qty"],
+                             "entry_price": ss.get("entry_price") or 0.0,
+                             "current_price": p.get("current_price") or 0.0,
+                             "unrealized_plpc": 0.0, "age_hours": 0.0}
+                    rotate_ok = True
+                    break
+        elif can_rotate and strong_enough:
+            rotate_ok = True
+        if not rotate_ok:
             report["action_taken"] = "SKIP"
-            report["details"] = ("No free capital/slot and best new signal not strong "
-                                 "enough to rotate a stale position.")
+            report["details"] = ("No free capital/slot and no rotation justified "
+                                 "(LLM chose not to rotate).")
             finalize()
             return
+        # If LLM named a position but we didn't set `stale`, build it now.
+        if llm_rotate_symbol and stale is None:
+            for p in my_positions:
+                if p["symbol"] == llm_rotate_symbol:
+                    ss = new_state.get(p["symbol"], {})
+                    entry = ss.get("entry_price") or 0.0
+                    cur = p.get("current_price") or 0.0
+                    stale = {"symbol": p["symbol"], "qty": p["qty"],
+                             "entry_price": entry, "current_price": cur,
+                             "unrealized_plpc": ((cur - entry) / entry * 100.0) if entry else 0.0,
+                             "age_hours": 0.0}
+                    break
         # Sell the stale position first to free capital/slot.
         try:
             fqty = sellable_qty(stale["symbol"], stale["qty"])
