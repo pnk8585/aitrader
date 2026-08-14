@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 from db_prices import get_connection, close_connection, base_symbol, insert_prices, log_trade as db_log_trade
 from traders.common.config import ensure_log_dir
 from traders.strategies.grid import config as GC
-from traders.strategies.grid.engine import create_grid, load_grid, save_grid, run_cycle
+from traders.strategies.grid.engine import create_grid, load_grid, save_grid, run_cycle as engine_run_cycle
 from traders.strategies.regime.router import should_enter
 
 ensure_log_dir()
@@ -130,7 +130,7 @@ def run_cycle():
             continue
 
         active_grids += 1
-        grid, report = run_cycle(db_conn, exchange, pair, grid, IS_PAPER)
+        grid, report = engine_run_cycle(db_conn, exchange, pair, grid, IS_PAPER)
         save_grid(db_conn, grid, EXCHANGE_NAME)
 
         for action in report:
