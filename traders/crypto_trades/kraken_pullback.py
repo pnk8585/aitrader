@@ -545,7 +545,7 @@ def run_cycle():
     symbol = best["symbol"]
     current_price = best["price"]
 
-    # Regime detection — compute and log, no entry gating yet (USE_REGIME_ROUTING=False)
+    # Regime is already refreshed (staleness-aware) inside should_enter; log the winner's regime for the report.
     regime = detect_regime(db_conn, base_symbol(symbol))
     report["regime"] = regime
 
