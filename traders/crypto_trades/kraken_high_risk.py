@@ -844,9 +844,9 @@ def run_cycle():
     if MO.USE_KELLY_SIZING and not small_account:
         try:
             stop_price = current_price * (1 + MO.STOP_LOSS_PCT / 100)  # STOP_LOSS_PCT is negative
-            kelly_qty = kelly_position_size(db_conn, EXCHANGE_NAME, current_price, stop_price, cash_eur)
+            kelly_qty = kelly_position_size(db_conn, EXCHANGE_NAME, current_price, stop_price, cash_eur, fraction=0.50)
             if kelly_qty > 0:
-                order_size_eur = kelly_qty * current_price
+                order_size_eur = kelly_qty
         except Exception:
             pass  # fallback to existing sizing
 
