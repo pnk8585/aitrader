@@ -281,7 +281,7 @@ def tick(db) -> dict:
 
     with db.cursor() as cur:
         cur.execute(
-            "SELECT name FROM cron_jobs WHERE enabled = TRUE AND next_run_at <= %s",
+            "SELECT name FROM cron_jobs WHERE enabled = TRUE AND mode != 'paused' AND next_run_at <= %s",
             (now,),
         )
         jobs = [row[0] for row in cur.fetchall()]

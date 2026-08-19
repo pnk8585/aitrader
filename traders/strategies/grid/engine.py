@@ -8,6 +8,27 @@ import psycopg2.extras
 from traders.strategies.grid import config as GC
 
 
+def _wallet_qty(wallet_balance, base):
+    """Return (total, free) of the base asset from a ccxt balance dict.
+
+    Returns (None, None) when wallet_balance is falsy (fetch failed) so callers
+    can skip reconciliation for the cycle. Handles ccxt None values defensively.
+    """
+    if not wallet_balance:
+        return None, None
+    entry = wallet_balance.get(base) or {}
+    total, free = entry.get("total"), entry.get("free")
+    try:
+        total = float(total) if total is not None else 0.0
+    except (TypeError, ValueError):
+        total = 0.0
+    try:
+        free = float(free) if free is not None else 0.0
+    except (TypeError, ValueError):
+        free = 0.0
+    return total, free
+
+
 # ── paper-mode limit order helpers ──────────────────────────────
 
 def _paper_limit(side, symbol, qty, price):
@@ -371,9 +392,10 @@ def run_cycle(conn, exchange, pair, grid, is_paper):
             sell_price = buy_price * (1 + grid.get("spread_pct", GC.MIN_GRID_SPREAD_PCT) / 100.0)
             if current_price >= sell_price * 0.995:
                 base = pair.split("/")[0]
-                free_qty = float(((wallet_balance or {}).get(base) or {}).get("free") or 0) if wallet_balance else float(buy_qty)
+                total_qty, free_qty = _wallet_qty(wallet_balance, base)
 
-                if not is_paper and free_qty <= 0:
+                if not is_paper and total_qty is not None and total_qty <= 0:
+                    # Phantom level — wallet truly holds no coins anywhere → reset.
                     level["status"] = "idle"
                     level["buy_price"] = None
                     level["sell_price"] = None
@@ -383,22 +405,14 @@ def run_cycle(conn, exchange, pair, grid, is_paper):
                     report.append(f"🧹 Phantom level reset {pair}: wallet holds no {base}")
                     continue
 
-                if not is_paper and free_qty < buy_qty:
-                    if free_qty < 0.000001 or free_qty * current_price < 5.0:
-                        level["status"] = "idle"
-                        level["buy_price"] = None
-                        level["sell_price"] = None
-                        level["order_id"] = None
-                        level["cycles_since_placed"] = 0
-                        modified = True
-                        report.append(f"🧹 Phantom level reset {pair}: free {base}={free_qty} < dust threshold")
-                        continue
-                    level["_actual_sell_qty"] = free_qty
-                else:
-                    level["_actual_sell_qty"] = buy_qty
+                if not is_paper and total_qty is not None and free_qty is not None and free_qty < buy_qty:
+                    # Coins held but locked elsewhere (open orders) — defer this
+                    # sell to a later cycle instead of double-selling.
+                    report.append(f"⏳ Sell deferred {pair}: free {base}={round(free_qty,6)} < {buy_qty} (locked elsewhere)")
+                    continue
 
                 try:
-                    order = place_limit_sell(exchange, pair, level["_actual_sell_qty"], sell_price, is_paper)
+                    order = place_limit_sell(exchange, pair, buy_qty, sell_price, is_paper)
                     level["status"] = "sell_placed"
                     level["sell_price"] = sell_price
                     level["order_id"] = order.get("id")
@@ -441,9 +455,15 @@ def run_cycle(conn, exchange, pair, grid, is_paper):
                 level["cycles_since_placed"] = cycles + 1
                 if level["cycles_since_placed"] >= GC.LIMIT_ORDER_CYCLES:
                     base = pair.split("/")[0]
-                    free_qty = float(((wallet_balance or {}).get(base) or {}).get("free") or 0) if wallet_balance else float(buy_qty)
+                    total_qty, free_qty = _wallet_qty(wallet_balance, base)
                     actual_qty = buy_qty
-                    if not is_paper and free_qty <= 0:
+                    if not is_paper and total_qty is not None and total_qty <= 0:
+                        # Phantom level — wallet truly holds no coins → clean up.
+                        if order_id:
+                            try:
+                                exchange.cancel_order(order_id, pair)
+                            except Exception:
+                                pass
                         level["status"] = "idle"
                         level["buy_price"] = None
                         level["sell_price"] = None
@@ -452,17 +472,27 @@ def run_cycle(conn, exchange, pair, grid, is_paper):
                         modified = True
                         report.append(f"🧹 Phantom level reset {pair}: wallet holds no {base}")
                         continue
-                    if not is_paper and free_qty < buy_qty:
-                        if free_qty < 0.000001 or free_qty * current_price < 5.0:
-                            level["status"] = "idle"
-                            level["buy_price"] = None
-                            level["sell_price"] = None
-                            level["order_id"] = None
-                            level["cycles_since_placed"] = 0
-                            modified = True
-                            report.append(f"🧹 Phantom level reset {pair}: free {base}={free_qty} < dust threshold")
-                            continue
-                        actual_qty = free_qty
+                    if not is_paper and total_qty is not None and free_qty is not None and free_qty < buy_qty:
+                        # Coins exist but are locked in open orders — do NOT market
+                        # sell on top of them; retry next cycle.
+                        report.append(f"⏳ Market sell fallback deferred {pair}: free {base}={round(free_qty,6)} < {buy_qty} (locked)")
+                        continue
+
+                    # Cancel our own unfilled limit sell first, then re-check free
+                    # balance before market-selling (avoid double-selling).
+                    if not is_paper and order_id:
+                        try:
+                            exchange.cancel_order(order_id, pair)
+                        except Exception:
+                            pass  # already filled or gone
+                        try:
+                            fresh = exchange.fetch_balance() or {}
+                            _, fresh_free = _wallet_qty(fresh, base)
+                            if fresh_free is not None and fresh_free < buy_qty:
+                                report.append(f"⏳ Market sell fallback deferred {pair}: free {base}={round(fresh_free,6)} < {buy_qty} after cancel")
+                                continue
+                        except Exception:
+                            pass  # balance re-check failed — proceed cautiously
 
                     try:
                         order = place_market_sell(exchange, pair, actual_qty, current_price, is_paper)
