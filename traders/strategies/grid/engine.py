@@ -290,6 +290,15 @@ def run_cycle(conn, exchange, pair, grid, is_paper):
     if current_price <= 0:
         return grid, report
 
+    # Wallet reconciliation — fetch once per cycle (live mode only).
+    # Fail-safe: if fetch_balance fails, skip reconciliation this cycle, retry next.
+    wallet_balance = None
+    if not is_paper:
+        try:
+            wallet_balance = exchange.fetch_balance() or {}
+        except Exception:
+            pass
+
     modified = False
 
     for i, level in enumerate(grid["levels"]):
@@ -361,15 +370,43 @@ def run_cycle(conn, exchange, pair, grid, is_paper):
         elif status == "buy_filled" and buy_price:
             sell_price = buy_price * (1 + grid.get("spread_pct", GC.MIN_GRID_SPREAD_PCT) / 100.0)
             if current_price >= sell_price * 0.995:
+                base = pair.split("/")[0]
+                free_qty = float(((wallet_balance or {}).get(base) or {}).get("free") or 0) if wallet_balance else float(buy_qty)
+
+                if not is_paper and free_qty <= 0:
+                    level["status"] = "idle"
+                    level["buy_price"] = None
+                    level["sell_price"] = None
+                    level["order_id"] = None
+                    level["cycles_since_placed"] = 0
+                    modified = True
+                    report.append(f"🧹 Phantom level reset {pair}: wallet holds no {base}")
+                    continue
+
+                if not is_paper and free_qty < buy_qty:
+                    if free_qty < 0.000001 or free_qty * current_price < 5.0:
+                        level["status"] = "idle"
+                        level["buy_price"] = None
+                        level["sell_price"] = None
+                        level["order_id"] = None
+                        level["cycles_since_placed"] = 0
+                        modified = True
+                        report.append(f"🧹 Phantom level reset {pair}: free {base}={free_qty} < dust threshold")
+                        continue
+                    level["_actual_sell_qty"] = free_qty
+                else:
+                    level["_actual_sell_qty"] = buy_qty
+
                 try:
-                    order = place_limit_sell(exchange, pair, buy_qty, sell_price, is_paper)
+                    order = place_limit_sell(exchange, pair, level["_actual_sell_qty"], sell_price, is_paper)
                     level["status"] = "sell_placed"
                     level["sell_price"] = sell_price
                     level["order_id"] = order.get("id")
                     level["cycles_since_placed"] = 0
                     modified = True
-                    report.append(f"📤 Limit sell {pair} qty={buy_qty} @{sell_price}")
+                    report.append(f"📤 Limit sell {pair} qty={level['_actual_sell_qty']} @{sell_price}")
                 except Exception as e:
+                    level.pop("_actual_sell_qty", None)
                     report.append(f"❌ Sell order failed {pair} @{sell_price}: {e}")
 
         # ── SELL_PLACED → check fill ──
@@ -386,7 +423,8 @@ def run_cycle(conn, exchange, pair, grid, is_paper):
                     fill_price = fp
 
             if filled:
-                pnl = (fill_price - buy_price) * buy_qty if buy_price else 0
+                actual_qty = level.pop("_actual_sell_qty", buy_qty)
+                pnl = (fill_price - buy_price) * actual_qty if buy_price else 0
                 level["status"] = "idle"
                 level["buy_price"] = None
                 level["sell_price"] = None
@@ -397,15 +435,39 @@ def run_cycle(conn, exchange, pair, grid, is_paper):
                 modified = True
                 report.append(f"💰 Cycle complete {pair}: bought @{buy_price} sold @{fill_price} (+{round(pnl, 4)}€)")
                 grid.setdefault("_cycle_trades", []).append({
-                    "qty": buy_qty, "price": fill_price, "pnl": pnl
+                    "qty": actual_qty, "price": fill_price, "pnl": pnl
                 })
             else:
                 level["cycles_since_placed"] = cycles + 1
                 if level["cycles_since_placed"] >= GC.LIMIT_ORDER_CYCLES:
+                    base = pair.split("/")[0]
+                    free_qty = float(((wallet_balance or {}).get(base) or {}).get("free") or 0) if wallet_balance else float(buy_qty)
+                    actual_qty = buy_qty
+                    if not is_paper and free_qty <= 0:
+                        level["status"] = "idle"
+                        level["buy_price"] = None
+                        level["sell_price"] = None
+                        level["order_id"] = None
+                        level["cycles_since_placed"] = 0
+                        modified = True
+                        report.append(f"🧹 Phantom level reset {pair}: wallet holds no {base}")
+                        continue
+                    if not is_paper and free_qty < buy_qty:
+                        if free_qty < 0.000001 or free_qty * current_price < 5.0:
+                            level["status"] = "idle"
+                            level["buy_price"] = None
+                            level["sell_price"] = None
+                            level["order_id"] = None
+                            level["cycles_since_placed"] = 0
+                            modified = True
+                            report.append(f"🧹 Phantom level reset {pair}: free {base}={free_qty} < dust threshold")
+                            continue
+                        actual_qty = free_qty
+
                     try:
-                        order = place_market_sell(exchange, pair, buy_qty, current_price, is_paper)
+                        order = place_market_sell(exchange, pair, actual_qty, current_price, is_paper)
                         fill_price = float(order.get("average") or current_price)
-                        pnl = (fill_price - buy_price) * buy_qty if buy_price else 0
+                        pnl = (fill_price - buy_price) * actual_qty if buy_price else 0
                         level["status"] = "idle"
                         level["buy_price"] = None
                         level["sell_price"] = None
@@ -416,7 +478,7 @@ def run_cycle(conn, exchange, pair, grid, is_paper):
                         modified = True
                         report.append(f"💰 Market sell (fallback) {pair}: bought @{buy_price} sold @{fill_price} (+{round(pnl, 4)}€)")
                         grid.setdefault("_cycle_trades", []).append({
-                            "qty": buy_qty, "price": fill_price, "pnl": pnl
+                            "qty": actual_qty, "price": fill_price, "pnl": pnl
                         })
                     except Exception as e:
                         report.append(f"❌ Market sell fallback failed {pair}: {e}")
