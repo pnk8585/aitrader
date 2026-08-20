@@ -1,10 +1,12 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from app.market_schedule import deferred_next_run
 
 
 def test_deferred_schedule_uses_alpaca_next_open():
-    next_open = datetime(2026, 8, 5, 13, 30, tzinfo=timezone.utc)
+    # Use a FUTURE next_open (the function only honors next_open when it is
+    # later than now). A hardcoded past date made this a time-bomb.
+    next_open = datetime.now(timezone.utc) + timedelta(hours=1)
     assert deferred_next_run(next_open, 300) == next_open
 
 
