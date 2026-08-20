@@ -916,7 +916,10 @@ def run_cycle():
         finalize()
         return
 
-    qty = dca_buy_qty(order_size_eur, 0.50, current_price)
+    # DCA is disabled (USE_DCA_ENTRY=False), so deploy the FULL sized order —
+    # the old hard-coded 0.50 silently halved every entry. Deploy 100% unless DCA is on.
+    _entry_deploy_pct = 0.50 if MO.USE_DCA_ENTRY else 1.00
+    qty = dca_buy_qty(order_size_eur, _entry_deploy_pct, current_price)
     exchange.load_markets()
     mkt = exchange.market(symbol)
     min_amt = mkt['limits']['amount']['min']
