@@ -38,6 +38,7 @@ JOB_REGISTRY: dict[str, tuple[str, int, str]] = {
     "db-cleanup":         ("scripts/db_cleanup.py",                   86400, "live"),
     "weekly-rethink":     ("traders/weekly_rethink.py",           7 * 86400, "live"),
     "llm-backfill":       ("scripts/llm_backfill.py",                  3600,  "live"),
+    "llm-review-report":  ("scripts/llm_review_report.py",        7 * 86400,  "live"),
 }
 
 _RUNNING_STALE = timedelta(hours=3)
@@ -77,6 +78,7 @@ _FIXED_ATHENS_HOUR: dict[str, int] = {
 # Jobs that should fire on a fixed Athens weekday (1=Mon..7=Sun) + hour
 _FIXED_ATHENS_WEEKDAY: dict[str, tuple[int, int]] = {
     "weekly-rethink": (7, 9),  # Sunday 09:00 Athens
+    "llm-review-report": (7, 10),  # Sunday 10:00 Athens — weekly gate re-evaluation
 }
 
 

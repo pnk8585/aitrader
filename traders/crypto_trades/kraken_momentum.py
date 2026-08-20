@@ -765,6 +765,12 @@ def run_cycle():
             print(f"LLM review failed: {e} — buying directly", file=sys.stderr)
             result = {"verdict": "REJECT", "reason": f"LLM unavailable: {e}", "confidence": 0}
 
+        # SHADOW MODE (2026-08-20): log the LLM verdict but never block the
+        # trade. Also neutralizes LLM-directed ROTATE (deterministic stale
+        # rotation below still applies). Restore via llm.review_mode='gate'.
+        from traders.common.llm_review import shadow_override
+        result = shadow_override(result)
+
         if result["verdict"] in ("APPROVE", "ROTATE"):
             execute_approved = True
             should_notify = True

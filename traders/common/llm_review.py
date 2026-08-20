@@ -80,6 +80,44 @@ def _get_client():
     return OpenAI(api_key=api_key, base_url=base_url), model
 
 
+def llm_review_mode() -> str:
+    """Configured trade-review gating mode (app_settings.llm.review_mode).
+
+    'shadow' — LLM is consulted + logged but NEVER blocks a trade (default
+               since 2026-08-20: measured accuracy was 39% APPROVE / 31%
+               REJECT — worse than random; shadow keeps the learning-loop
+               data flowing via llm-backfill so the gate can be re-evaluated).
+    'gate'   — legacy blocking behavior (REJECT kills the trade).
+    'off'    — no LLM call at all.
+    Never raises; defaults to 'shadow'.
+    """
+    try:
+        from app.settings import get_setting
+        raw = (get_setting("llm.review_mode") or "shadow").strip().lower()
+    except Exception:
+        return "shadow"
+    return raw if raw in ("shadow", "gate", "off") else "shadow"
+
+
+def shadow_override(result: dict) -> dict:
+    """Shadow mode: log the LLM verdict but never let it block a trade.
+
+    If review mode is 'shadow', any REJECT/ROTATE verdict is downgraded to
+    APPROVE (the original verdict already lives in llm_review_log, written by
+    review_trade). 'gate'/'off' pass through unchanged. Never raises.
+    """
+    try:
+        if llm_review_mode() != "shadow":
+            return result
+        v = (result or {}).get("verdict")
+        if v in ("REJECT", "ROTATE"):
+            return {**result, "verdict": "APPROVE",
+                    "reason": f"[shadow — LLM said {v}] {result.get('reason', '')}"}
+    except Exception:
+        pass
+    return result
+
+
 def _rules_key_for_strategy(strategy: str) -> str:
     """Pick the DB/code prompt key for this strategy family."""
     s = (strategy or "").lower()

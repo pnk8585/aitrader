@@ -56,6 +56,9 @@ def seed_default_settings() -> None:
     defaults = {
         # App log level: DEBUG|INFO|WARNING|ERROR — uvicorn access is always DEBUG severity
         "logging.level": "INFO",
+        # LLM trade-review gating: shadow (consult + log, never block — default
+        # since 2026-08-20, LLM accuracy worse than random) | gate | off.
+        "llm.review_mode": "shadow",
     }
     for key, val in defaults.items():
         if get_setting(key) is None:
