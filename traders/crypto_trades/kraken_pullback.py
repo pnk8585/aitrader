@@ -631,6 +631,10 @@ def run_cycle():
         kelly_size = kelly_position_size(db_conn, EXCHANGE_NAME, current_price, stop_price, portfolio_value)
         if kelly_size > 0:
             order_size_eur = kelly_size
+    # Kelly is equity-based (portfolio_value includes coins held by OTHER
+    # strategies on the shared wallet) — clamp to actual free EUR so the
+    # order can't exceed buying power (Kraken EOrder:Insufficient funds).
+    order_size_eur = min(order_size_eur, cash_eur)
 
     if order_size_eur < MIN_TRADE_EUR:
         report["action_taken"] = "SKIP"
