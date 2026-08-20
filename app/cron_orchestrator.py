@@ -37,6 +37,7 @@ JOB_REGISTRY: dict[str, tuple[str, int, str]] = {
     "hourly-report":      ("scripts/hourly_report.py",                3600,  "live"),
     "db-cleanup":         ("scripts/db_cleanup.py",                   86400, "live"),
     "weekly-rethink":     ("traders/weekly_rethink.py",           7 * 86400, "live"),
+    "llm-backfill":       ("scripts/llm_backfill.py",                  3600,  "live"),
 }
 
 _RUNNING_STALE = timedelta(hours=3)
