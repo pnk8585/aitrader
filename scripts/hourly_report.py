@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import requests
 
 from app.db import get_conn
+from app.wallets import kraken_balance
 
 # ---- Alpaca -----------------------------------------------------------------
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
@@ -138,8 +139,13 @@ def get_alpaca_status() -> str:
 
 
 def get_kraken_status() -> str:
-    """Kraken snapshot from DB (trading_state + latest asset_prices)."""
+    """Live Kraken EUR balance plus DB-backed strategy positions and prices."""
     try:
+        wallet = kraken_balance()
+        if wallet.get("error"):
+            return f"⚠️ Kraken balance error: {wallet['error']}"
+        cash = f"€{float(wallet.get('free_eur', 0.0)):.2f} free"
+
         with get_conn() as conn:
             cur = conn.cursor()
             cur.execute(
@@ -156,7 +162,7 @@ def get_kraken_status() -> str:
             prices = {r[0]: r[1] for r in cur.fetchall()}
 
         if not positions:
-            return "💰 0 pos (DB)"
+            return f"💰 {cash} · 0 pos (DB)"
 
         pos_lines = []
         total_value = 0.0
@@ -175,7 +181,7 @@ def get_kraken_status() -> str:
                 pos_lines.append(f"{sym} {value:.2f}€")
 
         pos_str = " | ".join(pos_lines)
-        return f"💰 {total_value:.2f}€ in {len(positions)} pos · {pos_str}"
+        return f"💰 {cash} · {total_value:.2f}€ in {len(positions)} pos · {pos_str}"
 
     except Exception as e:
         return f"⚠️ Kraken DB error: {e}"
