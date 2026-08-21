@@ -161,7 +161,7 @@ def get_kraken_status() -> str:
         pos_lines = []
         total_value = 0.0
         for sym, qty, entry in positions:
-            sym = sym.upper()
+            sym = sym.split("/")[0].upper()  # 'DOGE/EUR' -> 'DOGE' (asset_prices uses bare symbol)
             price = prices.get(sym)
             if price is None:
                 pos_lines.append(f"{sym} ?")
