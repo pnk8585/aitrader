@@ -70,8 +70,16 @@ def get_cron_status() -> str:
                 (datetime.now(timezone.utc) - timedelta(hours=24),),
             )
             per_job = {r[0]: {"runs": r[1], "errs": r[2], "last": r[3]} for r in cur.fetchall()}
+            cur.execute(
+                "SELECT name, enabled FROM cron_jobs WHERE name = ANY(%s)",
+                (AITRADER_JOBS,),
+            )
+            enabled = {name: is_enabled for name, is_enabled in cur.fetchall()}
 
         for job in AITRADER_JOBS:
+            if enabled.get(job) is False:
+                parts.append(f"⏸️ {job} (disabled)")
+                continue
             meta = per_job.get(job)
             if not meta or meta["runs"] == 0:
                 if job in MARKET_WINDOWED:
