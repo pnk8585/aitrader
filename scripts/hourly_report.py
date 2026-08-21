@@ -144,7 +144,7 @@ def get_kraken_status() -> str:
             cur = conn.cursor()
             cur.execute(
                 """SELECT symbol, quantity, entry_price FROM trading_state
-                   WHERE exchange = 'kraken' ORDER BY symbol"""
+                   WHERE exchange LIKE 'kraken%' ORDER BY symbol"""
             )
             positions = cur.fetchall()
 
