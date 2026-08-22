@@ -53,6 +53,22 @@ _TRADE_SIGNAL_KEYWORDS = ("BUY", "SELL", "🛒", "🔄", "entry", "exit",
                            "opening", "closing", "⚠️", "PENDING_AI_REVIEW",
                            "HARD STOP", "Sold ", "❌")
 
+_JOB_NOTIFICATION_TITLES = {
+    "llm-backfill": "🧠 LLM Backfill",
+    "llm-review-report": "📊 LLM Review Report",
+    "health-check": "🩺 AITrader Health Check",
+    "end-of-day-review": "📋 End-of-Day Review",
+    "db-cleanup": "🧹 Database Cleanup",
+    "weekly-rethink": "💡 Weekly Strategy Rethink",
+    "position-monitor": "🛡️ Position Monitor",
+}
+
+
+def format_job_notification(name: str, summary: str) -> str:
+    """Build a readable Telegram envelope for a container cron result."""
+    title = _JOB_NOTIFICATION_TITLES.get(name, f"🤖 {name}")
+    return f"{title}\n\n{summary[:3800]}"
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -248,13 +264,13 @@ def _finish_run(db, run_id: int, name: str, status: str, summary: str,
                 pass  # silent — no trade happened
             else:
                 try:
-                    send_telegram(f"🤖 {name}\n{summary[:3800]}")
+                    send_telegram(format_job_notification(name, summary))
                 except Exception:
                     pass
         else:
             # Non-trading jobs: always notify
             try:
-                send_telegram(f"🤖 {name}\n{summary[:3800]}")
+                send_telegram(format_job_notification(name, summary))
             except Exception:
                 pass
 

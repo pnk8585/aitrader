@@ -379,19 +379,12 @@ def review_trade(
 
 
 def _notify_verdict(verdict: dict, symbol: str, strategy: str, price: float) -> None:
-    """Best-effort Telegram notification. Lazy import — never raises into the trade path."""
-    try:
-        from app.notify import send_telegram
-    except Exception:
-        return
-    try:
-        v = verdict.get("verdict", "?")
-        conf = verdict.get("confidence", "?")
-        emoji = "✅" if v == "APPROVE" else "❌" if v == "REJECT" else "🔄" if v == "ROTATE" else "⚠️"
-        msg = f"{emoji} {v}: {symbol} ({strategy}) @ €{price:.4f} conf={conf}"
-        send_telegram(msg)
-    except Exception:
-        pass
+    """Keep LLM verdicts in DB/audit logs; do not send one Telegram alert per candidate.
+
+    Telegram is reserved for executed trades, errors, and important warnings. The
+    caller remains best-effort so this policy cannot affect the trading path.
+    """
+    return
 
 
 def _log_llm_jsonl(

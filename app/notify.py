@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+import html
 import logging
+import re
 
 import httpx
 
@@ -14,6 +16,13 @@ from app.settings import get_setting
 logger = logging.getLogger(__name__)
 
 TELEGRAM_API = "https://api.telegram.org/bot{token}/sendMessage"
+_BOLD_MARKER_RE = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
+
+
+def format_telegram_text(text: str) -> str:
+    """Convert the project's simple Markdown bold markers to safe Telegram HTML."""
+    escaped = html.escape(str(text), quote=False)
+    return _BOLD_MARKER_RE.sub(r"<b>\1</b>", escaped)
 
 
 def _config() -> tuple[str, str, bool]:
@@ -34,7 +43,7 @@ def send_telegram(text: str) -> bool:
         return False
     try:
         url = TELEGRAM_API.format(token=token)
-        r = httpx.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
+        r = httpx.post(url, json={"chat_id": chat_id, "text": format_telegram_text(text), "parse_mode": "HTML"},
                        timeout=4)
         r.raise_for_status()
         return True

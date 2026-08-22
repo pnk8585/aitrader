@@ -234,6 +234,19 @@ def backfill(conn, dry_run: bool) -> dict:
     return stats
 
 
+def format_summary(stats: dict, *, dry_run: bool = False) -> str:
+    """Return a compact, human-readable Telegram report."""
+    prefix = "🧪 DRY RUN · " if dry_run else ""
+    return (
+        f"{prefix}📦 Επεξεργάστηκαν: {stats['processed']}\n"
+        f"✅ Ολοκληρώθηκαν 24h: {stats['backfilled']}\n"
+        f"⏳ Μερικά δεδομένα (1h/6h): {stats['partial']}\n"
+        f"🚫 Χωρίς price data: {stats['no_data']}\n"
+        f"🕒 Σε αναμονή: {stats['waiting']}\n"
+        f"⏭️ Παραλείφθηκαν: {stats['skipped']}"
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Backfill llm_review_log pnl_*_pct + was_correct from asset_prices")
@@ -260,12 +273,7 @@ def main() -> int:
         # skips the Telegram notification (no hourly spam).
         return 0
 
-    label = "DRY-RUN " if args.dry_run else ""
-    print(f"llm-backfill {label}summary: processed={stats['processed']} "
-          f"backfilled(24h)={stats['backfilled']} "
-          f"partial(1h/6h)={stats['partial']} "
-          f"no-price-data(sentinel)={stats['no_data']} "
-          f"waiting={stats['waiting']} skipped={stats['skipped']}")
+    print(format_summary(stats, dry_run=args.dry_run))
     return 0
 
 
