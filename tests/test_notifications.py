@@ -1,6 +1,6 @@
 """Tests for AITrader Telegram notification policy and formatting."""
 
-from app.cron_orchestrator import format_job_notification
+from app.cron_orchestrator import format_job_notification, should_notify
 from app.notify import format_telegram_text
 from scripts.llm_backfill import format_summary
 from traders.common import llm_review
@@ -23,6 +23,11 @@ def test_llm_backfill_summary_is_readable():
 
 def test_job_notification_uses_named_title_and_spacing():
     assert format_job_notification("llm-backfill", "summary") == "🧠 LLM Backfill\n\nsummary"
+
+
+def test_llm_backfill_job_is_silent():
+    assert should_notify("llm-backfill", "processed summary") is False
+    assert should_notify("health-check", "health summary") is True
 
 
 def test_telegram_format_converts_bold_and_escapes_html():

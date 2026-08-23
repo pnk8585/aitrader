@@ -5,12 +5,12 @@ Runs inside the container (JOB_REGISTRY "hourly-report", 3600s). Reads from the
 same DB via app.db.get_conn. No host dependencies (no ccxt, no dotenv).
 
 Queries:
-  1. Container cron health — per-job runs/errors/staleness from cron_runs (24h)
-  2. Alpaca account snapshot — REST API (equity, buying power, positions)
-  3. Kraken account snapshot — DB trading_state + latest asset_prices
+  1. Alpaca account snapshot — REST API (equity, buying power, positions)
+  2. Kraken account snapshot — DB trading_state + latest asset_prices
+  3. Recent completed trades — DB trade_log (last 24h)
 
 Outputs a single compact message → captured as CronRun summary → delivered by
-the orchestrator (non-trade job → always notify).
+the orchestrator when recent trades are present.
 """
 
 from __future__ import annotations
@@ -195,17 +195,49 @@ def get_kraken_status() -> str:
         return f"⚠️ Kraken DB error: {e}"
 
 
+def get_recent_trades(limit: int = 5) -> str:
+    """Return a compact list of completed trades from the last 24 hours."""
+    try:
+        with get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT timestamp, action, ticker, estimated_value, reason
+                   FROM trade_log
+                   WHERE timestamp > %s
+                   ORDER BY timestamp DESC LIMIT %s""",
+                (datetime.now(timezone.utc) - timedelta(hours=24), limit),
+            )
+            trades = cur.fetchall()
+        if not trades:
+            return "— none in last 24h"
+        lines = []
+        for timestamp, action, ticker, value, reason in trades:
+            when = timestamp.astimezone(timezone.utc).strftime("%H:%M") if timestamp.tzinfo else timestamp.strftime("%H:%M")
+            if value is not None:
+                currency = "€" if "/EUR" in str(ticker) else "$"
+                amount = f" {currency}{float(value):.2f}"
+            else:
+                amount = ""
+            detail = f" — {reason}" if reason else ""
+            lines.append(f"{when} {action} {ticker}{amount}{detail}")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"⚠️ trade log error: {e}"
+
+
 def main():
     now = datetime.now(timezone.utc).strftime("%H:%M UTC")
 
-    cron_status = get_cron_status()
     alpaca_status = get_alpaca_status()
     kraken_status = get_kraken_status()
+    recent_trades = get_recent_trades()
 
     print(f"🕐 {now}")
-    print(f"📡 {cron_status}")
+    print("💰 Wealth")
     print(f"🏛️ Alpaca  {alpaca_status}")
     print(f"🪙 Kraken  {kraken_status}")
+    print("📈 Recent trades (24h)")
+    print(recent_trades)
 
 
 if __name__ == "__main__":

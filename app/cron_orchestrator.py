@@ -63,11 +63,22 @@ _JOB_NOTIFICATION_TITLES = {
     "position-monitor": "🛡️ Position Monitor",
 }
 
+_SILENT_JOBS = frozenset({"llm-backfill"})
+
 
 def format_job_notification(name: str, summary: str) -> str:
     """Build a readable Telegram envelope for a container cron result."""
     title = _JOB_NOTIFICATION_TITLES.get(name, f"🤖 {name}")
     return f"{title}\n\n{summary[:3800]}"
+
+
+def should_notify(name: str, summary: str) -> bool:
+    """Return whether a completed job summary should be sent to Telegram."""
+    if not summary or summary in ("completed",) or name in _SILENT_JOBS:
+        return False
+    if name in _TRADE_SIGNAL_JOBS:
+        return any(kw in summary for kw in _TRADE_SIGNAL_KEYWORDS)
+    return True
 
 
 def _now() -> datetime:
@@ -257,22 +268,11 @@ def _finish_run(db, run_id: int, name: str, status: str, summary: str,
     db.commit()
 
     # ── Telegram notification ────────────────────────────────
-    if summary and summary not in ("completed",):
-        if name in _TRADE_SIGNAL_JOBS:
-            # Only notify on real trade signals
-            if not any(kw in summary for kw in _TRADE_SIGNAL_KEYWORDS):
-                pass  # silent — no trade happened
-            else:
-                try:
-                    send_telegram(format_job_notification(name, summary))
-                except Exception:
-                    pass
-        else:
-            # Non-trading jobs: always notify
-            try:
-                send_telegram(format_job_notification(name, summary))
-            except Exception:
-                pass
+    if should_notify(name, summary):
+        try:
+            send_telegram(format_job_notification(name, summary))
+        except Exception:
+            pass
 
     return {"name": name, "status": status, "summary": summary, "duration_ms": duration_ms}
 
