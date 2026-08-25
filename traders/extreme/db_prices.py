@@ -1,6 +1,9 @@
 import os
 import sys
+import math
+import statistics
 import time
+from datetime import datetime, timedelta, timezone
 import psycopg2
 import psycopg2.extras
 from psycopg2.extras import execute_values
@@ -13,6 +16,11 @@ load_dotenv(dotenv_path=env_path)
 
 EXCHANGE = "kraken"
 DEBUG = os.getenv("DEBUG", "").lower() in ("1", "true", "yes")
+
+LOSS_STREAK_COUNT = 3
+LOSS_STREAK_LOOKBACK_HOURS = 24
+LOSS_STREAK_COOLDOWN_HOURS = 6
+ROUND_TRIP_FEE_DECIMAL = 0.0052
 
 
 def _safe_rollback(conn):
@@ -356,45 +364,138 @@ def close_connection(conn):
 # Shared market-read helpers (used by both pullback & momentum strategies)
 # ---------------------------------------------------------------------------
 
-def get_momentum_over(conn, symbol, minutes, price_exchange="kraken"):
-    """% change of latest price vs the price ~`minutes` ago.
+MOMENTUM_TARGET_TOLERANCE = 0.15
+MOMENTUM_LATEST_MAX_AGE_MINUTES = 15
+MOMENTUM_NEIGHBOR_CONSISTENCY = 0.20
 
-    Looks in a +-15% window around the target age so a missing exact sample
-    doesn't break the read. Returns None if there isn't enough history yet.
+
+def get_momentum_snapshot(conn, symbol, minutes, price_exchange="kraken"):
+    """Return validated latest/target prices for a timestamp-aware momentum read.
+
+    The target must be within +/-15% of its requested age.  The latest sample
+    must be no more than 15 minutes old.  A target is rejected when it differs
+    by more than 20% from the robust median of nearby samples: this detects a
+    lone bad persisted tick while allowing a coherent breakout whose neighbours
+    move with it.  These are data-quality checks, not a cap on market returns.
     """
     if conn is None:
         return None
     base = base_symbol(symbol)
-    lo = int(minutes * 1.15)
-    hi = int(minutes * 0.85)
+    older = int(minutes * (1 + MOMENTUM_TARGET_TOLERANCE))
+    newer = int(minutes * (1 - MOMENTUM_TARGET_TOLERANCE))
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT price FROM asset_prices WHERE exchange=%s AND symbol=%s "
+                "SELECT price, timestamp FROM asset_prices WHERE exchange=%s AND symbol=%s "
                 "ORDER BY timestamp DESC LIMIT 1", (price_exchange, base))
             latest = cur.fetchone()
-            if not latest or latest[0] is None:
+            if not latest or latest[0] is None or latest[1] is None:
                 return None
-            latest_price = float(latest[0])
+            latest_price, latest_ts = float(latest[0]), latest[1]
+            if not math.isfinite(latest_price) or latest_price <= 0:
+                return None
+            if latest_ts.tzinfo is None:
+                latest_ts = latest_ts.replace(tzinfo=timezone.utc)
+            latest_age = datetime.now(timezone.utc) - latest_ts
+            if latest_age < timedelta(minutes=-1) or latest_age > timedelta(minutes=MOMENTUM_LATEST_MAX_AGE_MINUTES):
+                return None
             cur.execute(
-                "SELECT price FROM asset_prices WHERE exchange=%s AND symbol=%s "
+                "SELECT price, timestamp FROM asset_prices WHERE exchange=%s AND symbol=%s "
                 "AND timestamp <= CURRENT_TIMESTAMP - make_interval(mins => %s) "
                 "AND timestamp >= CURRENT_TIMESTAMP - make_interval(mins => %s) "
-                "ORDER BY timestamp DESC LIMIT 1",
-                (price_exchange, base, hi, lo))
+                "ORDER BY abs(EXTRACT(EPOCH FROM (timestamp - (CURRENT_TIMESTAMP - make_interval(mins => %s))))) LIMIT 1",
+                (price_exchange, base, newer, older, minutes))
             past = cur.fetchone()
-            if not past or past[0] is None:
+            if not past or past[0] is None or past[1] is None:
                 return None
-            past_price = float(past[0])
+            past_price, past_ts = float(past[0]), past[1]
+            if not math.isfinite(past_price) or past_price <= 0:
+                return None
+            if past_ts.tzinfo is None:
+                past_ts = past_ts.replace(tzinfo=timezone.utc)
+            target_age = datetime.now(timezone.utc) - past_ts
+            if not timedelta(minutes=newer) <= target_age <= timedelta(minutes=older):
+                return None
+            cur.execute(
+                "SELECT price, timestamp FROM asset_prices WHERE exchange=%s AND symbol=%s "
+                "AND timestamp BETWEEN %s - INTERVAL '30 minutes' AND %s + INTERVAL '30 minutes' "
+                "ORDER BY abs(EXTRACT(EPOCH FROM (timestamp - %s))) LIMIT 5",
+                (price_exchange, base, past_ts, past_ts, past_ts))
+            neighbours = cur.fetchall()
     except Exception as e:
         if DEBUG:
             raise
         _safe_rollback(conn)
         print(f"get_momentum_over failed: {e}", file=sys.stderr)
         return None
-    if past_price == 0:
+    if any(not row or row[0] is None or not math.isfinite(float(row[0])) or float(row[0]) <= 0
+           for row in neighbours):
         return None
-    return (latest_price - past_price) / past_price * 100.0
+    valid_neighbours = [float(row[0]) for row in neighbours
+                        if len(row) > 1 and row[1] != past_ts]
+    if len(valid_neighbours) >= 2:
+        median = statistics.median(valid_neighbours)
+        if abs(past_price - median) / median > MOMENTUM_NEIGHBOR_CONSISTENCY:
+            return None
+    return {"latest_price": latest_price, "latest_timestamp": latest_ts,
+            "target_price": past_price, "target_timestamp": past_ts}
+
+
+def get_momentum_over(conn, symbol, minutes, price_exchange="kraken"):
+    """Public compatibility wrapper: percent change or ``None``."""
+    snapshot = get_momentum_snapshot(conn, symbol, minutes, price_exchange)
+    if snapshot is None:
+        return None
+    return (snapshot["latest_price"] - snapshot["target_price"]) / snapshot["target_price"] * 100.0
+
+
+def market_data_sane(conn, symbol, observed_price, *, price_exchange=EXCHANGE,
+                     max_age_minutes=15, max_deviation_pct=2.0):
+    """Validate a ticker against a fresh, timestamped persisted DB sample.
+
+    Entry paths must not turn a stale database quote or a material disagreement
+    between the exchange ticker and stored price history into a momentum BUY.
+    The preceding row is from the same Kraken venue, not an independent or
+    cross-source feed; it is only a persisted-observation consistency check.
+    Fail closed on unavailable data; this helper is deliberately read-only.
+    """
+    if conn is None or observed_price is None:
+        return False, "price sanity unavailable"
+    try:
+        observed_price = float(observed_price)
+    except (TypeError, ValueError, OverflowError):
+        return False, "price sanity unavailable"
+    if not math.isfinite(observed_price) or observed_price <= 0:
+        return False, "price sanity unavailable"
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT price, timestamp FROM asset_prices "
+                "WHERE exchange=%s AND symbol=%s ORDER BY timestamp DESC LIMIT 1",
+                (price_exchange, base_symbol(symbol)))
+            row = cur.fetchone()
+    except Exception as e:
+        _safe_rollback(conn)
+        print(f"market_data_sane failed: {e}", file=sys.stderr)
+        return False, "price sanity unavailable"
+    if not row or row[0] is None or row[1] is None:
+        return False, "price sanity unavailable"
+    try:
+        db_price = float(row[0])
+    except (TypeError, ValueError, OverflowError):
+        return False, "price sanity unavailable"
+    timestamp = row[1]
+    if not math.isfinite(db_price) or db_price <= 0:
+        return False, "price sanity unavailable"
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    age = datetime.now(timezone.utc) - timestamp
+    if age > timedelta(minutes=max_age_minutes) or age < timedelta(minutes=-1):
+        return False, "price sanity stale"
+    divergence = abs(observed_price - db_price) / db_price * 100.0
+    if divergence > max_deviation_pct:
+        return False, f"price sanity divergence {divergence:.2f}%"
+    return True, ""
 
 
 def get_range_pct(conn, symbol, minutes, price_exchange="kraken"):
@@ -528,6 +629,47 @@ def realized_pnl_today_pct(conn, exchange_name, round_trip_fee_pct):
     gross_pct = float(row[0]) * 100.0
     n = int(row[1])
     return gross_pct - n * round_trip_fee_pct
+
+
+def loss_streak_cooldown(conn, exchange_name, *, consecutive_losses=LOSS_STREAK_COUNT,
+                         lookback_hours=LOSS_STREAK_LOOKBACK_HOURS,
+                         cooldown_hours=LOSS_STREAK_COOLDOWN_HOURS):
+    """Return ``(blocked, reason)`` for new BUYs in exactly one strategy.
+
+    ``trade_log.unrealized_plpc`` is a decimal DB fraction, so estimated
+    round-trip fees are subtracted as 0.0052 (not 0.52 or 0.0052%).
+    Query/connection failures intentionally fail closed for entry paths.
+    """
+    if conn is None:
+        return True, "Loss-streak cooldown unavailable (DB connection missing)."
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT timestamp, unrealized_plpc FROM trade_log
+                   WHERE exchange=%s AND action='SELL'
+                     AND timestamp >= CURRENT_TIMESTAMP - make_interval(hours => %s)
+                   ORDER BY timestamp DESC LIMIT %s""",
+                (exchange_name, lookback_hours, consecutive_losses),
+            )
+            rows = cur.fetchall()
+    except Exception as e:
+        _safe_rollback(conn)
+        print(f"loss_streak_cooldown failed: {e}", file=sys.stderr)
+        return True, "Loss-streak cooldown unavailable (DB query failed)."
+    if len(rows) < consecutive_losses:
+        return False, ""
+    if not all(float(row[1] or 0.0) - ROUND_TRIP_FEE_DECIMAL < 0.0 for row in rows):
+        return False, ""
+    latest = rows[0][0]
+    if latest is None:
+        return False, ""
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=cooldown_hours)
+    if latest.tzinfo is None:
+        latest = latest.replace(tzinfo=timezone.utc)
+    if latest >= cutoff:
+        return True, (f"Loss-streak cooldown: {consecutive_losses} consecutive net losing SELLs; "
+                      f"new BUYs blocked for {cooldown_hours}h.")
+    return False, ""
 
 
 # ---------------------------------------------------------------------------
@@ -715,7 +857,7 @@ def log_trade(conn, exchange, **kwargs):
             quantity, estimated_value, position_size_pct, portfolio_equity, reason
     """
     if conn is None:
-        return
+        return False
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -750,6 +892,7 @@ def log_trade(conn, exchange, **kwargs):
                 ),
             )
         conn.commit()
+        return True
     except Exception as e:
         if DEBUG:
             raise
@@ -758,6 +901,40 @@ def log_trade(conn, exchange, **kwargs):
             conn.rollback()
         except Exception:
             pass
+        return False
+
+
+def log_successful_sell_once(conn, exchange, *, ticker, entry_price, price_hint,
+                             quantity, order, reason):
+    """Persist one successful close using the strategy's original exchange key.
+
+    The order id makes retries after a successful execution idempotent.  Price
+    and quantity are taken from the fill when CCXT supplies them; DB P/L stays
+    in its canonical decimal-fraction unit.
+    """
+    from traders.common.exchange import extract_fill
+    if not isinstance(order, dict):
+        return False
+    order_id = order.get("id")
+    fill_price, fill_qty = extract_fill(order, price_hint)
+    fill_qty = fill_qty if fill_qty is not None else quantity
+    try:
+        if order_id:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1 FROM trade_log WHERE exchange=%s AND action='SELL' AND order_id=%s LIMIT 1",
+                            (exchange, order_id))
+                if cur.fetchone():
+                    return True
+        plpc = ((fill_price - entry_price) / entry_price) if entry_price else 0.0
+        return bool(log_trade(conn, exchange, action="SELL", ticker=ticker,
+                              entry_price=entry_price, current_price=fill_price,
+                              unrealized_plpc=plpc, order_id=order_id, quantity=fill_qty,
+                              estimated_value=fill_price * fill_qty, reason=reason,
+                              strategy_name=exchange))
+    except Exception as e:
+        _safe_rollback(conn)
+        print(f"log_successful_sell_once failed: {e}", file=sys.stderr)
+        return False
 
 
 def coins_held_by_other_bots(conn, my_exchange):

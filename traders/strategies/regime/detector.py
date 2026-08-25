@@ -9,21 +9,25 @@ from traders.strategies.regime import config as C
 def detect_regime(db_conn, symbol):
     """Classify market regime for a symbol using ADX(14), 20d vol, 20d return.
 
-    Reads from asset_prices (symbol, price, timestamp, exchange='kraken').
+    Reads one UTC daily close per day from asset_prices.  This makes the
+    documented 20d volatility/return windows mean calendar days, independent
+    of the ingestion cadence.
     """
     cur = db_conn.cursor()
     cur.execute(
-        """SELECT price, timestamp
+        """SELECT DISTINCT ON (date_trunc('day', timestamp AT TIME ZONE 'UTC'))
+                  price, timestamp
            FROM asset_prices
-           WHERE symbol = %s AND exchange = 'kraken'
-           ORDER BY timestamp DESC
+           WHERE symbol = %s AND exchange = %s
+           ORDER BY date_trunc('day', timestamp AT TIME ZONE 'UTC') DESC,
+                    timestamp DESC
            LIMIT %s""",
-        (symbol, C.VOL_WINDOW * 2),
+        (symbol, C.REGIME_PRICE_EXCHANGE, C.REGIME_DAYS),
     )
     rows = cur.fetchall()
     cur.close()
 
-    if len(rows) < C.ADX_PERIOD + 1:
+    if len(rows) < C.REGIME_DAYS:
         return "uncertain"
 
     prices = [float(r[0]) for r in reversed(rows)]
@@ -32,18 +36,7 @@ def detect_regime(db_conn, symbol):
     vol20 = _volatility(prices, C.VOL_WINDOW)
     ret20 = _return_pct(prices, C.RET_WINDOW)
 
-    regime = "uncertain"
-
-    if adx is None:
-        regime = "uncertain"
-    elif vol20 is not None and vol20 >= C.VOL_CRISIS_THRESHOLD:
-        regime = "crisis"
-    elif adx >= C.ADX_TREND_THRESHOLD:
-        regime = "trending"
-    elif adx <= C.ADX_RANGE_THRESHOLD and vol20 is not None and vol20 <= C.VOL_RANGE_THRESHOLD:
-        regime = "ranging"
-    elif ret20 is not None and abs(ret20) >= C.RET_TREND_THRESHOLD:
-        regime = "trending"
+    regime = _classify_regime(adx, vol20, ret20)
 
     cur = db_conn.cursor()
     cur.execute(
@@ -95,8 +88,8 @@ def _approx_adx(prices, period):
 def _volatility(prices, window):
     """Annualized volatility over the last `window` periods, in percent.
 
-    Prices are ~5-min intervals. Scale period returns to daily first,
-    then annualize: daily = period * sqrt(288), annual = daily * sqrt(365).
+    ``detect_regime`` supplies daily closes, so period returns are daily.
+    Annualize only once with sqrt(365).
     """
     if len(prices) < window + 1:
         return None
@@ -105,13 +98,33 @@ def _volatility(prices, window):
     mean_r = sum(returns) / len(returns)
     var = sum((r - mean_r) ** 2 for r in returns) / (len(returns) - 1)
     period_vol = var ** 0.5
-    # 288 five-minute periods per day, 365 days per year
-    daily_vol = period_vol * (288 ** 0.5)
-    return daily_vol * 100 * (365 ** 0.5)
+    return period_vol * 100 * (365 ** 0.5)
 
 
 def _return_pct(prices, window):
     """Percent return over the last `window` periods."""
-    if len(prices) < window:
+    if len(prices) < window + 1:
         return None
-    return (prices[-1] - prices[-window]) / prices[-window] * 100
+    return (prices[-1] - prices[-window - 1]) / prices[-window - 1] * 100
+
+
+def _classify_regime(adx, vol20, ret20):
+    """Classify a long-only regime with direction before volatility.
+
+    Volatility measures uncertainty, not direction.  A sufficiently positive
+    20-day return is momentum-active even during volatile crypto uptrends;
+    a negative return can never activate the long-only momentum route.
+    """
+    if adx is None or ret20 is None:
+        return "uncertain"
+    if ret20 <= -C.RET_TREND_THRESHOLD:
+        return "crisis"
+    if ret20 < 0:
+        return "uncertain"
+    if ret20 >= C.RET_TREND_THRESHOLD:
+        return "trending"
+    if adx >= C.ADX_TREND_THRESHOLD:
+        return "trending"
+    if adx <= C.ADX_RANGE_THRESHOLD and vol20 is not None and vol20 <= C.VOL_RANGE_THRESHOLD:
+        return "ranging"
+    return "uncertain"

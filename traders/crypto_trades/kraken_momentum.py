@@ -37,10 +37,13 @@ from db_prices import (
                        load_notify_state, save_notify_state as db_save_notify_state,
                        log_trade as db_log_trade,
                        get_momentum_over, get_range_pct, last_exit_time,
-                       trades_today, realized_pnl_today_pct,
+                       market_data_sane,
+                       trades_today, realized_pnl_today_pct, loss_streak_cooldown,
+                       log_successful_sell_once,
                        coins_held_by_other_bots)
 from traders.common.config import ROOT_DIR, ensure_log_dir
 from traders.common.exchange import extract_fill, market_buy, market_sell, spread_ok
+from traders.common.paper_wallet import paper_wallet_balance
 from traders.common.gates import check_gate, load_ai_gates
 from traders.strategies.momentum import config as MO
 from traders.common.atr_stops import compute_atr_from_prices, compute_atr_stop, fetch_atr_pct
@@ -48,6 +51,7 @@ from traders.common.pnl_notify import format_sell_pnl_auto
 from traders.common.kelly import kelly_position_size
 from traders.common.laddered_tp import should_take_partial_profit as check_ladder_tp
 from traders.strategies.momentum.exits import is_stale_rotation_candidate, should_exit_momentum
+from traders.strategies.momentum.signals import momentum_signal
 from traders.strategies.regime import detect_regime
 from traders.strategies.regime.router import should_enter
 from traders.common.dca_entry import dca_entry_decision, dca_buy_qty, MAX_DCA_LEVEL
@@ -74,6 +78,7 @@ EXCHANGE_NAME = MO.EXCHANGE_NAME
 # Paper mode: prefix exchange name so paper trades are recorded separately
 if os.environ.get("AITRADER_MODE") == "paper":
     EXCHANGE_NAME = f"paper-{EXCHANGE_NAME}"
+_PAPER_MODE = os.environ.get("AITRADER_MODE") == "paper"
 PRICE_EXCHANGE = MO.PRICE_EXCHANGE
 from traders.common.universe import get_crypto_pairs
 ROUND_TRIP_FEE_PCT = MO.ROUND_TRIP_FEE_PCT
@@ -136,6 +141,8 @@ def log_trade(db_conn, action, ticker, signal_strength, momentum_pct, entry_pric
 
 def get_entry_price_and_time(symbol, current_price):
     """Recover entry price/time from Kraken fills when local state is missing."""
+    if _PAPER_MODE:
+        return current_price, datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     try:
         trades = exchange.fetch_my_trades(symbol, limit=10)
         buy_trades = [t for t in trades if t['side'] == 'buy']
@@ -156,6 +163,8 @@ def sellable_qty(symbol, recorded_qty):
     (shared-wallet pattern).  Returns the quantity to pass to
     create_market_sell_order, or 0.0 if nothing is available to sell.
     """
+    if _PAPER_MODE:
+        return float(exchange.amount_to_precision(symbol, recorded_qty))
     try:
         bal = exchange.fetch_balance()
         coin = symbol.split('/')[0]
@@ -171,37 +180,6 @@ def sellable_qty(symbol, recorded_qty):
         # (same behaviour as before, not worse than crashing).
         exchange.load_markets()
         return float(exchange.amount_to_precision(symbol, recorded_qty))
-
-
-def momentum_signal(daily, hourly):
-    """Return (signal_strength, sizing_mult) for a candidate, or (None, 0.0).
-
-    Evaluates daily and hourly tiers independently and keeps the larger size.
-    """
-    # Daily tiers
-    if daily is not None and daily >= 5.0:
-        d_str, d_mult = "EXTREME_MOMENTUM", 1.0
-    elif daily is not None and daily >= 3.0:
-        d_str, d_mult = "STRONG_MOMENTUM", 0.67
-    elif daily is not None and daily >= DAILY_ENTRY_PCT:
-        d_str, d_mult = "MODERATE_MOMENTUM", 0.33
-    else:
-        d_str, d_mult = None, 0.0
-    # Hourly tiers
-    if hourly is not None and hourly >= 3.0:
-        h_str, h_mult = "EXTREME_MOMENTUM", 1.0
-    elif hourly is not None and hourly >= 2.0:
-        h_str, h_mult = "STRONG_MOMENTUM", 0.67
-    elif hourly is not None and hourly >= HOURLY_ENTRY_PCT:
-        h_str, h_mult = "MODERATE_MOMENTUM", 0.33
-    else:
-        h_str, h_mult = None, 0.0
-
-    if h_mult > d_mult:
-        return h_str, h_mult
-    if d_str is not None:
-        return d_str, d_mult
-    return h_str, h_mult
 
 
 # ---------------------------------------------------------------------------
@@ -287,15 +265,25 @@ def run_cycle():
             for sym in CRYPTO_PAIRS
             if tickers.get(sym) and tickers[sym].get('last') is not None
         }
+        # Compare the public ticker to the preceding persisted same-venue observation
+        # before this cycle writes it; otherwise the check would compare a
+        # value to itself and could not catch a feed disagreement.
+        price_sanity = {
+            sym: market_data_sane(db_conn, sym, tickers[sym]["last"], price_exchange=PRICE_EXCHANGE)
+            for sym in CRYPTO_PAIRS if sym in tickers and tickers[sym].get("last") is not None
+        }
         insert_prices(db_conn, price_map)
-        raw_balance = exchange.fetch_balance()
-        balance = raw_balance or {}
+        if _PAPER_MODE:
+            balance = paper_wallet_balance(state, tickers)
+        else:
+            raw_balance = exchange.fetch_balance()
+            balance = raw_balance or {}
         # Guard: balance['total'] can be None in CCXT edge cases
         balance_total = balance.get('total') or {}
 
         # --- Open order reconciliation ---
         try:
-            raw_orders = exchange.fetch_open_orders()
+            raw_orders = [] if _PAPER_MODE else exchange.fetch_open_orders()
             open_orders = raw_orders or []
             now_ts = datetime.now(timezone.utc).timestamp()
             for ord in open_orders:
@@ -367,7 +355,7 @@ def run_cycle():
         sym = pos['symbol']
         new_state[sym] = state.get(sym, {})
         if "entry_price" not in new_state[sym] or not new_state[sym].get("entry_price"):
-            ep, et = get_entry_price_and_time(sym, pos['current_price'])
+            ep, et = (pos['current_price'], datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")) if _PAPER_MODE else get_entry_price_and_time(sym, pos['current_price'])
             new_state[sym]["entry_price"] = ep
             new_state[sym]["entry_time"] = et
         if not new_state[sym].get("entry_time"):
@@ -444,15 +432,10 @@ def run_cycle():
                 should_notify = True
                 msg_lines.append(f"🔄 **Πωλήθηκε {symbol} (Kraken momentum)**: {reason}"
                                  f"{format_sell_pnl_auto(entry_price, current_price, fqty)}")
-                log_trade(db_conn, action="SELL", ticker=symbol,
-                          signal_strength="EXIT", momentum_pct=0.0,
-                          entry_price=entry_price, current_price=current_price,
-                          unrealized_plpc=unrealized_plpc / 100.0,
-                          order_id=_order_res.get("id"), quantity=qty,
-                          estimated_value_eur=qty * current_price,
-                          position_size_pct=0.0, portfolio_equity=portfolio_value,
-                          reason=reason, regime=cycle_regime,
-                          strategy_name=EXCHANGE_NAME)
+                if not log_successful_sell_once(
+                        db_conn, EXCHANGE_NAME, ticker=symbol, entry_price=entry_price,
+                        price_hint=current_price, quantity=fqty, order=res, reason=reason):
+                    print("CRITICAL: momentum SELL telemetry failed after exchange execution", file=sys.stderr)
                 new_state.pop(symbol, None)
                 my_positions = [p for p in my_positions if p["symbol"] != symbol]
                 all_positions = [p for p in all_positions if p["symbol"] != symbol]
@@ -490,15 +473,10 @@ def run_cycle():
                             f"🔄 **Μερική πώληση {symbol} (Kraken momentum)**: {ladder_reason}"
                             f"{format_sell_pnl_auto(entry_price, current_price, fqty)}"
                         )
-                        log_trade(db_conn, action="SELL", ticker=symbol,
-                                  signal_strength="LADDER_TP", momentum_pct=0.0,
-                                  entry_price=entry_price, current_price=current_price,
-                                  unrealized_plpc=unrealized_plpc / 100.0,
-                                  order_id=_order_res.get("id"), quantity=fqty,
-                                  estimated_value_eur=fqty * current_price,
-                                  position_size_pct=0.0, portfolio_equity=portfolio_value,
-                                  reason=ladder_reason, regime=cycle_regime,
-                                  strategy_name=EXCHANGE_NAME)
+                        if not log_successful_sell_once(
+                                db_conn, EXCHANGE_NAME, ticker=symbol, entry_price=entry_price,
+                                price_hint=current_price, quantity=fqty, order=res, reason=ladder_reason):
+                            print("CRITICAL: momentum partial SELL telemetry failed", file=sys.stderr)
                 except Exception as e:
                     print(f"Ladder TP sell failed for {symbol}: {e}", file=sys.stderr)
 
@@ -555,7 +533,7 @@ def run_cycle():
     save_trading_state(db_conn, EXCHANGE_NAME, new_state)
     if managed_any:
         try:
-            balance = exchange.fetch_balance()
+            balance = paper_wallet_balance(new_state, tickers) if _PAPER_MODE else exchange.fetch_balance()
             _bal_total = (balance or {}).get('total') or {}
             cash_eur = _bal_total.get('EUR', 0.0)
         except Exception:
@@ -605,7 +583,10 @@ def run_cycle():
         effective_max_momentum += 1
     # Hard caps that still block entry (no rotation can save these):
     skip, skip_reason = False, ""
-    if not skip and len(all_positions) >= MAX_TOTAL_OPEN:
+    cooldown_blocked, cooldown_reason = loss_streak_cooldown(db_conn, EXCHANGE_NAME)
+    if cooldown_blocked:
+        skip, skip_reason = True, cooldown_reason
+    elif len(all_positions) >= MAX_TOTAL_OPEN:
         skip, skip_reason = True, f"Global open-position cap reached ({MAX_TOTAL_OPEN})."
     elif not skip and trades_today(db_conn, exchange_name=EXCHANGE_NAME) >= MAX_TRADES_PER_DAY:
         skip, skip_reason = True, f"Daily trade cap reached ({MAX_TRADES_PER_DAY})."
@@ -659,15 +640,22 @@ def run_cycle():
         if not allowed:
             continue
 
+        sane, _ = price_sanity.get(sym, (False, "price sanity unavailable"))
+        if not sane:
+            continue
         daily = get_momentum_over(db_conn, sym, DAILY_WINDOW_MIN, price_exchange=PRICE_EXCHANGE)
-        hourly = get_one_hour_momentum(db_conn, sym)
+        hourly = get_momentum_over(db_conn, sym, 60, price_exchange=PRICE_EXCHANGE)
 
         qualifies = ((daily is not None and daily >= DAILY_ENTRY_PCT)
                      or (hourly is not None and hourly >= HOURLY_ENTRY_PCT))
         if not qualifies:
             continue
 
-        sig, mult = momentum_signal(daily, hourly)
+        sig, mult = momentum_signal(
+            daily, hourly,
+            daily_entry_pct=DAILY_ENTRY_PCT,
+            hourly_entry_pct=HOURLY_ENTRY_PCT,
+        )
         if sig is None or mult <= 0.0:
             continue
 
@@ -856,21 +844,17 @@ def run_cycle():
                              f"**{stale['symbol']}** (+{round(stale['unrealized_plpc'],2)}% "
                              f"μετά {round(stale['age_hours'],2)}h) για {symbol}."
                              f"{format_sell_pnl_auto(stale['entry_price'], stale['current_price'], stale['qty'])}")
-            log_trade(db_conn, action="SELL", ticker=stale["symbol"],
-                      signal_strength="ROTATION", momentum_pct=0.0,
-                      entry_price=stale["entry_price"], current_price=stale["current_price"],
-                      unrealized_plpc=stale["unrealized_plpc"] / 100.0,
-                      order_id=_rot_res.get("id"), quantity=stale["qty"],
-                      estimated_value_eur=stale["qty"] * stale["current_price"],
-                      position_size_pct=0.0, portfolio_equity=portfolio_value,
-                      reason=f"Stale rotation — freeing capital for hot {symbol}.",
-                      regime=cycle_regime, strategy_name=EXCHANGE_NAME)
+            if not log_successful_sell_once(
+                    db_conn, EXCHANGE_NAME, ticker=stale["symbol"], entry_price=stale["entry_price"],
+                    price_hint=stale["current_price"], quantity=fqty, order=res,
+                    reason=f"Stale rotation — freeing capital for hot {symbol}."):
+                print("CRITICAL: momentum rotation SELL telemetry failed", file=sys.stderr)
             new_state.pop(stale["symbol"], None)
             my_positions = [p for p in my_positions if p["symbol"] != stale["symbol"]]
             all_positions = [p for p in all_positions if p["symbol"] != stale["symbol"]]
             save_trading_state(db_conn, EXCHANGE_NAME, new_state)
             time.sleep(1.5)
-            balance = exchange.fetch_balance()
+            balance = paper_wallet_balance(new_state, tickers) if _PAPER_MODE else exchange.fetch_balance()
             _bal_total = (balance or {}).get('total') or {}
             cash_eur = _bal_total.get('EUR', 0.0)
         except Exception as e:
@@ -905,10 +889,10 @@ def run_cycle():
         try:
             stop_price = current_price * (1 + MO.STOP_LOSS_PCT / 100)  # STOP_LOSS_PCT is negative
             kelly_qty = kelly_position_size(db_conn, EXCHANGE_NAME, current_price, stop_price, cash_eur, fraction=0.50)
-            if kelly_qty > 0:
-                order_size_eur = kelly_qty
-        except Exception:
-            pass  # fallback to existing sizing
+            order_size_eur = kelly_qty
+        except Exception as e:
+            print(f"Kelly sizing failed; skipping new BUY: {e}", file=sys.stderr)
+            order_size_eur = 0.0
 
     if order_size_eur < MIN_TRADE_EUR:
         report["action_taken"] = "SKIP"

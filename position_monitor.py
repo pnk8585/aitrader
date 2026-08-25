@@ -18,6 +18,7 @@ from openai import OpenAI
 
 from app.llm_prompts import get_prompt
 from traders.common.exchange import market_sell
+from traders.extreme.db_prices import log_successful_sell_once
 from traders.common.gates import check_and_set_btc_pause
 from traders.common.llm_review import _extract_json_object, _message_text
 from traders.common.pnl_notify import format_sell_pnl
@@ -52,11 +53,54 @@ EXCHANGE_NAME = _PAPER_MODE and "paper-position-monitor" or "position-monitor"
 
 # trading_state rows are written by the strategies under their own keys
 # "kraken" is also used (direct positions, e.g. manual buys via the dashboard)
-_STATE_EXCHANGES = (
-    ("paper-kraken-momentum", "paper-kraken-pullback", "kraken")
-    if _PAPER_MODE
-    else ("kraken-momentum", "kraken-pullback", "kraken")
-)
+_LIVE_STATE_EXCHANGES = ("kraken-momentum", "kraken-pullback", "kraken-high-risk", "kraken")
+_PAPER_STATE_EXCHANGES = ("paper-kraken-momentum", "paper-kraken-pullback", "paper-kraken-high-risk")
+
+
+def paper_state_exchanges():
+    """Paper monitor keys, kept separate from any live/manual state row."""
+    return _PAPER_STATE_EXCHANGES
+
+
+def monitored_state_exchanges():
+    """Return the current mode's only permitted trading_state keys."""
+    return _PAPER_STATE_EXCHANGES if _PAPER_MODE else _LIVE_STATE_EXCHANGES
+
+
+_STATE_EXCHANGES = monitored_state_exchanges()
+
+
+def _close_executed_sell(db, state_exchange, symbol, *, entry_price, price_hint,
+                         quantity, order, reason):
+    """Record an executed SELL, then always remove its sellable state.
+
+    Telemetry is important but cannot turn a confirmed exchange execution into
+    a retryable position: that would permit a duplicate live SELL next cycle.
+    """
+    if _PAPER_MODE and state_exchange not in _PAPER_STATE_EXCHANGES:
+        raise ValueError("paper monitor refuses non-paper state key")
+    if not _PAPER_MODE and state_exchange not in _LIVE_STATE_EXCHANGES:
+        raise ValueError("live monitor refuses unknown state key")
+    logged = log_successful_sell_once(
+        db, state_exchange, ticker=symbol, entry_price=entry_price,
+        price_hint=price_hint, quantity=quantity, order=order, reason=reason)
+    if not logged:
+        print("CRITICAL: confirmed SELL telemetry failed; closing state to prevent duplicate SELL", file=sys.stderr)
+    cur = db.cursor()
+    cur.execute("DELETE FROM trading_state WHERE exchange=%s AND symbol=%s", (state_exchange, symbol))
+    db.commit()
+    return logged
+
+
+def _sell_position_once(db, kraken, pos, reason):
+    """Execute one confirmed exit and make its state non-sellable immediately."""
+    symbol = pos["symbol"]
+    quantity = float(kraken.amount_to_precision(symbol, pos["qty"]))
+    order = market_sell(kraken, symbol, quantity, pos["current"])
+    logged = _close_executed_sell(
+        db, pos["state_exchange"], symbol, entry_price=pos["entry"],
+        price_hint=pos["current"], quantity=quantity, order=order, reason=reason)
+    return quantity, logged
 
 # ── DB helpers ──────────────────────────────────────────────────────
 def _get_db():
@@ -269,39 +313,69 @@ def main():
     cur.execute("SELECT symbol FROM grid_state")
     _grid_symbols = {row[0] for row in cur.fetchall()}
 
-    # Kraken
-    try:
-        bal = kraken.fetch_balance()
-        for coin, qty in bal.get("total", {}).items():
-            if coin in ("EUR", "USD", "USDT", "USDC") or float(qty) <= 0:
-                continue
-            sym = f"{coin}/EUR"
-            if sym in _grid_symbols:
-                continue
-            qty_f = float(qty)
-            try:
-                ticker = kraken.fetch_ticker(sym)
-                price = ticker.get("last", 0)
-            except Exception:
-                continue
-            value = qty_f * price
-            if value < 1.0:  # skip sub-€1 dust
-                continue
-            # Get entry from trading_state
+    # Paper mode intentionally projects positions only from paper state.  It
+    # must not read the live private wallet merely to monitor simulations.
+    if _PAPER_MODE:
+        try:
             cur = db.cursor()
             cur.execute(
-                "SELECT entry_price FROM trading_state WHERE exchange IN %s AND symbol=%s",
-                (_STATE_EXCHANGES, sym))
-            row = cur.fetchone()
-            entry = float(row[0]) if row else price
-            pnl = (price - entry) / entry * 100 if entry else 0
-            positions.append({
-                "exchange": "kraken", "symbol": sym,
-                "entry": entry, "current": price, "qty": qty_f,
-                "value": value, "pnl_pct": pnl,
-            })
-    except Exception as e:
-        log.append(f"Kraken balance error: {e}")
+                "SELECT exchange, symbol, entry_price, quantity FROM trading_state "
+                "WHERE exchange IN %s", (monitored_state_exchanges(),))
+            state_rows = cur.fetchall()
+            for state_exchange, sym, entry_price, quantity in state_rows:
+                qty_f = float(quantity or 0.0)
+                if qty_f <= 0:
+                    continue
+                try:
+                    price = float((kraken.fetch_ticker(sym) or {}).get("last") or 0.0)
+                except Exception:
+                    continue
+                if price <= 0 or qty_f * price < 1.0:
+                    continue
+                entry = float(entry_price or price)
+                positions.append({
+                    "exchange": "kraken", "symbol": sym, "state_exchange": state_exchange,
+                    "entry": entry, "current": price, "qty": qty_f,
+                    "value": qty_f * price,
+                    "pnl_pct": (price - entry) / entry * 100 if entry else 0,
+                })
+        except Exception as e:
+            log.append(f"Paper state error: {e}")
+    else:
+        try:
+            bal = kraken.fetch_balance()
+            for coin, qty in bal.get("total", {}).items():
+                if coin in ("EUR", "USD", "USDT", "USDC") or float(qty) <= 0:
+                    continue
+                sym = f"{coin}/EUR"
+                if sym in _grid_symbols:
+                    continue
+                qty_f = float(qty)
+                try:
+                    ticker = kraken.fetch_ticker(sym)
+                    price = ticker.get("last", 0)
+                except Exception:
+                    continue
+                value = qty_f * price
+                if value < 1.0:  # skip sub-€1 dust
+                    continue
+                # Get entry from trading_state
+                cur = db.cursor()
+                cur.execute(
+                    "SELECT exchange, entry_price FROM trading_state WHERE exchange IN %s AND symbol=%s",
+                    (monitored_state_exchanges(), sym))
+                row = cur.fetchone()
+                state_exchange = row[0] if row else EXCHANGE_NAME
+                entry = float(row[1]) if row else price
+                pnl = (price - entry) / entry * 100 if entry else 0
+                positions.append({
+                    "exchange": "kraken", "symbol": sym,
+                    "state_exchange": state_exchange,
+                    "entry": entry, "current": price, "qty": qty_f,
+                    "value": value, "pnl_pct": pnl,
+                })
+        except Exception as e:
+            log.append(f"Kraken balance error: {e}")
 
     if not positions:
         # Empty stdout = silent Telegram (cron_orchestrator only notifies on summary).
@@ -325,14 +399,12 @@ def main():
             log.append(f"    🛑 HARD STOP -15% — selling immediately")
             if ex == "kraken":
                 try:
-                    fqty = float(kraken.amount_to_precision(sym, pos["qty"]))
-                    res = market_sell(kraken, sym, fqty, pos["current"])
+                    fqty, logged = _sell_position_once(db, kraken, pos, "Position monitor hard stop")
+                    if not logged:
+                        log.append("    CRITICAL: SELL telemetry failed; state was closed to prevent duplicate SELL")
                     pnl_suffix = format_sell_pnl(pos["entry"], pos["current"], pos["qty"])
                     log.append(f"    ✅ Sold {fqty} {sym} @ ~€{pos['current']:.4f} {pnl_suffix}")
                     # Remove from trading_state
-                    cur = db.cursor()
-                    cur.execute("DELETE FROM trading_state WHERE exchange IN %s AND symbol=%s", (_STATE_EXCHANGES, sym))
-                    db.commit()
                 except Exception as e:
                     log.append(f"    ❌ Sell failed: {e}")
             continue
@@ -361,13 +433,12 @@ def main():
         # Execute SELL
         if decision["action"] == "SELL" and ex == "kraken":
             try:
-                fqty = float(kraken.amount_to_precision(sym, pos["qty"]))
-                res = market_sell(kraken, sym, fqty, pos["current"])
+                fqty, logged = _sell_position_once(
+                    db, kraken, pos, f"Position monitor LLM SELL: {decision['reason']}")
+                if not logged:
+                    log.append("    CRITICAL: SELL telemetry failed; state was closed to prevent duplicate SELL")
                 pnl_suffix = format_sell_pnl(pos["entry"], pos["current"], fqty)
                 log.append(f"    ✅ Sold {fqty} {sym} {pnl_suffix}")
-                cur = db.cursor()
-                cur.execute("DELETE FROM trading_state WHERE exchange IN %s AND symbol=%s", (_STATE_EXCHANGES, sym))
-                db.commit()
             except Exception as e:
                 log.append(f"    ❌ Sell failed: {e}")
 

@@ -19,6 +19,12 @@ def kelly_position_size(db_conn, exchange_name, entry, stop, balance, fraction=0
     Falls back to fixed fraction of balance if fewer than 100 historical trades.
     Caps at quarter-Kelly.
     """
+    # These values define whether the trade can exist at all.  Validate before
+    # reading history so the small-sample fallback cannot allocate to invalid
+    # geometry or a nonpositive account/configuration value.
+    if entry <= 0 or stop >= entry or balance <= 0 or fraction <= 0:
+        return 0.0
+
     cur = db_conn.cursor()
     cur.execute(
         """SELECT action, unrealized_plpc
@@ -46,11 +52,13 @@ def kelly_position_size(db_conn, exchange_name, entry, stop, balance, fraction=0
     kf = kelly_fraction(win_rate, avg_win, avg_loss)
     kf = max(0.0, min(kf, fraction))
 
+    # A measured non-positive edge is a decision to allocate nothing, not a
+    # reason to silently resume the small-sample fixed allocation.
     if kf <= 0 or stop >= entry:
-        return balance * fraction
+        return 0.0
 
     risk_per_unit = abs(entry - stop) / entry
     if risk_per_unit <= 0:
-        return balance * fraction
+        return 0.0
 
     return balance * kf

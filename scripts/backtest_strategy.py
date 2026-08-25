@@ -14,9 +14,13 @@ import psycopg2
 from dotenv import load_dotenv
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
 load_dotenv(os.path.join(ROOT, ".env"))
 
 from traders.strategies.momentum.exits import should_exit_momentum
+from traders.strategies.momentum.signals import evaluate_momentum_signal
+from traders.strategies.momentum import config as MOMENTUM_CONFIG
 from traders.strategies.pullback.exits import should_exit_pullback, compute_effective_stop
 from traders.common.atr_stops import compute_atr_from_prices, compute_atr_stop, compute_atr_tp
 from traders.common.kelly import kelly_fraction
@@ -71,18 +75,14 @@ class PriceCache:
         return list(self._data.keys())
 
     def _find_nearest(self, symbol, target_time):
+        """Return the latest observation at or before target_time (never future data)."""
         times = self._times.get(symbol, [])
         if not times:
             return None
-        idx = bisect_left(times, target_time)
-        if idx == 0:
-            return (times[0], self._prices[symbol][0])
-        if idx >= len(times):
-            return (times[-1], self._prices[symbol][-1])
-        left_t, right_t = times[idx - 1], times[idx]
-        if abs((right_t - target_time).total_seconds()) < abs((left_t - target_time).total_seconds()):
-            return (right_t, self._prices[symbol][idx])
-        return (left_t, self._prices[symbol][idx - 1])
+        idx = bisect_right(times, target_time) - 1
+        if idx < 0:
+            return None
+        return (times[idx], self._prices[symbol][idx])
 
     def _prices_in_window(self, symbol, end_time, minutes):
         times = self._times.get(symbol, [])
@@ -93,7 +93,7 @@ class PriceCache:
         return [(times[i], self._prices[symbol][i]) for i in range(li, ri)]
 
     def price_at(self, symbol, timestamp):
-        """Return exactly the price at timestamp, or None."""
+        """Return the latest known price at timestamp, or None if none exists yet."""
         r = self._find_nearest(symbol, timestamp)
         return r[1] if r else None
 
@@ -142,7 +142,9 @@ class PriceCache:
         return "uncertain"
 
 
-# ── entry signals (simplified, NOT importing live strategy code) ─────────────
+# ── entry signals ────────────────────────────────────────────────────────────
+# Momentum tier classification is shared with live. Pullback and non-signal
+# gates remain research simplifications; this replay does not import live loops.
 
 def check_momentum_entry(cache, symbol, current_time, current_price, cfg=None):
     """daily_pct >= DAILY_ENTRY_PCT or hourly >= HOURLY_ENTRY_PCT, with tier."""
@@ -153,46 +155,20 @@ def check_momentum_entry(cache, symbol, current_time, current_price, cfg=None):
     daily = cache.get_momentum_over(symbol, current_time, current_price, DAILY_WINDOW_MIN)
     hourly = cache.get_one_hour_momentum(symbol, current_time, current_price)
 
-    qualifies = ((daily is not None and daily >= daily_entry_pct)
-                 or (hourly is not None and hourly >= hourly_entry_pct))
-    if not qualifies:
-        return None
-
-    # Tier classification
-    tier = "MODERATE_MOMENTUM"
-    mult = 0.33
-    d_str, d_mult = None, 0.0
-    if daily is not None and daily >= 5.0:
-        d_str, d_mult = "EXTREME_MOMENTUM", 1.0
-    elif daily is not None and daily >= 3.0:
-        d_str, d_mult = "STRONG_MOMENTUM", 0.67
-    elif daily is not None and daily >= daily_entry_pct:
-        d_str, d_mult = "MODERATE_MOMENTUM", 0.33
-
-    h_str, h_mult = None, 0.0
-    if hourly is not None and hourly >= 3.0:
-        h_str, h_mult = "EXTREME_MOMENTUM", 1.0
-    elif hourly is not None and hourly >= 2.0:
-        h_str, h_mult = "STRONG_MOMENTUM", 0.67
-    elif hourly is not None and hourly >= hourly_entry_pct:
-        h_str, h_mult = "MODERATE_MOMENTUM", 0.33
-
-    if h_mult > d_mult:
-        tier, mult = h_str, h_mult
-    elif d_str is not None:
-        tier, mult = d_str, d_mult
-    else:
-        tier, mult = h_str, h_mult
-
-    if tier is None or mult <= 0:
+    classification = evaluate_momentum_signal(
+        daily, hourly,
+        daily_entry_pct=daily_entry_pct,
+        hourly_entry_pct=hourly_entry_pct,
+    )
+    if classification is None:
         return None
 
     return {
         "strategy": "momentum",
         "symbol": symbol,
         "price": current_price,
-        "signal": tier,
-        "mult": mult,
+        "signal": classification.signal,
+        "mult": classification.multiplier,
         "daily": daily,
         "hourly": hourly,
     }
@@ -303,6 +279,24 @@ def all_timestamps(price_data):
     return sorted(ts_set)
 
 
+def canonical_cycle_timestamps(price_data, cycle_minutes=5):
+    """Return a shared UTC cycle grid spanning the observed source timestamps."""
+    source_times = all_timestamps(price_data)
+    if not source_times:
+        return []
+    first, last = source_times[0], source_times[-1]
+    first = first.replace(second=0, microsecond=0)
+    first -= timedelta(minutes=first.minute % cycle_minutes)
+    last = last.replace(second=0, microsecond=0)
+    last -= timedelta(minutes=last.minute % cycle_minutes)
+    cycles = []
+    current = first
+    while current <= last:
+        cycles.append(current)
+        current += timedelta(minutes=cycle_minutes)
+    return cycles
+
+
 def compute_equity_returns(equity_curve):
     """Annualized Sharpe from 5-min interval returns. periods_per_year = 365 * 288."""
     if len(equity_curve) < 2:
@@ -337,8 +331,15 @@ def max_drawdown(equity_curve):
 def backtest_engine(db_conn, exchange="kraken", start=None, end=None,
                     strategies=None, initial_balance=10000.0,
                     use_atr_stops=True, use_kelly_sizing=True,
-                    atr_multiplier=2.0, kelly_fraction=0.25, entry_cfg=None):
+                    use_laddered_tp=True, atr_multiplier=2.0, kelly_fraction=0.25,
+                    entry_cfg=None, entry_fee_pct=0.26, exit_fee_pct=0.26,
+                    slippage_pct=0.0, momentum_max_open=MOMENTUM_CONFIG.MAX_OPEN_MOMENTUM,
+                    momentum_max_trades_per_day=MOMENTUM_CONFIG.MAX_TRADES_PER_DAY,
+                    momentum_cooldown_min=MOMENTUM_CONFIG.COOLDOWN_MIN,
+                    momentum_daily_loss_breaker_pct=MOMENTUM_CONFIG.DAILY_LOSS_BREAKER_PCT):
     """Run the backtest and return a metrics dict."""
+    if min(entry_fee_pct, exit_fee_pct, slippage_pct) < 0:
+        raise ValueError("entry fees, exit fees, and slippage must be non-negative")
     if strategies is None:
         strategies = ["momentum", "pullback"]
 
@@ -346,39 +347,81 @@ def backtest_engine(db_conn, exchange="kraken", start=None, end=None,
     print(f"Loading price data for {len(symbols)} symbols...")
     price_data = load_prices(db_conn, exchange, start, end, symbols)
     cache = PriceCache(price_data)
-    timestamps = all_timestamps(price_data)
+    source_timestamps = all_timestamps(price_data)
+    timestamps = canonical_cycle_timestamps(price_data)
 
     print(f"Loaded {sum(len(v) for v in price_data.values())} rows, "
-          f"{len(timestamps)} unique timestamps across {len(price_data)} symbols.")
+          f"{len(source_timestamps)} source timestamps / {len(timestamps)} canonical 5-minute cycles "
+          f"across {len(price_data)} symbols.")
 
     # State
     positions = {}          # (symbol, strategy) -> position dict
     closed_trades = []      # list of closed trade summaries
-    balance = initial_balance
-    equity = initial_balance
+    cash = initial_balance
     equity_curve = []       # equity at 5-min intervals
     last_equity_ts = None
 
     skipped_atr = 0
     skipped_vol = 0
     total_checks = 0
+    momentum_entries = []
+    momentum_entries_by_day = defaultdict(int)
+    momentum_net_plpc_by_day = defaultdict(float)
+    last_momentum_exit = {}
 
     entry_funcs = {
         "momentum": check_momentum_entry,
         "pullback": check_pullback_entry,
     }
 
+    def portfolio_equity(mark_time):
+        """Cash plus the current marked value of every still-open position."""
+        return cash + sum(
+            pos["total_qty"] * (cache.price_at(symbol, mark_time) or pos["cost_basis"])
+            for (symbol, _), pos in positions.items()
+        )
+
+    def open_position(symbol, strat, ts, price, signal):
+        """Apply the shared research sizing/ATR checks and open one position."""
+        nonlocal cash, skipped_atr, skipped_vol
+        window_prices = [p for _, p in cache._prices_in_window(symbol, ts, 14 * 5)]
+        atr_at_entry = compute_atr_from_prices(window_prices, period=14)
+        if atr_at_entry is None or atr_at_entry <= 0:
+            skipped_atr += 1
+            return False
+        atr_pct = atr_at_entry / price * 100
+        if atr_pct > MAX_ATR_PCT:
+            skipped_vol += 1
+            return False
+        deploy = max(0.05, min(kelly_fraction, 0.25)) if use_kelly_sizing else 0.1
+        size = min(cash / (1 + entry_fee_pct / 100), cash * deploy * signal["mult"])
+        buy_price = price * (1 + slippage_pct / 100)
+        entry_fee = size * entry_fee_pct / 100
+        entry_cash_debit = size + entry_fee
+        qty = size / buy_price if buy_price > 0 else 0.0
+        if qty <= 0 or entry_cash_debit > cash:
+            return False
+        key = (symbol, strat)
+        positions[key] = {
+            "symbol": symbol, "strategy": strat,
+            "entries": [{"price": buy_price, "qty": qty, "time": ts}],
+            "cost_basis": buy_price, "total_qty": qty,
+            "entry_notional": size, "entry_cash_debit": entry_cash_debit,
+            "entry_fee": entry_fee, "peak_plpc": 0.0, "entry_time": ts,
+            "atr_at_entry": atr_at_entry, "kelly_fraction_used": deploy,
+            "tp_level": 0, "tp_sold_qty": 0.0, "dca_level": 0,
+            "signal_price": buy_price, "regime_at_entry": cache.detect_regime(symbol, ts),
+            "signal": signal["signal"],
+        }
+        cash -= entry_cash_debit
+        return True
+
     n = len(timestamps)
     report_every = max(1, n // 20)
     for ti, ts in enumerate(timestamps):
         if ti % report_every == 0:
-            print(f"  {ti}/{n} timestamps ({ti*100//n}%) — "
-                  f"{len(positions)} open, {len(closed_trades)} closed, equity {equity:.2f}")
-
-        # Record equity at 5-min grid for Sharpe
-        if last_equity_ts is None or (ts - last_equity_ts) >= timedelta(minutes=5):
-            equity_curve.append(equity)
-            last_equity_ts = ts
+                print(f"  {ti}/{n} timestamps ({ti*100//n}%) — "
+                  f"{len(positions)} open, {len(closed_trades)} closed, equity {portfolio_equity(ts):.2f}")
 
         for symbol in sorted(price_data.keys()):
             price = cache.price_at(symbol, ts)
@@ -412,8 +455,6 @@ def backtest_engine(db_conn, exchange="kraken", start=None, end=None,
                         peak_plpc=pos["peak_plpc"],
                         age_hours=age_hours,
                         atr_stop_pct=atr_stop_pct if use_atr_stops else None,
-                        tp_level=pos.get("tp_level", 0),
-                        tp_sold_qty=pos.get("tp_sold_qty", 0.0),
                     )
                 else:  # pullback
                     # compute effective_stop
@@ -428,36 +469,50 @@ def backtest_engine(db_conn, exchange="kraken", start=None, end=None,
                         effective_stop=eff_stop,
                         trend_3h=trend_3h,
                         atr_stop_pct=atr_stop_pct if use_atr_stops else None,
-                        tp_level=pos.get("tp_level", 0),
-                        tp_sold_qty=pos.get("tp_sold_qty", 0.0),
                     )
 
                 if sell:
-                    realized_pnl = pos["total_qty"] * pos["cost_basis"] * (plpc / 100)
-                    equity += realized_pnl
-                    balance += realized_pnl
+                    sell_price = price * (1 - slippage_pct / 100)
+                    sale_proceeds = pos["total_qty"] * sell_price
+                    exit_fee = sale_proceeds * exit_fee_pct / 100
+                    net_proceeds = sale_proceeds - exit_fee
+                    gross_pnl = sale_proceeds - pos["entry_notional"]
+                    net_pnl = net_proceeds - pos["entry_cash_debit"]
+                    cash += net_proceeds
                     closed_trades.append({
                         "symbol": psym,
                         "strategy": pstrat,
                         "entry_time": pos["entry_time"],
                         "exit_time": ts,
                         "entry_price": pos["cost_basis"],
-                        "exit_price": price,
-                        "plpc": plpc,
-                        "realized_pnl": realized_pnl,
+                        "exit_price": sell_price,
+                        "plpc": plpc,  # compatibility: raw price change before all costs
+                        "gross_plpc": gross_pnl / pos["entry_notional"] * 100,
+                        "net_plpc": net_pnl / pos["entry_cash_debit"] * 100,
+                        "gross_pnl": gross_pnl,
+                        "net_pnl": net_pnl,
+                        "realized_pnl": net_pnl,
+                        "entry_fee": pos["entry_fee"],
+                        "exit_fee": exit_fee,
                         "holding_hours": age_hours,
                         "peak_plpc": pos["peak_plpc"],
                         "signal": pos.get("signal", ""),
                         "reason": reason,
                     })
+                    if pstrat == "momentum":
+                        last_momentum_exit[psym] = ts
+                        momentum_net_plpc_by_day[ts.date()] += net_pnl / pos["entry_cash_debit"] * 100
                     closed_keys.append((psym, pstrat))
 
             for key in closed_keys:
                 del positions[key]
 
-            # Check entries
+            # Pullback remains a separate research strategy: it uses the shared
+            # five-minute price grid but does not inherit momentum's live caps.
             total_checks += 1
             for strat in strategies:
+                if strat != "pullback":
+                    continue
                 key = (symbol, strat)
                 if key in positions:
                     continue  # already in a trade
@@ -473,50 +528,47 @@ def backtest_engine(db_conn, exchange="kraken", start=None, end=None,
                 if signal is None:
                     continue
 
-                # ATR check
-                window_prices = [p for _, p in cache._prices_in_window(symbol, ts, 14 * 5)]
-                atr_at_entry = compute_atr_from_prices(window_prices, period=14)
-                if atr_at_entry is None or atr_at_entry <= 0:
-                    skipped_atr += 1
-                    continue
-                atr_pct = atr_at_entry / price * 100
-                if atr_pct > MAX_ATR_PCT:
-                    skipped_vol += 1
-                    continue
+                open_position(symbol, strat, ts, price, signal)
 
-                # Position sizing
-                if use_kelly_sizing:
-                    deploy = max(0.05, min(kelly_fraction, 0.25))
-                else:
-                    deploy = 0.1
-                size = balance * deploy * signal["mult"]
-                qty = size / price if price > 0 else 0.0
-                if qty <= 0:
-                    continue
+        # Momentum mirrors the live orchestration shape: scan all symbols in
+        # one canonical cycle, rank candidates, and open only the best one.
+        if "momentum" in strategies:
+            day = ts.date()
+            open_momentum = sum(1 for _, strat in positions if strat == "momentum")
+            daily_net_pct = momentum_net_plpc_by_day[day]
+            can_enter_momentum = (
+                open_momentum < momentum_max_open
+                and momentum_entries_by_day[day] < momentum_max_trades_per_day
+                and daily_net_pct > momentum_daily_loss_breaker_pct
+            )
+            if can_enter_momentum:
+                candidates = []
+                for symbol in sorted(price_data):
+                    if any(held_symbol == symbol for held_symbol, _ in positions):
+                        continue
+                    price = cache.price_at(symbol, ts)
+                    if price is None:
+                        continue
+                    exited = last_momentum_exit.get(symbol)
+                    if exited is not None and ts - exited < timedelta(minutes=momentum_cooldown_min):
+                        continue
+                    total_checks += 1
+                    signal = check_momentum_entry(cache, symbol, ts, price, cfg=entry_cfg)
+                    if signal is None:
+                        continue
+                    score = max(signal.get("daily") if signal.get("daily") is not None else -math.inf,
+                                signal.get("hourly") if signal.get("hourly") is not None else -math.inf)
+                    candidates.append((score, symbol, price, signal))
+                if candidates:
+                    _, symbol, price, signal = min(candidates, key=lambda item: (-item[0], item[1]))
+                    if open_position(symbol, "momentum", ts, price, signal):
+                        momentum_entries.append({"time": ts, "symbol": symbol, "score": signal.get("daily") if signal.get("daily") is not None else signal.get("hourly")})
+                        momentum_entries_by_day[day] += 1
 
-                # Take profit level
-                tp_price = compute_atr_tp(price, atr_at_entry, 3.0)
-                tp_level_pct = (tp_price - price) / price * 100
-
-                positions[key] = {
-                    "symbol": symbol,
-                    "strategy": strat,
-                    "entries": [{"price": price, "qty": qty, "time": ts}],
-                    "cost_basis": price,
-                    "total_qty": qty,
-                    "peak_plpc": 0.0,
-                    "entry_time": ts,
-                    "atr_at_entry": atr_at_entry,
-                    "kelly_fraction_used": deploy,
-                    "tp_level": 0,
-                    "tp_sold_qty": 0.0,
-                    "dca_level": 0,
-                    "signal_price": price,
-                    "regime_at_entry": cache.detect_regime(symbol, ts),
-                    "signal": signal["signal"],
-                }
-
-                balance -= size
+        # Record the portfolio after all transactions at this timestamp.
+        if last_equity_ts is None or (ts - last_equity_ts) >= timedelta(minutes=5):
+            equity_curve.append(portfolio_equity(ts))
+            last_equity_ts = ts
 
     # Force-close remaining positions at last available price
     for (psym, pstrat), pos in list(positions.items()):
@@ -524,8 +576,13 @@ def backtest_engine(db_conn, exchange="kraken", start=None, end=None,
         if last_price_rows:
             final_price = last_price_rows[-1][1]
             plpc = (final_price - pos["cost_basis"]) / pos["cost_basis"] * 100
-            realized_pnl = pos["total_qty"] * pos["cost_basis"] * (plpc / 100)
-            equity += realized_pnl
+            sell_price = final_price * (1 - slippage_pct / 100)
+            sale_proceeds = pos["total_qty"] * sell_price
+            exit_fee = sale_proceeds * exit_fee_pct / 100
+            net_proceeds = sale_proceeds - exit_fee
+            gross_pnl = sale_proceeds - pos["entry_notional"]
+            net_pnl = net_proceeds - pos["entry_cash_debit"]
+            cash += net_proceeds
             age_hours = (timestamps[-1] - pos["entry_time"]).total_seconds() / 3600
             closed_trades.append({
                 "symbol": psym,
@@ -533,9 +590,15 @@ def backtest_engine(db_conn, exchange="kraken", start=None, end=None,
                 "entry_time": pos["entry_time"],
                 "exit_time": timestamps[-1],
                 "entry_price": pos["cost_basis"],
-                "exit_price": final_price,
-                "plpc": plpc,
-                "realized_pnl": realized_pnl,
+                "exit_price": sell_price,
+                "plpc": plpc,  # compatibility: raw price change before all costs
+                "gross_plpc": gross_pnl / pos["entry_notional"] * 100,
+                "net_plpc": net_pnl / pos["entry_cash_debit"] * 100,
+                "gross_pnl": gross_pnl,
+                "net_pnl": net_pnl,
+                "realized_pnl": net_pnl,
+                "entry_fee": pos["entry_fee"],
+                "exit_fee": exit_fee,
                 "holding_hours": age_hours,
                 "peak_plpc": pos["peak_plpc"],
                 "signal": pos.get("signal", ""),
@@ -544,27 +607,31 @@ def backtest_engine(db_conn, exchange="kraken", start=None, end=None,
     positions.clear()
 
     # Append final equity point
+    final_equity = cash
     if equity_curve:
-        equity_curve.append(equity)
+        equity_curve.append(final_equity)
 
     # Metrics
-    win_trades = [t for t in closed_trades if t["realized_pnl"] > 0]
-    loss_trades = [t for t in closed_trades if t["realized_pnl"] <= 0]
-    total_pnl = equity - initial_balance
+    win_trades = [t for t in closed_trades if t["net_pnl"] > 0]
+    loss_trades = [t for t in closed_trades if t["net_pnl"] <= 0]
+    total_pnl = final_equity - initial_balance
+    gross_total_pnl = sum(t["gross_pnl"] for t in closed_trades)
     sharpe = compute_equity_returns(equity_curve)
     dd = max_drawdown(equity_curve)
 
     metrics = {
         "initial_balance": initial_balance,
-        "final_equity": round(equity, 2),
+        "final_cash": round(cash, 2),
+        "final_equity": round(final_equity, 2),
         "total_pnl": round(total_pnl, 2),
+        "gross_total_pnl": round(gross_total_pnl, 2),
         "total_pnl_pct": round(total_pnl / initial_balance * 100, 2),
         "total_trades": len(closed_trades),
         "win_count": len(win_trades),
         "loss_count": len(loss_trades),
         "win_rate": round(len(win_trades) / len(closed_trades) * 100, 2) if closed_trades else 0,
-        "avg_win_plpc": round(sum(t["plpc"] for t in win_trades) / len(win_trades), 2) if win_trades else 0,
-        "avg_loss_plpc": round(sum(t["plpc"] for t in loss_trades) / len(loss_trades), 2) if loss_trades else 0,
+        "avg_win_plpc": round(sum(t["net_plpc"] for t in win_trades) / len(win_trades), 2) if win_trades else 0,
+        "avg_loss_plpc": round(sum(t["net_plpc"] for t in loss_trades) / len(loss_trades), 2) if loss_trades else 0,
         "avg_holding_hours": round(sum(t["holding_hours"] for t in closed_trades) / len(closed_trades), 1) if closed_trades else 0,
         "sharpe_ratio": round(sharpe, 3),
         "max_drawdown_pct": round(dd * 100, 2),
@@ -576,6 +643,19 @@ def backtest_engine(db_conn, exchange="kraken", start=None, end=None,
         "start": str(start) if start else "first",
         "end": str(end) if end else "last",
         "closed_trades": closed_trades,
+        "equity_curve": equity_curve,
+        "entry_fee_pct": entry_fee_pct,
+        "exit_fee_pct": exit_fee_pct,
+        "slippage_pct": slippage_pct,
+        "momentum_entries": momentum_entries,
+        "momentum_orchestration": {
+            "cycle_minutes": 5,
+            "max_open": momentum_max_open,
+            "max_trades_per_day": momentum_max_trades_per_day,
+            "cooldown_min": momentum_cooldown_min,
+            "daily_loss_breaker_pct": momentum_daily_loss_breaker_pct,
+            "unmodelled_gates": ["LLM/AI consult", "regime gates", "rotation logic"],
+        },
     }
     return metrics
 
@@ -594,6 +674,14 @@ def main():
     parser.add_argument("--kelly", dest="kelly_sizing", action="store_true", default=True)
     parser.add_argument("--no-kelly", dest="kelly_sizing", action="store_false")
     parser.add_argument("--atr-multiplier", type=float, default=2.0)
+    parser.add_argument("--entry-fee-pct", type=float, default=0.26)
+    parser.add_argument("--exit-fee-pct", type=float, default=0.26)
+    parser.add_argument("--slippage-pct", type=float, default=0.0)
+    parser.add_argument("--momentum-max-open", type=int, default=MOMENTUM_CONFIG.MAX_OPEN_MOMENTUM)
+    parser.add_argument("--momentum-max-trades-per-day", type=int, default=MOMENTUM_CONFIG.MAX_TRADES_PER_DAY)
+    parser.add_argument("--momentum-cooldown-min", type=int, default=MOMENTUM_CONFIG.COOLDOWN_MIN)
+    parser.add_argument("--momentum-daily-loss-breaker-pct", type=float,
+                        default=MOMENTUM_CONFIG.DAILY_LOSS_BREAKER_PCT)
     parser.add_argument("--csv", help="Export trade log to CSV file")
     args = parser.parse_args()
 
@@ -602,6 +690,10 @@ def main():
     print(f"Backtest: {args.exchange} | {args.strategy} | {args.start or 'all'} -> {args.end or 'now'}")
     print(f"  balance={args.initial_balance}  atr_stops={args.atr_stops}  kelly={args.kelly_sizing}  "
           f"atr_mult={args.atr_multiplier}")
+    print(f"  entry_fee={args.entry_fee_pct}%  exit_fee={args.exit_fee_pct}%  slippage={args.slippage_pct}%")
+    print("  momentum cycles=5m "
+          f"max_open={args.momentum_max_open} daily_cap={args.momentum_max_trades_per_day} "
+          f"cooldown={args.momentum_cooldown_min}m loss_breaker={args.momentum_daily_loss_breaker_pct}%")
 
     db_conn = connect_db()
     metrics = backtest_engine(
@@ -614,6 +706,13 @@ def main():
         use_atr_stops=args.atr_stops,
         use_kelly_sizing=args.kelly_sizing,
         atr_multiplier=args.atr_multiplier,
+        entry_fee_pct=args.entry_fee_pct,
+        exit_fee_pct=args.exit_fee_pct,
+        slippage_pct=args.slippage_pct,
+        momentum_max_open=args.momentum_max_open,
+        momentum_max_trades_per_day=args.momentum_max_trades_per_day,
+        momentum_cooldown_min=args.momentum_cooldown_min,
+        momentum_daily_loss_breaker_pct=args.momentum_daily_loss_breaker_pct,
     )
     db_conn.close()
 
@@ -627,13 +726,14 @@ def main():
     print(f"  Period:          {metrics['start']} -> {metrics['end']}")
     print(f"  Initial balance: {metrics['initial_balance']:,.2f} EUR")
     print(f"  Final equity:    {metrics['final_equity']:,.2f} EUR")
-    print(f"  Total P&L:       {metrics['total_pnl']:+,.2f} EUR ({metrics['total_pnl_pct']:+.2f}%)")
+    print(f"  Gross P&L:       {metrics['gross_total_pnl']:+,.2f} EUR")
+    print(f"  Net P&L:         {metrics['total_pnl']:+,.2f} EUR ({metrics['total_pnl_pct']:+.2f}%)")
     print("-" * 64)
     print(f"  Total trades:    {metrics['total_trades']}")
     print(f"  Wins:            {metrics['win_count']}  ({metrics['win_rate']:.1f}%)")
     print(f"  Losses:          {metrics['loss_count']}")
-    print(f"  Avg win P/L:     {metrics['avg_win_plpc']:+.2f}%")
-    print(f"  Avg loss P/L:    {metrics['avg_loss_plpc']:+.2f}%")
+    print(f"  Avg net win P/L: {metrics['avg_win_plpc']:+.2f}%")
+    print(f"  Avg net loss P/L:{metrics['avg_loss_plpc']:+.2f}%")
     print(f"  Avg hold:        {metrics['avg_holding_hours']:.1f}h")
     print("-" * 64)
     print(f"  Sharpe ratio:    {metrics['sharpe_ratio']:.3f}")
@@ -642,6 +742,7 @@ def main():
     print(f"  Skipped (ATR):   {metrics['skipped_atr']}")
     print(f"  Skipped (vol):   {metrics['skipped_vol']}")
     print(f"  Entry checks:    {metrics['total_checks']}")
+    print("  Replay gates:    LLM/AI consult, regime gates, and rotation logic are not modelled")
     print("=" * 64)
 
     if args.csv:

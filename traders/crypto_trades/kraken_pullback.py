@@ -40,10 +40,13 @@ from db_prices import (
                        load_notify_state, save_notify_state as db_save_notify_state,
                        log_trade as db_log_trade,
                        get_momentum_over, get_range_pct, get_recent_high, get_recent_low,
-                       last_exit_time, trades_today, realized_pnl_today_pct,
+                       market_data_sane,
+                       last_exit_time, trades_today, realized_pnl_today_pct, loss_streak_cooldown,
+                       log_successful_sell_once,
                        coins_held_by_other_bots)
 from traders.common.config import DRY_RUN, ROOT_DIR, ensure_log_dir
 from traders.common.exchange import extract_fill, market_buy, market_sell, spread_ok
+from traders.common.paper_wallet import paper_wallet_balance
 from traders.common.gates import check_gate, load_ai_gates
 from traders.common.pnl_notify import format_sell_pnl_auto
 from traders.common.kelly import kelly_position_size
@@ -77,6 +80,7 @@ EXCHANGE_NAME = PB.EXCHANGE_NAME
 # Paper mode: prefix exchange name so paper trades are recorded separately
 if os.environ.get("AITRADER_MODE") == "paper":
     EXCHANGE_NAME = f"paper-{EXCHANGE_NAME}"
+_PAPER_MODE = os.environ.get("AITRADER_MODE") == "paper"
 PRICE_EXCHANGE = PB.PRICE_EXCHANGE
 from traders.common.universe import get_crypto_pairs
 ROUND_TRIP_FEE_PCT = PB.ROUND_TRIP_FEE_PCT
@@ -141,6 +145,8 @@ def log_trade(db_conn, action, ticker, signal_strength, momentum_pct, entry_pric
 
 def get_entry_price_and_time(symbol, current_price):
     """Recover entry price/time from Kraken fills when local state is missing."""
+    if _PAPER_MODE:
+        return current_price, datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     try:
         trades = exchange.fetch_my_trades(symbol, limit=10)
         buy_trades = [t for t in trades if t['side'] == 'buy']
@@ -215,14 +221,20 @@ def run_cycle():
             for sym in CRYPTO_PAIRS
             if tickers.get(sym) and tickers[sym].get('last') is not None
         }
+        # This is a persisted same-venue observation, not an independent feed.
+        # Check it before inserting this cycle's ticker so it cannot compare to itself.
+        price_sanity = {
+            sym: market_data_sane(db_conn, sym, tickers[sym]["last"], price_exchange=PRICE_EXCHANGE)
+            for sym in CRYPTO_PAIRS if tickers.get(sym) and tickers[sym].get("last") is not None
+        }
         insert_prices(db_conn, price_map)
-        balance = exchange.fetch_balance()
+        balance = paper_wallet_balance(state, tickers) if _PAPER_MODE else exchange.fetch_balance()
 
         # --- Open order reconciliation ---
         # Cancel stale open orders (older than 1h) that might be tying up EUR
         # without a corresponding entry in trading_state.
         try:
-            open_orders = exchange.fetch_open_orders()
+            open_orders = [] if _PAPER_MODE else exchange.fetch_open_orders()
             now_ts = datetime.now(timezone.utc).timestamp()
             for ord in open_orders:
                 if ord.get('status') == 'open':
@@ -296,7 +308,7 @@ def run_cycle():
         sym = pos['symbol']
         new_state[sym] = state.get(sym, {})
         if not new_state[sym].get("entry_price"):
-            ep, et = get_entry_price_and_time(sym, pos['current_price'])
+            ep, et = (pos['current_price'], datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")) if _PAPER_MODE else get_entry_price_and_time(sym, pos['current_price'])
             new_state[sym]["entry_price"] = ep
             new_state[sym]["entry_time"] = et
         new_state[sym].setdefault("peak_plpc", 0.0)
@@ -360,15 +372,10 @@ def run_cycle():
                 should_notify = True
                 msg_lines.append(f"🔄 **Πωλήθηκε {symbol} (Kraken pullback)**: {reason}"
                                  f"{format_sell_pnl_auto(entry_price, current_price, qty)}")
-                log_trade(db_conn, action="SELL", ticker=symbol,
-                          signal_strength="EXIT", momentum_pct=0.0,
-                          entry_price=entry_price, current_price=current_price,
-                          unrealized_plpc=unrealized_plpc / 100.0,
-                          order_id=res.get("id"), quantity=qty,
-                          estimated_value_eur=qty * current_price,
-                          position_size_pct=0.0, portfolio_equity=portfolio_value,
-                          reason=reason, regime=cycle_regime,
-                          strategy_name=EXCHANGE_NAME)
+                if not log_successful_sell_once(
+                        db_conn, EXCHANGE_NAME, ticker=symbol, entry_price=entry_price,
+                        price_hint=current_price, quantity=fqty, order=res, reason=reason):
+                    print("CRITICAL: pullback SELL telemetry failed after exchange execution", file=sys.stderr)
                 new_state.pop(symbol, None)
                 positions = [p for p in positions if p["symbol"] != symbol]
             except Exception as e:
@@ -429,7 +436,7 @@ def run_cycle():
     save_trading_state(db_conn, EXCHANGE_NAME, new_state)
     if managed_any:
         try:
-            balance = exchange.fetch_balance()
+            balance = paper_wallet_balance(new_state, tickers) if _PAPER_MODE else exchange.fetch_balance()
             cash_eur = balance['total'].get('EUR', 0.0)
         except Exception:
             pass
@@ -479,7 +486,10 @@ def run_cycle():
     if _aggressive_mode:
         max_open += 1
     skip, skip_reason = False, ""
-    if not skip and len(positions) >= max_open:
+    cooldown_blocked, cooldown_reason = loss_streak_cooldown(db_conn, EXCHANGE_NAME)
+    if cooldown_blocked:
+        skip, skip_reason = True, cooldown_reason
+    elif len(positions) >= max_open:
         skip, skip_reason = True, f"Max positions reached ({max_open})."
     elif not skip and cash_eur < MIN_TRADE_EUR:
         skip, skip_reason = True, "No buying power."
@@ -514,7 +524,9 @@ def run_cycle():
         allowed, reason = should_enter(db_conn, base_symbol(sym), "pullback")
         if not allowed:
             continue
-        scan_pairs.append(sym)
+        sane, _ = price_sanity.get(sym, (False, "price sanity unavailable"))
+        if sane:
+            scan_pairs.append(sym)
 
     candidates = scan_pullback_candidates(
         db_conn,
@@ -524,7 +536,10 @@ def run_cycle():
         price_exchange=PRICE_EXCHANGE,
         get_range_pct=get_range_pct,
         get_momentum_over=get_momentum_over,
-        get_one_hour_momentum=get_one_hour_momentum,
+        # Use the same timestamp-aware historical contract as the other
+        # pullback features; the legacy one-hour helper lacks target-age checks.
+        get_one_hour_momentum=lambda conn, sym: get_momentum_over(
+            conn, sym, 60, price_exchange=PRICE_EXCHANGE),
         get_recent_high=get_recent_high,
         get_recent_low=get_recent_low,
     )
@@ -628,9 +643,13 @@ def run_cycle():
 
     if USE_KELLY_SIZING:
         stop_price = current_price * (1 - stop_pct / 100)
-        kelly_size = kelly_position_size(db_conn, EXCHANGE_NAME, current_price, stop_price, portfolio_value)
-        if kelly_size > 0:
-            order_size_eur = kelly_size
+        try:
+            order_size_eur = kelly_position_size(
+                db_conn, EXCHANGE_NAME, current_price, stop_price, portfolio_value)
+        except Exception as e:
+            # New entries fail closed: unavailable sizing must never reuse a prior allocation.
+            print(f"Kelly sizing failed; skipping new BUY: {e}", file=sys.stderr)
+            order_size_eur = 0.0
     # Kelly is equity-based (portfolio_value includes coins held by OTHER
     # strategies on the shared wallet) — clamp to actual free EUR so the
     # order can't exceed buying power (Kraken EOrder:Insufficient funds).
