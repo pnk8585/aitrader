@@ -51,8 +51,10 @@ STALE_FACTOR = 3
 MAX_GAP_SECONDS = 7 * 60  # 7 minutes (observed baseline ~5.5min due to shared scheduler)
 
 
-# Jobs that are NOT expected to run every day (exclude from daily checks)
-DAILY_EXCLUDED = {"weekly-rethink"}  # runs Sunday only
+# Jobs that are NOT expected to run every day (exclude from daily checks):
+# both run weekly (Sunday) per app/cron_orchestrator.py, so having no runs
+# in a given 24h window is expected, not an issue.
+DAILY_EXCLUDED = {"weekly-rethink", "llm-review-report"}
 
 # Alpaca defers when US market closed — skip staleness/gap checks for it
 # (the scheduler re-arms it at next market open)
@@ -61,6 +63,40 @@ MARKET_WINDOWED = {"alpaca-stocks"}
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def missing_run_issues(db_jobs: dict[str, dict], per_job: dict[str, dict]) -> list[str]:
+    """Enabled jobs with 0 runs in the window — weekly (DAILY_EXCLUDED) and
+    market-windowed jobs legitimately have no daily runs, so they are skipped."""
+    issues: list[str] = []
+    for job, meta in sorted(db_jobs.items()):
+        if job in DAILY_EXCLUDED or job in MARKET_WINDOWED:
+            continue
+        if job not in per_job and meta["enabled"]:
+            issues.append(f"⚠️ {job}: enabled in DB but 0 cron_runs in 24h")
+    return issues
+
+
+def fix_suggestions(issues: list[str], warns: list[str]) -> list[str]:
+    """Human-readable fix suggestions for the issues/warnings found."""
+    suggestions: list[str] = []
+    joined = " ".join(issues).lower()
+    all_text = joined + " " + " ".join(warns).lower()
+    if "0 runs in 24h" in joined or "enabled in db but 0" in joined:
+        suggestions.append("Check `docker logs aitrader --tail 100` for scheduler errors; verify the job script still exists; `docker exec aitrader python -m app.cron_orchestrator run <job>` to test manually.")
+    if "stale" in joined:
+        suggestions.append("Scheduler may be blocked on a long subprocess — check `/state/logs/scheduler.log` for timeout kills; restart container if stuck.")
+    if "gap" in joined or "lost scan" in joined:
+        suggestions.append("5m jobs share one scheduler thread; if gaps persist, consider splitting scheduler into per-job processes or raising MAX_GAP threshold.")
+    if "price feed" in joined:
+        suggestions.append("Check exchange API keys / network inside container; `docker exec aitrader python -c 'from traders.common.exchange import ...'` to test feed.")
+    # Only the actual section-3 high-reject warning implies prompt tuning —
+    # a job name that merely contains "llm" (e.g. llm-review-report) must not trigger it.
+    if "high reject ratio" in all_text:
+        suggestions.append("Review `app/llm_prompts.py` DEFAULT_PROMPTS — a 90%+ REJECT ratio often means the prompt threshold is too strict; check `llm_review_log` reasons for patterns.")
+    if "approvals but 0 buy" in joined:
+        suggestions.append("Order placement may be failing silently — check trading script logs under `/state/logs/jobs/` and exchange error handling.")
+    return suggestions
 
 
 def main() -> None:
@@ -134,13 +170,9 @@ def main() -> None:
 
         # Jobs enabled in DB but missing from cron_runs entirely (never ran?)
         for job, meta in sorted(db_jobs.items()):
-            if job in DAILY_EXCLUDED:
-                continue
-            if job not in per_job and meta["enabled"]:
-                if job in MARKET_WINDOWED:
-                    lines.append(f"⏸️ {job}: enabled but 0 runs (market-windowed, OK)")
-                else:
-                    issues.append(f"⚠️ {job}: enabled in DB but 0 cron_runs in 24h")
+            if job not in per_job and meta["enabled"] and job in MARKET_WINDOWED:
+                lines.append(f"⏸️ {job}: enabled but 0 runs (market-windowed, OK)")
+        issues.extend(missing_run_issues(db_jobs, per_job))
 
         # ── 2. Missed ticks (5m jobs) ──────────────────────────────────
         lines.append("")
@@ -248,21 +280,7 @@ def main() -> None:
     if issues:
         lines.append("")
         lines.append("## 🔧 Suggested fixes")
-        suggestions: list[str] = []
-        joined = " ".join(issues).lower()
-        if "0 runs in 24h" in joined or "enabled in db but 0" in joined:
-            suggestions.append("Check `docker logs aitrader --tail 100` for scheduler errors; verify the job script still exists; `docker exec aitrader python -m app.cron_orchestrator run <job>` to test manually.")
-        if "stale" in joined:
-            suggestions.append("Scheduler may be blocked on a long subprocess — check `/state/logs/scheduler.log` for timeout kills; restart container if stuck.")
-        if "gap" in joined or "lost scan" in joined:
-            suggestions.append("5m jobs share one scheduler thread; if gaps persist, consider splitting scheduler into per-job processes or raising MAX_GAP threshold.")
-        if "price feed" in joined:
-            suggestions.append("Check exchange API keys / network inside container; `docker exec aitrader python -c 'from traders.common.exchange import ...'` to test feed.")
-        if "llm" in joined or "reject" in joined:
-            suggestions.append("Review `app/llm_prompts.py` DEFAULT_PROMPTS — a 90%+ REJECT ratio often means the prompt threshold is too strict; check `llm_review_log` reasons for patterns.")
-        if "approvals but 0 buy" in joined:
-            suggestions.append("Order placement may be failing silently — check trading script logs under `/state/logs/jobs/` and exchange error handling.")
-        lines.extend(f"- {s}" for s in suggestions)
+        lines.extend(f"- {s}" for s in fix_suggestions(issues, warns))
 
     report = "\n".join(lines)
     print(report)
